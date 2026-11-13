@@ -1,31 +1,33 @@
 <script setup lang="ts">
 import contributions from "./github-contributions.json";
 
-// Snapshot of github.com/JoshuaKGoldberg's contribution calendar, fetched from
-// GitHub's GraphQL API. Each year's levels are one 0-4 digit per day.
-const years = contributions.map(({ firstWeekday, levels, total, year }) => ({
-	days: [
-		...Array.from({ length: firstWeekday }, () => -1),
-		...Array.from(levels, Number),
-	],
-	total: total.toLocaleString("en-US"),
-	year,
-}));
+// Snapshot of github.com/JoshuaKGoldberg's last 522 weeks (ten years) of
+// contributions, from GitHub's GraphQL API. Each day is one character: a 0-4
+// contribution level, or "-" for days that hadn't happened yet. Weeks start on
+// Sunday and wrap into bands so the grid fills a 16:9 slide.
+const bandCount = 6;
+const daysPerWeek = 7;
+const weeksPerBand = contributions.levels.length / daysPerWeek / bandCount;
+
+const bands = Array.from({ length: bandCount }, (_, band) =>
+	Array.from(
+		contributions.levels.slice(
+			band * weeksPerBand * daysPerWeek,
+			(band + 1) * weeksPerBand * daysPerWeek,
+		),
+	),
+);
 </script>
 
 <template>
-	<div class="github-squares">
-		<div v-for="{ days, total, year } in years" :key="year" class="year">
-			<span class="year-label">{{ year }}</span>
-			<div class="days">
-				<span
-					v-for="(level, index) in days"
-					:key="index"
-					class="day"
-					:class="`level-${level}`"
-				/>
-			</div>
-			<span class="year-total">{{ total }}</span>
+	<div aria-hidden="true" class="github-squares">
+		<div v-for="(days, band) in bands" :key="band" class="band">
+			<span
+				v-for="(level, index) in days"
+				:key="index"
+				class="day"
+				:class="`level-${level}`"
+			/>
 		</div>
 	</div>
 </template>
@@ -33,34 +35,19 @@ const years = contributions.map(({ firstWeekday, levels, total, year }) => ({
 <style scoped>
 .github-squares {
 	display: grid;
-	gap: 14px;
+	gap: 3px;
+	grid-template-rows: repeat(6, 1fr);
+	inset: 0;
+	padding: 3px;
+	position: absolute;
 }
 
-.year {
-	align-items: center;
+.band {
 	display: grid;
-	gap: 16px;
-	grid-template-columns: 3rem auto 4rem;
-}
-
-.year-label {
-	color: var(--jg-fg-muted);
-	font-size: 1.25rem;
-	font-weight: var(--jg-weight-medium);
-}
-
-.year-total {
-	color: var(--jg-fg-muted);
-	font-size: 1rem;
-}
-
-.days {
-	display: grid;
-	gap: 2px;
-	grid-auto-columns: 9px;
+	gap: 3px;
+	grid-auto-columns: 1fr;
 	grid-auto-flow: column;
-	grid-template-rows: repeat(7, 9px);
-	width: calc(53 * 11px);
+	grid-template-rows: repeat(7, 1fr);
 }
 
 .day {

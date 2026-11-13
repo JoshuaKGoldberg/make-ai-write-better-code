@@ -175,25 +175,13 @@ https://learningtypescript.com
 -->
 
 ---
-layout: center
+layout: full
 ---
 
 <GitHubSquares />
 
-<p class="muted squares-caption">github.com/JoshuaKGoldberg</p>
-
-<style>
-.squares-caption {
-  font-size: 1rem;
-  margin-top: 1.25rem !important;
-  text-align: center;
-}
-</style>
-
 <!--
-These are my GitHub squares for the last five years. I've been in open source for over a decade now.
-
-For four of those years I was focused on dev tooling: typescript-eslint, create-typescript-app, and friends. Tools to make development better.
+I've been in open source for over a decade now. For four of those years I was focused on dev tooling: typescript-eslint, create-typescript-app, and friends. Tools to make development better.
 -->
 
 ---
