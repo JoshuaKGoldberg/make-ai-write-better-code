@@ -1,0 +1,259 @@
+/* The background lives on the slide canvas, not each slide, so fades never dip. */
+#slide-content {
+	background: var(--jg-bg);
+}
+
+.slidev-layout {
+	color: var(--jg-fg);
+	font-family: var(--jg-font-sans);
+	font-size: var(--jg-size-medium);
+	font-weight: var(--jg-weight-light);
+	height: 100%;
+	line-height: 1.5;
+	padding: 2.75rem 4rem;
+}
+
+.slidev-layout h1,
+.slidev-layout h2,
+.slidev-layout h3 {
+	color: var(--jg-fg-strong);
+	letter-spacing: -0.0075em;
+	line-height: 1.1;
+	margin: 0;
+}
+
+.slidev-layout h1 {
+	font-size: var(--jg-size-title);
+	font-weight: var(--jg-weight-bolder);
+}
+
+.slidev-layout h2 {
+	font-size: var(--jg-size-large);
+	font-weight: var(--jg-weight-bold);
+}
+
+.slidev-layout h3 {
+	font-size: var(--jg-size-subtitle);
+	font-weight: var(--jg-weight-medium);
+}
+
+.slidev-layout h1 + *,
+.slidev-layout h2 + * {
+	margin-top: 1.5rem;
+}
+
+.slidev-layout p {
+	margin: 0.5rem 0;
+}
+
+.slidev-layout strong {
+	color: var(--jg-fg-strong);
+	font-weight: var(--jg-weight-bold);
+}
+
+.slidev-layout a {
+	color: var(--jg-link);
+	text-decoration: none;
+}
+
+.slidev-layout ul,
+.slidev-layout ol {
+	display: grid;
+	gap: 0.6rem;
+	list-style: disc;
+	margin: 0;
+	padding-left: 1.25em;
+}
+
+.slidev-layout ol {
+	list-style: decimal;
+}
+
+.slidev-layout li::marker {
+	color: var(--jg-squiggle);
+}
+
+/* Layouts */
+
+.slidev-layout.default {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+}
+
+.slidev-layout.default h2 {
+	font-size: 2.4rem;
+}
+
+.slidev-layout.default h2 + * {
+	margin-top: 2rem;
+}
+
+.slidev-layout.default > ul {
+	font-size: var(--jg-size-subtitle);
+}
+
+.slidev-layout.center,
+.slidev-layout.cover,
+.slidev-layout.section,
+.slidev-layout.statement {
+	display: grid;
+	place-content: center;
+	text-align: center;
+}
+
+.slidev-layout.cover h1,
+.slidev-layout.statement h1,
+.slidev-layout.section h1 {
+	background: var(--jg-title-gradient);
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+	filter: drop-shadow(0 0.25rem 1.5rem rgb(0 163 255 / 11%));
+	font-size: var(--jg-size-display);
+	letter-spacing: -0.0125em;
+}
+
+.slidev-layout.section h2 {
+	color: var(--jg-fg);
+	font-weight: var(--jg-weight-medium);
+}
+
+.slidev-layout.statement p {
+	font-size: var(--jg-size-large);
+}
+
+/* Small utilities used across slides */
+
+.slidev-layout .eyebrow {
+	background: var(--jg-card-bg);
+	border: 1px solid var(--jg-card-border);
+	border-radius: 999px;
+	color: var(--jg-link);
+	display: inline-block;
+	font-size: 1rem;
+	font-weight: var(--jg-weight-bold);
+	justify-self: center;
+	letter-spacing: 0.1em;
+	margin: 0.75rem auto;
+	padding: 0.3rem 0.95rem;
+	text-transform: uppercase;
+	width: fit-content;
+}
+
+.slidev-layout .muted {
+	color: var(--jg-fg-muted);
+}
+
+.slidev-layout .accent {
+	color: var(--jg-squiggle);
+}
+
+.slidev-layout .big {
+	font-size: var(--jg-size-large);
+	line-height: 1.3;
+}
+
+.slidev-layout .source {
+	color: var(--jg-fg-muted);
+	font-size: var(--jg-size-small);
+}
+
+/* Click reveals: a gentle opacity fade, nothing that moves. */
+.slidev-vclick-target {
+	transition:
+		opacity 105ms ease,
+		transform 105ms cubic-bezier(0.2, 0.8, 0.2, 1),
+		filter 105ms ease;
+}
+
+.slidev-vclick-hidden {
+	filter: blur(1px);
+	opacity: 0 !important;
+	pointer-events: none;
+	transform: translateY(0.1rem);
+}
+
+/* Slide changes: a crossfade with a whisper of blur. */
+.fade-enter-active,
+.fade-leave-active {
+	transition:
+		opacity var(--slidev-transition-duration) ease,
+		filter var(--slidev-transition-duration) ease !important;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+	filter: blur(1.5px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--jg-duration-medium: 0ms;
+		--jg-duration-slowest: 0ms;
+	}
+
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0ms !important;
+		animation-iteration-count: 1 !important;
+	}
+}
+
+/* A stack of headed points, such as on the Precise Prompting slide */
+.slidev-layout .principles {
+	display: grid;
+	gap: 2.25rem;
+}
+
+.slidev-layout .principles h3 {
+	color: var(--jg-squiggle);
+	font-size: var(--jg-size-subtitle);
+	font-weight: var(--jg-weight-bold);
+	margin-bottom: 0.4rem;
+}
+
+.slidev-layout .principles p {
+	margin: 0;
+}
+
+/* Section signposts: center the "N/4" label over the funnel, which sits at 30% of a 54rem-wide figure. */
+.slidev-layout .signpost-eyebrow {
+	display: grid;
+	grid-template-columns: 60% 40%;
+	margin: 0 auto -0.5rem;
+	width: 54rem;
+}
+
+/* Reaction GIFs between beats */
+.slidev-layout .reaction {
+	height: 25rem;
+	object-fit: contain;
+}
+
+/* Glassy cards for grouped points */
+.slidev-layout .principles > div,
+.slidev-layout .context-grid > div,
+.slidev-layout .layers > div,
+.slidev-layout .reasons > div,
+.slidev-layout .spec-checks > div,
+.slidev-layout .recap > div,
+.slidev-layout .links > div,
+.slidev-layout .protip {
+	background: var(--jg-card-bg);
+	border: 1px solid var(--jg-card-border);
+	border-radius: var(--jg-card-radius);
+	box-shadow: var(--jg-glow);
+	padding: 1rem 1.35rem;
+}
+
+.slidev-layout .principles {
+	gap: 1rem;
+}
+
+/* Emoji inside gradient titles keep their own colors. */
+.slidev-layout h1 .emoji {
+	-webkit-text-fill-color: initial;
+	color: var(--jg-fg-strong);
+}

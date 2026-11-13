@@ -1,0 +1,70 @@
+{
+	"name": "make-ai-write-better-code",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Slides for my React Summit US 2026 talk on guardrailing AI coding agents with skills, static analysis, tests, and review.",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/JoshuaKGoldberg/make-ai-write-better-code.git"
+	},
+	"license": "MIT",
+	"author": {
+		"name": "Josh Goldberg",
+		"email": "git@joshuakgoldberg.com"
+	},
+	"type": "module",
+	"scripts": {
+		"build": "slidev build",
+		"dev": "slidev --open false",
+		"export": "slidev export",
+		"format": "prettier .",
+		"lint": "eslint . --max-warnings 0",
+		"lint:knip": "knip",
+		"lint:spelling": "cspell \"**\" \".github/**/*\"",
+		"prepare": "husky",
+		"test": "vitest"
+	},
+	"lint-staged": {
+		"*": "prettier --ignore-unknown --write"
+	},
+	"devDependencies": {
+		"@eslint-community/eslint-plugin-eslint-comments": "4.8.1",
+		"@eslint/js": "10.0.1",
+		"@eslint/markdown": "8.0.3",
+		"@fontsource-variable/league-spartan": "^5.3.0",
+		"@slidev/cli": "53.1.0",
+		"@slidev/parser": "53.1.0",
+		"@slidev/types": "53.1.0",
+		"@types/node": "26.6.2",
+		"@vitest/coverage-v8": "5.1.0",
+		"@vitest/eslint-plugin": "1.6.27",
+		"console-fail-test": "0.10.0",
+		"cspell": "10.4.0",
+		"eslint": "10.14.0",
+		"eslint-plugin-jsdoc": "65.4.0",
+		"eslint-plugin-jsonc": "3.4.1",
+		"eslint-plugin-markdown-links": "0.9.1",
+		"eslint-plugin-n": "18.5.0",
+		"eslint-plugin-package-json": "1.14.0",
+		"eslint-plugin-perfectionist": "5.13.0",
+		"eslint-plugin-regexp": "3.3.1",
+		"eslint-plugin-yml": "3.9.0",
+		"husky": "9.1.7",
+		"knip": "6.44.0",
+		"lint-staged": "17.6.0",
+		"prettier": "^3.9.6",
+		"prettier-plugin-curly": "0.4.1",
+		"prettier-plugin-packagejson": "3.1.0",
+		"prettier-plugin-padding-lines": "0.1.0",
+		"prettier-plugin-sentences-per-line": "0.2.4",
+		"prettier-plugin-sh": "0.20.0",
+		"shiki": "4.6.0",
+		"typescript": "5.9.3",
+		"typescript-eslint": "8.71.0",
+		"vitest": "5.1.0"
+	},
+	"packageManager": "pnpm@11.22.0",
+	"engines": {
+		"node": ">=26.13.1"
+	}
+}

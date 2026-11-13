@@ -1,0 +1,11 @@
+{
+	"configurations": [
+		{
+			"name": "slides",
+			"port": 3030,
+			"runtimeArgs": ["dev"],
+			"runtimeExecutable": "pnpm"
+		}
+	],
+	"version": "0.0.1"
+}

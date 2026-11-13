@@ -1,0 +1,39 @@
+{
+	"dictionaries": ["npm", "node", "typescript"],
+	"ignorePaths": [
+		".all-contributorsrc",
+		"CHANGELOG.md",
+		"coverage",
+		"dist",
+		"node_modules",
+		"pnpm-lock.yaml",
+		"research"
+	],
+	"words": [
+		"agentskills",
+		"anthropics",
+		"apexskier",
+		"Britta",
+		"codemod",
+		"crossfade",
+		"emdashes",
+		"evals",
+		"Fosstodon",
+		"getsentry",
+		"guardrailing",
+		"joshuakgoldberg",
+		"nuqs",
+		"octoguide",
+		"protip",
+		"protips",
+		"rupaul",
+		"shiki",
+		"slidev",
+		"speakr",
+		"spongebob",
+		"squiggleconf",
+		"twoslash",
+		"typescriptlang",
+		"vclick"
+	]
+}

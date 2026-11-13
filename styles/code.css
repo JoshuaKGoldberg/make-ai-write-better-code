@@ -1,0 +1,41 @@
+.slidev-layout pre.shiki,
+.slidev-layout .slidev-code {
+	border: 1px solid var(--jg-card-border);
+	box-shadow:
+		0 1rem 3rem rgb(0 0 0 / 17%),
+		var(--jg-glow);
+	tab-size: 2;
+	text-align: left;
+}
+
+.slidev-layout .slidev-code-wrapper + *,
+.slidev-layout pre.shiki + * {
+	margin-top: 1.25rem;
+}
+
+.slidev-layout :not(pre) > code {
+	color: var(--jg-fg-strong);
+	font-family: var(--jg-font-mono);
+	font-size: 0.85em;
+}
+
+.slidev-layout .twoslash-popup-container {
+	background: var(--jg-bg-top);
+	border-color: var(--jg-hairline);
+}
+
+/* A code block with IDE-style hovers positioned over it (see CodeHover.vue). */
+.slidev-layout .code-hovers {
+	--code-origin-left: calc(1px + 1.25rem);
+	--code-origin-top: calc(4px + 1px + 0.85rem);
+	position: relative;
+}
+
+.slidev-layout .code-hovers .slidev-code-wrapper + *,
+.slidev-layout .code-hovers pre.shiki + * {
+	margin-top: 0;
+}
+
+.slidev-layout .code-hovers.hovers-below {
+	margin-bottom: 4rem;
+}
