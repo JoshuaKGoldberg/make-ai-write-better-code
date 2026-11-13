@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef } from "vue";
+
 withDefaults(
 	defineProps<{
 		/** Zero-based column, in characters, counting each tab as two. */
@@ -14,6 +16,45 @@ withDefaults(
 	}>(),
 	{ shown: true },
 );
+
+// The squiggle is drawn as one wavy path with round caps, sized to the
+// element's layout width, so its ends are rounded instead of cut off.
+const squiggle = {
+	amplitude: 1.2,
+	halfPeriod: 4,
+	height: 6,
+	strokeWidth: 3,
+};
+
+const squiggleElement = useTemplateRef("squiggleElement");
+const squiggleWidth = ref(0);
+
+const observer = new ResizeObserver(() => {
+	squiggleWidth.value = squiggleElement.value?.offsetWidth ?? 0;
+});
+
+onMounted(() => {
+	if (squiggleElement.value) {
+		observer.observe(squiggleElement.value);
+	}
+});
+
+onBeforeUnmount(() => {
+	observer.disconnect();
+});
+
+const squigglePath = computed(() => {
+	const { amplitude, halfPeriod, height, strokeWidth } = squiggle;
+	const segments = Math.max(
+		1,
+		Math.floor((squiggleWidth.value - strokeWidth) / halfPeriod),
+	);
+	const start = (squiggleWidth.value - segments * halfPeriod) / 2;
+	const first = `q ${halfPeriod / 2} ${-amplitude * 2} ${halfPeriod} 0`;
+	const rest = ` t ${halfPeriod} 0`.repeat(segments - 1);
+
+	return `M ${start} ${height / 2} ${first}${rest}`;
+});
 </script>
 
 <template>
@@ -22,7 +63,17 @@ withDefaults(
 		:class="{ shown }"
 		:style="{ '--col': col, '--length': length, '--line': line }"
 	>
-		<div class="squiggle" />
+		<div ref="squiggleElement" class="squiggle">
+			<svg aria-hidden="true" :height="squiggle.height" :width="squiggleWidth">
+				<path
+					:d="squigglePath"
+					fill="none"
+					stroke="#f14c4c"
+					stroke-linecap="round"
+					:stroke-width="squiggle.strokeWidth"
+				/>
+			</svg>
+		</div>
 		<div class="tooltip" role="tooltip">
 			<span class="hover-message">{{ message }}</span>
 			<span class="hover-source">{{ source }}</span>
@@ -64,12 +115,10 @@ withDefaults(
 .shown .tooltip {
 	opacity: 1;
 	transform: none;
-	transition-delay: 300ms;
+	transition-delay: calc(var(--jg-duration-medium) / 2);
 }
 
 .squiggle {
-	background: url("/squiggle-error.svg") repeat-x;
-	background-size: auto 100%;
 	height: 6px;
 	margin-top: -4px;
 	width: calc(var(--length) * 1ch);
