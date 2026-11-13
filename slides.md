@@ -1379,8 +1379,8 @@ layout: center
 ---
 
 <div class="captioned-gif">
-  <p>Needs more lint rules</p>
   <img alt="SNL's More Cowbell sketch: Will Ferrell gyrating with a cowbell behind Blue Oyster Cult" class="reaction" src="/images/needs-more-lint-rules.gif" />
+  <p>Needs more lint rules</p>
 </div>
 
 <!--
@@ -1589,59 +1589,6 @@ So have your agents work with the spec.
 layout: default
 ---
 
-## Writing Tests Used to Be Much More Expensive
-
-<div class="then-now">
-  <div v-click>
-    <h3>Then</h3>
-    <p>Every test was written by hand.</p>
-    <p>Testing was the first thing cut when deadlines hit.</p>
-  </div>
-  <div v-click>
-    <h3>Now</h3>
-    <p>Agents draft tests from a list of titles in minutes.</p>
-    <p>Your time goes into reviewing tests, not typing them.</p>
-  </div>
-</div>
-
-<style>
-.then-now {
-  display: grid;
-  gap: 1.5rem;
-  grid-template-columns: 1fr 1fr;
-  margin-top: 1.5rem;
-}
-
-.then-now > div {
-  background: var(--jg-card-bg);
-  border: 1px solid var(--jg-card-border);
-  border-radius: var(--jg-card-radius);
-  box-shadow: var(--jg-glow);
-  padding: 1rem 1.35rem;
-}
-
-.then-now h3 {
-  color: var(--jg-squiggle);
-  margin-bottom: 0.5rem;
-}
-
-.then-now p {
-  margin: 0 0 0.5rem;
-}
-</style>
-
-<!--
-Here's something that's changed a lot.
-
-[click] Writing tests used to be much more expensive. Every test was written by hand. So when deadlines hit, testing was the first thing teams cut.
-
-[click] Now, an agent can draft a whole describe block of tests from a list of titles in a few minutes. Your time goes into reviewing those tests, which is the part that actually needs a human.
--->
-
----
-layout: default
----
-
 ## Testing Strategies That Are Much Easier Now
 
 <div class="principles">
@@ -1660,7 +1607,7 @@ layout: default
 </div>
 
 <!--
-So a lot of testing strategies that used to feel like luxuries are much more doable now.
+Writing tests used to be expensive. Now agents can draft them in minutes, so a lot of testing strategies that used to feel like luxuries are much more doable.
 
 [click] Test-driven development: write the tests first, then the code that passes them. That's the "use the spec" idea from a minute ago.
 
