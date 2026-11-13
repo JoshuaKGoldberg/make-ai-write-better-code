@@ -239,8 +239,11 @@ export async function createLayout({
 		const document = buildDocument(1, "", { globalBottom });
 		// Everything else in the layer (like a progress bar) varies by slide and becomes shapes.
 		const keep = [...document.querySelectorAll(BACKGROUND_ONLY)];
-		for (const el of document.querySelectorAll(".slidev-slide-content > *")) {
-			if (!keep.some((kept) => el === kept || el.contains(kept))) {
+		for (const el of document.querySelectorAll(".slidev-slide-content *")) {
+			const related = keep.some(
+				(kept) => el === kept || el.contains(kept) || kept.contains(el),
+			);
+			if (!related) {
 				appendStyle(el, "visibility:hidden");
 			}
 		}

@@ -122,6 +122,8 @@ export interface PolygonItem extends ItemBase {
 }
 
 export interface RasterItem extends ItemBase {
+	/** The rendered element's text, for screen readers; empty when it's decoration. */
+	alt: string;
 	box: Box;
 	/** The rendered PNG, set once the raster is rendered. */
 	file?: string;
@@ -155,6 +157,7 @@ export interface Run {
 	/** 0-100 */
 	transparency: number;
 	underline: boolean;
+	/** Shown capitalized (CSS text-transform: uppercase); the text keeps its source casing. */
 	upper: boolean;
 }
 
@@ -200,10 +203,10 @@ export interface TextStyle {
 	nowrap: boolean;
 
 	/**
-	 * Where the browser's longest wrapped line ends, in slide px, for wrapped text. PowerPoint
-	 * measures text a little differently, so wrapping there keeps the browser's line breaks.
+	 * For wrapped text, how wide (px) its longest line is in the browser. PowerPoint measures
+	 * text a little differently, so wrapping at this width keeps the browser's line breaks.
 	 */
-	wrapRight?: number;
+	wrapWidth?: number;
 }
 
 /** The slide canvas Slidev renders at, in CSS px. */

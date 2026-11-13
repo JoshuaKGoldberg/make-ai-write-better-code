@@ -134,6 +134,8 @@ export function patchSlide(
 		out = out.slice(0, start) + shape + out.slice(end);
 	}
 
+	out = out.replaceAll(`lang="${UPPERCASE_LANG}"`, 'lang="en-US" cap="all"');
+
 	// Browsers kern text by default; PowerPoint only kerns runs that ask for it. pptxgenjs
 	// also turns kerning off for letter-spaced runs, where browsers apply both.
 	out = out
@@ -144,6 +146,9 @@ export function patchSlide(
 		.replaceAll(' kern="0"', ' kern="100"');
 	return gradients.apply(markDecorative(singleParagraphProperties(out)));
 }
+
+/** A stand-in language that marks a run to be shown capitalized (`cap="all"`). */
+export const UPPERCASE_LANG = "x-pptx-uppercase";
 
 /** Alt text that marks a picture as decorative, so screen readers skip it. */
 export const DECORATIVE = "pptx:decorative";

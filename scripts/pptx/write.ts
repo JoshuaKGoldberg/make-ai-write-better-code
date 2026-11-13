@@ -27,6 +27,7 @@ import {
 	GradientRegistry,
 	patchSlide,
 	tidyPackage,
+	UPPERCASE_LANG,
 } from "./ooxml.ts";
 import { truncate } from "./text.ts";
 
@@ -79,6 +80,7 @@ const LAYOUT_WIDTH_INCHES = 13.333;
 const EMU_PER_INCH = 914400;
 const inches = (px: number) => (px * LAYOUT_WIDTH_INCHES) / SLIDE.width;
 const points = (px: number) => inches(px) * 72;
+const pixels = (pt: number) => (pt / 72 / LAYOUT_WIDTH_INCHES) * SLIDE.width;
 /** A rotation in [0, 360), as PowerPoint writes them. */
 const degrees = (rotation: number) => ((rotation % 360) + 360) % 360;
 
@@ -90,8 +92,8 @@ const degrees = (rotation: number) => ((rotation % 360) + 360) % 360;
 const baselineRatio = (font = "") =>
 	font.startsWith("Impact") ? 0.782 : font.startsWith("Menlo") ? 0.745 : 0.753;
 
-/** Bulleted paragraphs render about 0.07 lines lower in PowerPoint (measured). */
-const LIST_LIFT = 0.07;
+/** Bulleted paragraphs render about 0.035 lines lower in PowerPoint (measured). */
+const LIST_LIFT = 0.035;
 
 /** Browsers draw a disc marker about 0.75em left of where each item's text starts. */
 const BULLET_GAP = 0.75;
@@ -362,6 +364,8 @@ function createItemWriter({
 					// Spacer runs stand in for padding, so they don't link anywhere.
 					hyperlink: run.href && !run.pad ? { url: run.href } : undefined,
 					italic: run.italic,
+					// pptxgenjs can't write cap="all", so mark the run for ooxml.ts to.
+					lang: run.upper ? UPPERCASE_LANG : undefined,
 					lineSpacingMultiple: multiple,
 					paraSpaceAfter: paragraph.spaceAfter
 						? Math.round(points(paragraph.spaceAfter) * 10) / 10
@@ -429,18 +433,23 @@ function createItemWriter({
 		}
 
 		if (item.kind === "list") {
+			// PowerPoint renders paragraph spacing in whole points, so round each gap to whole
+			// points while keeping the running total exact: errors never add up down a list.
+			let exact = 0;
+			let written = 0;
 			paragraphs = item.paragraphs.map((paragraph, i) => {
 				const next = item.paragraphs.at(i + 1);
 				const last = paragraph.baselines.at(-1);
-				return next?.baselines.length && last !== undefined
-					? {
-							...paragraph,
-							spaceAfter: Math.max(
-								0,
-								next.baselines[0] - (last + style.lineHeight),
-							),
-						}
-					: paragraph;
+				if (!next?.baselines.length || last === undefined) {
+					return paragraph;
+				}
+
+				exact += points(
+					Math.max(0, next.baselines[0] - (last + style.lineHeight)),
+				);
+				const spaceAfter = Math.round(exact) - written;
+				written += spaceAfter;
+				return { ...paragraph, spaceAfter: pixels(spaceAfter) };
 			});
 		}
 
@@ -492,13 +501,13 @@ function createItemWriter({
 		const slack =
 			style.nowrap || rotation
 				? 0
-				: style.wrapRight === undefined
+				: style.wrapWidth === undefined
 					? Math.max(10, box.w * 0.06)
 					: Math.max(2, box.w * 0.01);
 		// Wrapped left-aligned text wraps where the browser's longest line ended.
 		const width =
-			style.wrapRight !== undefined && style.align === "left" && !rotation
-				? Math.min(box.w, style.wrapRight - box.x)
+			style.wrapWidth !== undefined && style.align === "left" && !rotation
+				? Math.min(box.w, style.wrapWidth)
 				: box.w;
 		// One-line text gets room to grow, but only as far as the slide's edges allow, on the
 		// side(s) its alignment grows it toward.
@@ -609,7 +618,7 @@ function createItemWriter({
 					slide.addImage({
 						...position(item.box),
 						// pptxgenjs falls back to the file path for empty alt text; mark it decorative instead.
-						altText: (item.kind === "image" && item.alt) || DECORATIVE,
+						altText: item.alt || DECORATIVE,
 						objectName: name,
 						path:
 							item.kind === "image"
@@ -708,6 +717,9 @@ function mergeRuns(runs: Run[], wrap: boolean) {
 	return merged;
 }
 
+const visibleCount = (list: ListItem) =>
+	list.paragraphs.filter((paragraph) => paragraph.visible).length;
+
 /** A fingerprint of an item's appearance, ignoring identity, naming, position, and list paragraph visibility. */
 function appearanceOf(item: Item) {
 	const ignored = new Set([
@@ -718,12 +730,24 @@ function appearanceOf(item: Item) {
 		"order",
 		"visible",
 	]);
-	return JSON.stringify(item, (name, value: unknown) =>
-		ignored.has(name)
-			? undefined
-			: typeof value === "number"
-				? Math.round(value * 10) / 10
-				: value,
+	// A polygon's points count by their shape, relative to its first point.
+	const origin = item.kind === "polygon" ? item.points[0] : undefined;
+	return JSON.stringify(
+		item.kind === "polygon" && origin
+			? {
+					...item,
+					points: item.points.map((point) => ({
+						x: point.x - origin.x,
+						y: point.y - origin.y,
+					})),
+				}
+			: item,
+		(name, value: unknown) =>
+			ignored.has(name)
+				? undefined
+				: typeof value === "number"
+					? Math.round(value * 10) / 10
+					: value,
 	);
 }
 
@@ -767,6 +791,16 @@ function timeline(slide: Slide): Entry[] {
 			}
 
 			entry.states.add(index);
+			// Lists take their geometry from the state showing the most items: hidden items
+			// can sit out of place (v-click's hidden transform, for one).
+			if (
+				item.kind === "list" &&
+				entry.item.kind === "list" &&
+				visibleCount(item) > visibleCount(entry.item)
+			) {
+				entry.item = item;
+			}
+
 			if (item.kind === "list") {
 				const sets = (entry.paragraphStates ??= item.paragraphs.map(
 					() => new Set<number>(),
@@ -785,17 +819,19 @@ function timeline(slide: Slide): Entry[] {
 /** A readable, unique name for PowerPoint's Selection Pane. */
 function uniqueName(item: Item, used: Set<string>) {
 	const text =
-		"paragraphs" in item
-			? item.paragraphs
-					.map((p) => p.runs.map((run) => run.text).join(""))
-					.join(" ")
-			: (item.label ?? "");
+		item.kind === "image"
+			? item.alt || (item.label ?? "")
+			: "paragraphs" in item
+				? item.paragraphs
+						.map((p) => p.runs.map((run) => run.text).join(""))
+						.join(" ")
+				: (item.label ?? "");
 	const label = (
 		{
 			box: "Box",
 			code: "Code",
 			ellipse: "Dot",
-			image: `Image${item.kind === "image" && item.alt ? `: ${item.alt}` : ""}`,
+			image: "Image",
 			list: "List",
 			polygon: "Shape",
 			raster: "Rendered",
@@ -806,7 +842,7 @@ function uniqueName(item: Item, used: Set<string>) {
 		.replace(/\p{Cf}/gu, "")
 		.replace(/\s+/g, " ")
 		.trim();
-	const base = truncate(full, 48);
+	const base = truncate(full, 48).trimEnd();
 	let name = base;
 	for (let n = 2; used.has(name); n++) {
 		name = `${base} (${String(n)})`;

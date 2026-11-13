@@ -158,9 +158,15 @@ export function extractState(
 		[
 			truncate(textOf(el), 40),
 			el.getAttribute("aria-label")?.trim(),
-			el.getAttribute("class")?.trim().split(/\s+/)[0],
+			el.closest("[class]")?.getAttribute("class")?.trim().split(/\s+/)[0],
 			el.tagName.toLowerCase(),
 		].find(Boolean);
+	// An SVG shape's label: what its drawing is labeled as, else its own description.
+	const shapeLabelOf = (shape: Element) =>
+		truncate(
+			shape.closest("[aria-label]")?.getAttribute("aria-label")?.trim() ?? "",
+			40,
+		) || labelOf(shape);
 	// Text with spaces between blocks, so "<p>a</p><p>b</p>" reads "a b".
 	const textOf = (el: Element): string => {
 		const visit = (parent: Element): string =>
@@ -375,7 +381,8 @@ export function extractState(
 		let right = -Infinity;
 		let wrapped = false;
 		// takumi drops whatever the browser broke a line at, so read it from the DOM text.
-		const source = sourceTextOf(el ?? byId.get(entry.parent)).toLowerCase();
+		const sourceText = sourceTextOf(el ?? byId.get(entry.parent));
+		const source = sourceText.toLowerCase();
 		let cursor = 0;
 		let newlineRun = false;
 		for (const run of entry.runs) {
@@ -416,9 +423,15 @@ export function extractState(
 				}
 			}
 
+			// Uppercase text keeps its source casing (takumi reports it transformed), and
+			// PowerPoint capitalizes it (cap="all").
 			let text = run.text.replace(/\s+/g, " ");
-			if (style.upper) {
-				text = text.toUpperCase();
+			const core = text.trim();
+			if (style.upper && found >= 0 && core.length === needle.length) {
+				text = text.replace(
+					core,
+					sourceText.slice(found, found + needle.length),
+				);
 			}
 
 			// Gaps between runs on a line (padding, margins, borders of inline elements) become
@@ -440,7 +453,12 @@ export function extractState(
 			if (newLine) {
 				// A forced break (<br>, or a newline in preserved white space) stays a line
 				// break; a wrap keeps the space it wrapped at, if any, so PowerPoint can rewrap.
-				const forced = newlineRun || (between?.includes("\n") ?? false);
+				const newlines = between ? between.split("\n").length - 1 : 0;
+				const breaks = Math.max(newlineRun ? 1 : 0, newlines);
+				// PowerPoint can't break at a zero-width space (and the text drops them), so a
+				// wrap there is kept as a line break.
+				const atZeroWidth = (paragraph.at(-1)?.text ?? "").endsWith("​");
+				const forced = breaks > 0 || atZeroWidth;
 				const spaced =
 					between === undefined
 						? !/[-\u200B]$/.test(paragraph.at(-1)?.text.trimEnd() ?? "")
@@ -449,6 +467,16 @@ export function extractState(
 				const last = paragraph.at(-1);
 				if (last && !last.pad) {
 					last.text = last.text.trimEnd() + (spaced && !forced ? " " : "");
+				}
+
+				// Each break past the first (as in "<br><br>") holds an empty line.
+				for (let extra = 1; extra < breaks; extra++) {
+					paragraph.push({
+						...style,
+						lineBreak: true,
+						text: " ",
+						transparency: 100,
+					});
 				}
 
 				paragraph.push({
@@ -475,6 +503,9 @@ export function extractState(
 
 			paragraph[0].softBreak = undefined;
 			paragraph[0].lineBreak = undefined;
+			for (const run of paragraph) {
+				run.text = run.text.replace(/\u200B/g, "");
+			}
 		}
 
 		return {
@@ -593,7 +624,7 @@ export function extractState(
 				align: alignOf(el),
 				lineHeight: lineHeightOf(el) * scale,
 				nowrap: nowrapOf(el) || Boolean(rotation),
-				wrapRight,
+				wrapWidth: wrapRight === undefined ? undefined : wrapRight - box.x,
 			},
 		});
 	};
@@ -693,8 +724,9 @@ export function extractState(
 		});
 		const first = lis.at(0);
 		const marker = first ? markers.get(first) : undefined;
+		const box = contentBox(list, listBox, scale);
 		push({
-			box: contentBox(list, listBox, scale),
+			box,
 			bulletColor: marker ? parseColor(marker.color)?.hex : undefined,
 			indent: px(list, "padding-left") * scale,
 			key: `${pathOf(list)}#list`,
@@ -705,8 +737,8 @@ export function extractState(
 				align: alignOf(first ?? list),
 				lineHeight: lineHeightOf(first ?? list) * scale,
 				nowrap: false,
-				// Where the longest line of any item ends, wrapped or not, once any item wrapped.
-				wrapRight: wraps.includes(true) ? right : undefined,
+				// The longest line of any item, wrapped or not, once any item wrapped.
+				wrapWidth: wraps.includes(true) ? right - box.x : undefined,
 			},
 		});
 	};
@@ -745,6 +777,7 @@ export function extractState(
 				: radius >= Math.min(box.w, box.h) / 2 - 1,
 			key: `${pathOf(img)}#img:${src}`,
 			kind: "image",
+			label: decodeURIComponent(path.basename(src)),
 			radius,
 			src,
 			transparency: Math.round((1 - opacity) * 100),
@@ -802,14 +835,17 @@ export function extractState(
 				const style = styleOf(node);
 				const fontSize = parseFloat(style["font-size"]) || 16;
 				return Math.max(
-					...["box-shadow", "filter", "text-shadow"].map((property) =>
-						[
-							...(style[property] ?? "").matchAll(/-?[\d.]+(?:px|r?em)\b/g),
-						].reduce(
-							(sum, [length]) =>
-								sum + Math.abs(toPx(length, fontSize, rootFontSize)),
-							0,
-						),
+					...["box-shadow", "filter", "text-shadow"].map(
+						(property) =>
+							[
+								...(style[property] ?? "").matchAll(/-?[\d.]+(?:px|r?em)\b/g),
+							].reduce(
+								(sum, [length]) =>
+									sum + Math.abs(toPx(length, fontSize, rootFontSize)),
+								0,
+							) *
+							// A filter's blur length is a standard deviation; it shows to about 3x.
+							(property === "filter" ? 3 : 1),
 					),
 				);
 			}),
@@ -825,6 +861,7 @@ export function extractState(
 
 		rasters.push({ box, id, selector: `[${ID}="${idOf(el)}"]` });
 		push({
+			alt: textOf(el),
 			box,
 			key: `${pathOf(el)}#raster`,
 			kind: "raster",
@@ -944,6 +981,7 @@ export function extractState(
 					},
 					key: `${key}#polygon`,
 					kind: "polygon",
+					label: shapeLabelOf(shape),
 					points,
 				});
 			} else if (tag === "circle") {
@@ -961,6 +999,7 @@ export function extractState(
 					},
 					key: `${key}#circle`,
 					kind: "ellipse",
+					label: shapeLabelOf(shape),
 				});
 			} else if (tag === "text") {
 				const s = styleOf(shape);
@@ -1110,10 +1149,15 @@ export function extractState(
 			if (shape.fill || shape.border) {
 				push({
 					...shape,
+					border: shape.border && {
+						...shape.border,
+						width: shape.border.width * scale,
+					},
 					box: b,
 					key: `${pathOf(el)}#box`,
 					kind: "box",
 					label,
+					radius: shape.radius * scale,
 					rotation,
 				});
 			}
