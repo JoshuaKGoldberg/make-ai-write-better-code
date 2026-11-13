@@ -196,6 +196,24 @@ I really don't love that we call this "AI".
 [click] These tools are guessing. Often very good guessing, but guessing. Cory Doctorow called an LLM "the word-guessing machine" when he was on Software Engineering Daily with me.
 
 So everything in this talk is about one question: how do you check the guesses?
+
+Better dev tooling has always made me a better developer. It turns out it also makes AI-written code better.
+-->
+
+---
+layout: default
+---
+
+## A Note on Ecosystems
+
+<p class="big">This talk's examples are for TypeScript and React.</p>
+
+<p class="big" v-click>Its ideas apply to all ecosystems.</p>
+
+<!--
+A quick note before we dive in: this talk's examples are for TypeScript and React. This is React Summit, after all.
+
+[click] But the ideas apply to all ecosystems. Every language has type checkers, linters, tests, and reviewers, and every agent works better with them.
 -->
 
 ---
@@ -211,16 +229,14 @@ layout: center
   top="Many bugs"
 />
 
+<p class="muted funnel-caption">(not to scale)</p>
+
 <!--
 I first drew this when I was convincing a team to adopt TypeScript, back in 2019.
 
-Think of all the possible strategies you can take to reduce bugs in your end product as parts of a long process that starts from your application existing in the first place, stretches through the development process, and ends with it in your users' hands.
+Think of all the possible strategies you can take to reduce bugs in your end product as parts of a long process that starts from your application existing in the first place, stretches through the development process, and ends with it in your users' hands. In product terms, we'd call this an acquisition funnel. I like to call it the "bug acquisition funnel".
 
-The funnel starts by taking all bugs that could be introduced to your code and hopefully reduces them by a fair amount using developer foresight and good application architectures: putting prior thought into structuring your application is the first step to ensuring it works well.
-
-Static analysis comes into play at development time by helping you catch inconsistencies and potential bugs in real time as you type or build your software. This is different from dynamic analysis, such as unit or end-to-end tests, that must run on at least partially-working versions of your code.
-
-For team projects, one hopes you can have peer review to get more eyes on your code and catch bugs or other faults before merging. Once you do release, you might have some forms of automatic telemetry that report crashes or other unexpected behavior in the wild. If all else fails, I would certainly hope you have some line of communication with consumers of your application so you can receive user feedback.
+Each stage catches some of the bugs the stages before it missed. And it's not drawn to scale.
 
 It is incredibly rare for a software application to completely catch and fix all its bugs, so this funnel assumes some are left over even with all the steps.
 -->
@@ -251,22 +267,6 @@ Are we ready?
 -->
 
 ---
-layout: default
----
-
-## A Note on Ecosystems
-
-<p class="big">This talk's examples are for TypeScript and React.</p>
-
-<p class="big" v-click>Its ideas apply to all ecosystems.</p>
-
-<!--
-A quick note before we dive in: this talk's examples are for TypeScript and React. This is React Summit, after all.
-
-[click] But the ideas apply to all ecosystems. Every language has type checkers, linters, tests, and reviewers, and every agent works better with them.
--->
-
----
 layout: center
 ---
 
@@ -280,6 +280,8 @@ layout: center
 
 <!--
 I'm ready!
+
+“I’m Ready”: https://giphy.com/gifs/spongebob-season-4-spongebob-squarepants-l1Aswx03WbLDf9kYw
 -->
 
 ---
@@ -307,6 +309,8 @@ layout: section
 <div class="eyebrow">1/4 Design Thought</div>
 
 # Knowing Your S#!7
+
+<p class="muted">Decide what it should be before anything writes it</p>
 
 <div class="eyebrow">1/2</div>
 
@@ -453,7 +457,7 @@ A vague prompt leaves every decision to the model: where state lives, which comp
 
 [click] A precise prompt makes those decisions up front. It names the existing hook and the design system component, so you don't get a seventh copy of either. It says what the tests should cover. And it scopes the change.
 
-That's most of a spec, in six lines.
+That's most of a spec, in six lines. When it comes to LLMs, you get out what you put in.
 -->
 
 ---
@@ -506,6 +510,8 @@ layout: section
 <div class="eyebrow">1/4 Design Thought</div>
 
 # Skills
+
+<p class="muted">Is this another buzzword we have to memorize now?</p>
 
 <div class="eyebrow">2/2</div>
 
@@ -823,6 +829,8 @@ function formatTalk(talk) {
 "strict": true
 ```
 
+<p class="muted">(the default as of TypeScript 6.0)</p>
+
 </div>
 
 <!--
@@ -830,7 +838,7 @@ noImplicitAny means every value needs a type TypeScript knows. Here, talk has no
 
 [click] Without noImplicitAny, talk is silently any. Anything goes, including the typo in "speakr". It'll print "undefined" at runtime and nothing will tell you.
 
-[click] Both of these come with "strict": true in your tsconfig. If you only change one setting after this talk, make it that one. The stricter your types, the more mistakes get caught before anyone reads the code.
+[click] Both of these come with "strict": true in your tsconfig. Strict mode, best mode. As of TypeScript 6.0 it's on by default, but plenty of existing projects, and plenty of agent-scaffolded ones, still turn it off. Make sure yours has it. The stricter your types, the more mistakes get caught before anyone reads the code.
 -->
 
 ---
@@ -862,7 +870,9 @@ layout: default
 <!--
 A linter is a tool that runs a set of checks on your source code.
 
-[click] Each of those checks is called a "rule". Each rule may report on code it doesn't like, and each complaint may come with a suggested fix.
+[click] Each of those checks is called a "rule". Each rule may report on code it doesn't like, and each complaint may come with an optional autofix. That's free fixes for agents and humans alike.
+
+Lint rules exist for most of that incomplete list from earlier, too: eslint-plugin-jsx-a11y for many of those blatant accessibility issues, for example. Automated checks only find some accessibility issues, though. People find the rest.
 -->
 
 ---
@@ -918,6 +928,37 @@ Here's an example of code that type checks, but is probably wrong. It works. It'
 The React Compiler's rules are now in eslint-plugin-react-hooks's recommended config. `set-state-in-effect` flags exactly this: calling setState synchronously within an effect can trigger cascading renders.
 
 [click] And the fix is less code. So smart, look at you.
+-->
+
+---
+layout: default
+---
+
+## Typed Linting
+
+<p class="big">ESLint sees the raw syntax of your code.</p>
+
+<p class="big" v-click>TypeScript understands what that code means.</p>
+
+<div v-click>
+
+```ts
+export default defineConfig(
+	tseslint.configs.recommendedTypeChecked,
+	{ languageOptions: { parserOptions: { projectService: true } } },
+);
+```
+
+</div>
+
+<!--
+That rule only needed syntax. But a lot of the most useful rules need more.
+
+ESLint on its own sees the raw syntax of your code.
+
+[click] TypeScript understands what that code means: what every value's type is.
+
+[click] Typed linting gives lint rules access to TypeScript's type information. In typescript-eslint, that's the type-checked configs plus the project service. It's slower than syntax-only linting, and it catches a whole category of bugs nothing else does.
 -->
 
 ---
@@ -1043,13 +1084,13 @@ function MyButton({ onClick }: { onClick: () => void }) {
 ```
 ````
 
-<CodeHover :col="4" :length="15" :line="5" :shown="$clicks === 0" message="Unexpected `await` of a non-Promise (non-&quot;Thenable&quot;) value" source="eslint(@typescript-eslint/await-thenable)" />
+<CodeHover :col="4" :length="15" :line="5" :shown="$clicks === 0" message="Unexpected `await` of a non-Promise (non-&quot;Thenable&quot;) value." source="eslint(@typescript-eslint/await-thenable)" />
 
-<CodeHover :col="39" :length="19" :line="10" :shown="$clicks === 1" message="Promise-returning function provided to attribute where a void return was expected" source="eslint(@typescript-eslint/no-misused-promises)" />
+<CodeHover :col="39" :length="19" :line="10" :shown="$clicks === 1" message="Promise-returning function provided to attribute where a void return was expected." source="eslint(@typescript-eslint/no-misused-promises)" />
 
-<CodeHover :col="2" :length="34" :line="3" :shown="$clicks === 3" message="Async function 'onClickAndDisable' has no 'await' expression" source="eslint(@typescript-eslint/require-await)" />
+<CodeHover :col="2" :length="34" :line="3" :shown="$clicks === 3" message="Async function 'onClickAndDisable' has no 'await' expression." source="eslint(@typescript-eslint/require-await)" />
 
-<CodeHover :col="18" :length="10" :line="1" :shown="$clicks === 5" message="'setRunning' is assigned a value but never used" source="eslint(@typescript-eslint/no-unused-vars)" />
+<CodeHover :col="18" :length="10" :line="1" :shown="$clicks === 5" message="'setRunning' is assigned a value but never used." source="eslint(@typescript-eslint/no-unused-vars)" />
 
 </div>
 
@@ -1069,7 +1110,9 @@ function MyButton({ onClick }: { onClick: () => void }) {
 </style>
 
 <!--
-Here's my favorite example. I've been giving it for years, and it's even more relevant now.
+Let's play one of my favorite programming games: is this safe? (Pause for the room.)
+
+I've been giving this example for years, and it's even more relevant now.
 
 This button component receives an onClick prop. It sets up a running state. When clicked, it sets running to true, awaits the onClick, then sets running to false. The button is disabled while running.
 
@@ -1091,7 +1134,7 @@ Generated code loves this pattern. But typed linting knows onClick is typed as r
 
 [click] Remove that too. And look at what's left.
 
-So smart, look at you. Every one of those steps came from a lint rule or a type.
+So smart, look at you. Lint rules flagged four of those steps, and each fix exposed the next simplification.
 -->
 
 ---
@@ -1255,6 +1298,21 @@ So tell them. Mention linting, type checking, and testing in your AGENTS.md. Inc
 -->
 
 ---
+layout: center
+---
+
+<div class="captioned-gif">
+  <img alt="SNL's More Cowbell sketch: Will Ferrell gyrating with a cowbell behind Blue Oyster Cult" class="reaction" src="/images/needs-more-lint-rules.gif" />
+  <p>NEEDS MORE LINT RULES</p>
+</div>
+
+<!--
+Much of my career, this has been my reaction to lint rules.
+
+“More Cowbell”: Saturday Night Live
+-->
+
+---
 layout: default
 ---
 
@@ -1275,7 +1333,7 @@ Include RuleTester tests with valid and invalid cases.
 </div>
 
 <!--
-Left the same review comment twice? Make it a lint rule.
+Left the same review comment twice? Make it a lint rule. Shoutout to Tucker Chapin, whose lightning talk this afternoon made the same point.
 
 [click] And you don't have to write it yourself. Agents are great at writing lint rules. A rule is small, well-specified, there are thousands of examples out there, and every rule comes with tests that check it.
 
@@ -1290,13 +1348,13 @@ layout: default
 
 ```ts
 export default {
-	meta: { messages: { manual: "Use the design system's <Table> instead." } },
+	meta: {
+		messages: { preferTable: "Use the design system's <Table> instead." },
+	},
 	create(context) {
 		return {
-			JSXOpeningElement(node) {
-				if (node.name.type === "JSXIdentifier" && node.name.name === "table") {
-					context.report({ messageId: "manual", node });
-				}
+			"JSXOpeningElement[name.name='table']"(node) {
+				context.report({ messageId: "preferTable", node });
 			},
 		};
 	},
@@ -1305,6 +1363,8 @@ export default {
 
 <!--
 Here's roughly what you get back. Any raw table element in JSX gets flagged, with a message pointing to the right component.
+
+A good lint message is knowledge sharing: it teaches whoever reads it, human or agent, what to do instead.
 
 Remember "copies of the design system"? This is how you stop them for good. If you have existing violations, ESLint's bulk suppressions let you turn the rule on right away and fix those over time.
 -->
@@ -1385,10 +1445,12 @@ layout: section
 
 # Unit Testing
 
+<p class="muted">Testing! Everybody loves it!</p>
+
 <div class="eyebrow">1/2</div>
 
 <!--
-First, unit testing.
+First, unit testing. Everybody loves it!
 -->
 
 ---
@@ -1651,6 +1713,8 @@ layout: section
 
 # Integration/End-To-End Testing
 
+<p class="muted">Look at the actual page</p>
+
 <div class="eyebrow">2/2</div>
 
 <!--
@@ -1697,6 +1761,8 @@ layout: statement
 
 <!--
 Here's something you'll hear from agents a lot, about frontend changes: "All checks pass."
+
+Raise your hand if an agent has told you all checks pass, and the page was broken. (Pause.) This was a test. Everybody should be raising their hand.
 -->
 
 ---
@@ -1706,7 +1772,7 @@ layout: center
 <img alt="Tim Robinson sarcastically asking: YOU SURE ABOUT THAT?" class="reaction" src="/images/tim-robinson-you-sure.gif" />
 
 <!--
-It didn't ease.
+You sure about that?
 
 “You sure about that?”: Tim Robinson, I Think You Should Leave
 -->
@@ -1763,6 +1829,8 @@ layout: section
 <div class="eyebrow">4/4 Peer Review</div>
 
 # Humans
+
+<p class="muted">That means you</p>
 
 <div class="eyebrow">1/2</div>
 
@@ -1835,6 +1903,8 @@ layout: section
 <div class="eyebrow">4/4 Peer Review</div>
 
 # Skills
+
+<p class="muted">Again!</p>
 
 <div class="eyebrow">2/2</div>
 
@@ -2119,6 +2189,8 @@ layout: section
 
 # Closing Thoughts
 
+<p class="muted">Let's recap!</p>
+
 <!--
 Let's close out.
 
@@ -2139,16 +2211,18 @@ layout: center
 />
 
 <!--
-None of this gets you to zero bugs. Nothing does.
+None of this gets you to zero bugs. Nothing does. The best you can do is get asymptotically close.
 
-But every stage of the funnel catches bugs the others miss. And we've been building these stages for years, long before agents showed up.
+But every stage of the funnel catches bugs the others miss. It would be foolish to write off any one stage for not catching every bug on its own. And how much of each you need depends on what you're building: a weekend side project is not the Mars rover.
+
+We've been building these stages for years, long before agents showed up. They're how you check the guesses.
 -->
 
 ---
 layout: default
 ---
 
-## Protips
+## Protips <span class="emoji">📸</span>
 
 <div class="protips">
   <p>Prompt precisely: plan, context, review.</p>
@@ -2192,8 +2266,16 @@ layout: statement
 
 <p>Web dev tooling is always in flux because we're always developing newer and better techniques.</p>
 
+<p v-click>The faster a platform is growing, the more painful it is to use.</p>
+
+<p v-click>The more painful a platform's growth, the faster it is improving. <span class="muted">(ish)</span></p>
+
 <!--
-Web dev tooling is always in flux because we're always developing newer and better techniques. Agents are one more of those. The guardrails we already had are what make them work well.
+Web dev tooling is always in flux because we're always developing newer and better techniques. Agents are one more of those.
+
+[click] And yes, the faster a platform is growing, the more painful it is to use. Agents are painful right now.
+
+[click] But flip it around: the more painful a platform's growth, the faster it's improving. Ish. The guardrails we already had are what make agents work well, and they're getting better too.
 -->
 
 ---
@@ -2270,16 +2352,23 @@ layout: cover
 
 <p class="thanks-handle">@ JoshuaKGoldberg .com</p>
 
+<img alt="QR code linking to hi.joshuakgoldberg.com" class="thanks-qr" src="/images/qr-hi-joshuakgoldberg.png" />
+
 <style>
 .thanks-handle {
   color: var(--jg-link);
   font-size: var(--jg-size-large);
   margin-top: 2rem;
 }
+
+.thanks-qr {
+  margin: 2rem auto 0;
+  width: 8.5rem;
+}
 </style>
 
 <!--
-Thanks very much to you for listening! You can reach me on Bluesky, Fosstodon, and dot com at JoshuaKGoldberg.
+Thanks very much to you for listening, and to the React Summit organizers and MCs for a great day! You can reach me on Bluesky, Fosstodon, and dot com at JoshuaKGoldberg. The QR code goes to all of those, and the slides are on joshuakgoldberg.com/speaking.
 
-Make AI write better code. Thanks everyone!
+Make AI write better code. Thanks everyone, enjoy the evening!
 -->
