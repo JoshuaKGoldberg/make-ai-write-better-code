@@ -66,8 +66,14 @@ const INITIAL = {
 	"background-clip": "border-box",
 	"background-color": "transparent",
 	"background-image": "none",
+	"border-bottom-color": "currentcolor",
+	"border-bottom-style": "none",
 	"border-bottom-width": "0px",
+	"border-left-color": "currentcolor",
+	"border-left-style": "none",
 	"border-left-width": "0px",
+	"border-right-color": "currentcolor",
+	"border-right-style": "none",
 	"border-right-width": "0px",
 	"border-top-color": "currentcolor",
 	"border-top-left-radius": "0px",
@@ -167,7 +173,7 @@ const KEYWORD_SIZES: Record<string, number> = {
 	"xx-large": 32,
 };
 const RELATIVE_SIZES: Record<string, number> = { larger: 1.2, smaller: 0.833 };
-const SIDES = ["top", "right", "bottom", "left"];
+const SIDES = ["top", "right", "bottom", "left"] as const;
 
 const initial = (key: string): string | undefined =>
 	key in INITIAL ? INITIAL[key as keyof typeof INITIAL] : undefined;
@@ -416,8 +422,10 @@ export function computeStyles(
 					: `${String(toPx(value, fontSize, rootFontSize))}px`);
 		}
 
-		if (["hidden", "none"].includes(computed["border-top-style"])) {
-			computed["border-top-width"] = "0px";
+		for (const side of SIDES) {
+			if (["hidden", "none"].includes(computed[`border-${side}-style`])) {
+				computed[`border-${side}-width`] = "0px";
+			}
 		}
 
 		const lineHeight = computed["line-height"];
@@ -610,36 +618,23 @@ function expand(prop: string, value: string): StyleMap {
 				? { "background-color": "transparent", "background-image": value }
 				: { "background-color": value, "background-image": "none" };
 		case "border":
-		case "border-top": {
-			const out: StyleMap = {
-				"border-top-color": "currentcolor",
-				"border-top-style": "none",
-				"border-top-width": "medium",
-			};
-			for (const part of splitTopLevel(value, " ")) {
-				if (BORDER_STYLES.has(part)) {
-					out["border-top-style"] = part;
-				} else if (
-					/^[\d.]+(?:px|rem|em)?$|^(?:thin|medium|thick)$/.test(part)
-				) {
-					out["border-top-width"] = part;
-				} else {
-					out["border-top-color"] = part;
-				}
-			}
-
-			return out;
-		}
+			return Object.assign(
+				{},
+				...SIDES.map((side) => expandBorder(`border-${side}`, value)),
+			) as StyleMap;
+		case "border-bottom":
+		case "border-left":
+		case "border-right":
+		case "border-top":
+			return expandBorder(prop, value);
 		case "border-color":
-			return { "border-top-color": splitTopLevel(value, " ")[0] };
+		case "border-style":
+		case "border-width":
+			return expandSides(prop.replace("-", "-*-"), value);
 		case "border-radius":
 			return {
 				"border-top-left-radius": splitTopLevel(value.split("/")[0], " ")[0],
 			};
-		case "border-style":
-			return { "border-top-style": splitTopLevel(value, " ")[0] };
-		case "border-width":
-			return { "border-top-width": splitTopLevel(value, " ")[0] };
 		case "columns": {
 			const count = splitTopLevel(value, " ").find((part) =>
 				/^\d+$/.test(part),
@@ -679,6 +674,26 @@ function expand(prop: string, value: string): StyleMap {
 		default:
 			return { [prop]: value };
 	}
+}
+
+/** Expands one side's border shorthand (e.g. `border-top`) into its width, style, and color. */
+function expandBorder(prefix: string, value: string): StyleMap {
+	const out: StyleMap = {
+		[`${prefix}-color`]: "currentcolor",
+		[`${prefix}-style`]: "none",
+		[`${prefix}-width`]: "medium",
+	};
+	for (const part of splitTopLevel(value, " ")) {
+		if (BORDER_STYLES.has(part)) {
+			out[`${prefix}-style`] = part;
+		} else if (/^[\d.]+(?:px|rem|em)?$|^(?:thin|medium|thick)$/.test(part)) {
+			out[`${prefix}-width`] = part;
+		} else {
+			out[`${prefix}-color`] = part;
+		}
+	}
+
+	return out;
 }
 
 function expandSides(pattern: string, value: string): StyleMap {

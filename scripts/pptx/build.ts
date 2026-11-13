@@ -2,10 +2,11 @@
  * Builds a native PowerPoint deck from a Slidev deck, with no browser:
  * render (Vite SSR) → lay out (takumi + a static cascade) → extract items → write .pptx.
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { Deck } from "./model.ts";
+import type { Deck, Item, RasterItem } from "./model.ts";
 
 import { createCascade } from "./cascade.ts";
 import { extractState } from "./extract.ts";
@@ -49,8 +50,15 @@ export async function buildPptx({
 	);
 	fs.mkdirSync(path.join(work, "rasters"), { recursive: true });
 
-	const renderer = await createSlideRenderer(entry);
+	const renderer = await createSlideRenderer(path.resolve(root, entry));
 	try {
+		const missing = only?.filter((no) => no > renderer.count) ?? [];
+		if (missing.length) {
+			throw new Error(
+				`The deck has ${String(renderer.count)} slides, so it has no slide ${missing.join(", ")}.`,
+			);
+		}
+
 		const numbers = Array.from(
 			{ length: renderer.count },
 			(_, i) => i + 1,
@@ -86,26 +94,29 @@ export async function buildPptx({
 					);
 				}
 
-				const { items, rasters } = extractState(laidOut, { no, publicDir });
-				for (const raster of rasters) {
-					const file = path.join(
-						work,
-						"rasters",
-						`${raster.id}-${String(clicks)}.png`,
-					);
-					const png = await layout.rasterize(
-						no,
-						html,
-						css,
-						raster.selector,
-						options,
-					);
-					if (png) {
-						fs.writeFileSync(file, png);
+				const extracted = extractState(laidOut, { no, publicDir });
+				let items = extracted.items;
+				for (const raster of extracted.rasters) {
+					const png = await layout.rasterize(no, html, css, raster, options);
+					const owns = (item: Item): item is RasterItem =>
+						item.kind === "raster" && item.rasterId === raster.id;
+					if (!png) {
+						problems.push(
+							`Slide ${String(no)}, click ${String(clicks)}: couldn't rasterize ${raster.selector}.`,
+						);
+						items = items.filter((item) => !owns(item));
+						continue;
 					}
 
+					// Named by content, so identical renders across clicks share one file (and one shape).
+					const hash = createHash("sha1")
+						.update(png)
+						.digest("hex")
+						.slice(0, 12);
+					const file = path.join(work, "rasters", `${raster.id}-${hash}.png`);
+					fs.writeFileSync(file, png);
 					for (const item of items) {
-						if (item.kind === "raster" && item.rasterId === raster.id) {
+						if (owns(item)) {
 							item.file = file;
 						}
 					}
@@ -128,6 +139,7 @@ export async function buildPptx({
 		fs.writeFileSync(path.join(work, "model.json"), JSON.stringify(deck));
 
 		const { slides } = await writePptx({
+			author: String(renderer.slides[0]?.frontmatter.author ?? ""),
 			background,
 			deck,
 			notes: renderer.slides.map((s) => s.note?.trim() ?? ""),

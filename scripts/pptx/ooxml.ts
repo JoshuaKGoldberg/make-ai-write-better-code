@@ -6,6 +6,7 @@
 import type JSZip from "jszip";
 
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 import type { Gradient } from "./model.ts";
 
@@ -140,7 +141,38 @@ export function patchSlide(
 			'<a:rPr lang="en-US" kern="100"',
 		)
 		.replaceAll(' kern="0"', ' kern="100"');
-	return gradients.apply(out);
+	return gradients.apply(markDecorative(singleParagraphProperties(out)));
+}
+
+/** Alt text that marks a picture as decorative, so screen readers skip it. */
+export const DECORATIVE = "pptx:decorative";
+
+function markDecorative(xml: string) {
+	return xml.replace(
+		new RegExp(
+			`(<p:cNvPr [^>]*?)descr="${DECORATIVE}"([^>]*>)(.*?)</p:cNvPr>`,
+			"gs",
+		),
+		(_, start: string, end: string, body: string) =>
+			`${start}descr=""${end}${body}<a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext></a:extLst></p:cNvPr>`,
+	);
+}
+
+/**
+ * Keeps only each paragraph's leading properties element. pptxgenjs writes paragraph
+ * properties before every run, but a paragraph may only have one, as its first child.
+ */
+function singleParagraphProperties(xml: string) {
+	return xml.replace(/<a:p>(.*?)<\/a:p>/gs, (paragraph, body: string) => {
+		let first = true;
+		const properties = /<a:pPr\b[^>]*\/>|<a:pPr\b[^>]*>.*?<\/a:pPr>/gs;
+		const kept = body.replace(properties, (match: string, offset: number) => {
+			const keep = first && offset === 0;
+			first = false;
+			return keep ? match : "";
+		});
+		return kept === body ? paragraph : `<a:p>${kept}</a:p>`;
+	});
 }
 
 /** Deduplicates identical media (pptxgenjs embeds a shared background once per slide) and drops folder entries. */
@@ -190,12 +222,72 @@ export async function tidyPackage(zip: JSZip) {
 		zip.remove(duplicate);
 	}
 
+	await tidyContentTypes(zip);
+	await splitNotesParagraphs(zip);
+
 	// Folder entries break some cloud editors; removing the entries keeps their files.
 	for (const [name, entry] of Object.entries(zip.files)) {
 		if (entry.dir) {
 			Reflect.deleteProperty(zip.files, name);
 		}
 	}
+}
+
+/**
+ * Splits speaker notes into one paragraph per line: pptxgenjs writes them as a single
+ * run with raw line breaks. Blank lines stay as empty paragraphs between paragraphs.
+ */
+async function splitNotesParagraphs(zip: JSZip) {
+	for (const name of Object.keys(zip.files)) {
+		const file = zip.file(name);
+		if (!file || !/^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(name)) {
+			continue;
+		}
+
+		const xml = await file.async("string");
+		const out = xml.replace(
+			/<a:p><a:r>(<a:rPr [^>]*\/>)<a:t>([^<]*)<\/a:t><\/a:r>(<a:endParaRPr [^>]*\/>)<\/a:p>/g,
+			(paragraph, properties: string, text: string, end: string) =>
+				/[\r\n]/.test(text)
+					? text
+							.split(/\r?\n/)
+							.map((line) =>
+								line
+									? `<a:p><a:r>${properties}<a:t>${line}</a:t></a:r></a:p>`
+									: `<a:p>${end}</a:p>`,
+							)
+							.join("")
+					: paragraph,
+		);
+		if (out !== xml) {
+			zip.file(name, out);
+		}
+	}
+}
+
+/** Drops content types for parts and extensions the package doesn't have, and fixes jpg's. */
+async function tidyContentTypes(zip: JSZip) {
+	const file = zip.file("[Content_Types].xml");
+	if (!file) {
+		return;
+	}
+
+	const names = Object.keys(zip.files);
+	const extensions = new Set(
+		names.map((name) => path.extname(name).slice(1).toLowerCase()),
+	);
+	const xml = (await file.async("string"))
+		.replace(
+			/<Override PartName="\/([^"]+)"[^>]*\/>/g,
+			(override, part: string) => (zip.file(part) ? override : ""),
+		)
+		.replace(
+			/<Default Extension="([^"]+)"[^>]*\/>/g,
+			(declaration, extension: string) =>
+				extensions.has(extension.toLowerCase()) ? declaration : "",
+		)
+		.replace('ContentType="image/jpg"', 'ContentType="image/jpeg"');
+	zip.file("[Content_Types].xml", xml);
 }
 
 const escapeXml = (value: string) =>

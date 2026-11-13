@@ -17,12 +17,23 @@ const { values } = parseArgs({
 	},
 });
 
+const slides = values.slides?.split(",").map((value) => {
+	const no = Number(value.trim());
+	if (!Number.isInteger(no) || no < 1) {
+		throw new Error(
+			`--slides takes slide numbers, like 1,2,3; got "${value}".`,
+		);
+	}
+
+	return no;
+});
+
 const started = performance.now();
 const out = path.resolve(values.out);
-const { problems, slides } = await buildPptx({
+const { problems, slides: written } = await buildPptx({
 	out,
 	review: values.review,
-	slides: values.slides?.split(",").map(Number),
+	slides,
 	work: values.work && path.resolve(values.work),
 });
 for (const problem of problems) {
@@ -30,5 +41,5 @@ for (const problem of problems) {
 }
 
 console.log(
-	`Wrote ${String(slides)} slides to ${out} in ${((performance.now() - started) / 1000).toFixed(1)}s.`,
+	`Wrote ${String(written)} slides to ${out} in ${((performance.now() - started) / 1000).toFixed(1)}s.`,
 );

@@ -7,7 +7,9 @@ import type { ClicksContext, SlideInfo } from "@slidev/types";
 import type { App, Component, ObjectDirective } from "vue";
 
 import { createServer, resolveOptions } from "@slidev/cli";
+import { parseRangeString } from "@slidev/parser/core";
 import { renderToString } from "@vue/server-renderer";
+import { parseHTML } from "linkedom";
 import { existsSync } from "node:fs";
 import { createSSRApp, h, reactive, ref } from "vue";
 
@@ -66,6 +68,7 @@ if (!("ResizeObserver" in globalThis)) {
 const standIn = (name: string) =>
 	new URL(`./ssr/${name}`, import.meta.url).pathname;
 
+/** Starts a Slidev server for the deck at `entry` (an absolute path, or relative to the working directory). */
 export async function createSlideRenderer(
 	entry = "slides.md",
 ): Promise<SlideRenderer> {
@@ -155,7 +158,7 @@ export async function createSlideRenderer(
 		totalOverride?: number,
 	) {
 		const mod = await load<{ default: Component }>(
-			`${root}/${entry}__slidev_${String(no)}.md`,
+			`${options.entry}__slidev_${String(no)}.md`,
 		);
 		const { app, ctx, slide } = createApp(
 			no,
@@ -163,7 +166,7 @@ export async function createSlideRenderer(
 			clicks,
 			totalOverride,
 		);
-		const html = await renderToString(app);
+		const html = highlightCode(await renderToString(app));
 		const total =
 			totalOverride ??
 			(slide.frontmatter.clicks as number | undefined) ??
@@ -250,7 +253,7 @@ export async function createSlideRenderer(
 		},
 		slideCss: (no) =>
 			collectCss([
-				`${root}/${entry}__slidev_${String(no)}.md`,
+				`${options.entry}__slidev_${String(no)}.md`,
 				...Object.keys(layers).map((name) => `${root}/${name}.vue`),
 			]),
 		slides,
@@ -308,4 +311,40 @@ function clickDirective(
 			};
 		},
 	};
+}
+
+/**
+ * Applies each code block's active line-highlight range, as Slidev's CodeBlockWrapper
+ * does once mounted: lines outside the range get `slidev-code-dishonored`.
+ */
+function highlightCode(html: string) {
+	if (!html.includes("data-highlight-range")) {
+		return html;
+	}
+
+	const { document } = parseHTML(
+		`<!doctype html><html><body>${html}</body></html>`,
+	);
+	for (const wrapper of document.querySelectorAll("[data-highlight-range]")) {
+		const range = wrapper.getAttribute("data-highlight-range") ?? "all";
+		const startLine = Number(wrapper.getAttribute("data-start-line") ?? 1);
+		const lines = [...wrapper.querySelectorAll(".shiki code > .line")];
+		if (range === "hide") {
+			wrapper.classList.add(CLASS.hidden);
+			continue;
+		}
+
+		const highlighted = new Set(
+			parseRangeString(lines.length + startLine - 1, range),
+		);
+		lines.forEach((line, index) => {
+			const on = highlighted.has(index + startLine);
+			line.classList.toggle("slidev-code-highlighted", on);
+			line.classList.toggle("slidev-code-dishonored", !on);
+			line.classList.toggle("highlighted", on);
+			line.classList.toggle("dishonored", !on);
+		});
+	}
+
+	return document.body.innerHTML;
 }

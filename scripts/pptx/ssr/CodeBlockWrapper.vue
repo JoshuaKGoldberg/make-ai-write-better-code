@@ -1,5 +1,5 @@
 <!-- Server-render stand-in for Slidev's CodeBlockWrapper: registers the same clicks,
-and records the active highlight range for post-processing to apply. -->
+and records the active highlight range for render.ts to apply to the lines. -->
 <script setup lang="ts">
 import { useSlideContext } from "@slidev/client";
 

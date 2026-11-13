@@ -82,6 +82,8 @@ export type Item =
 export interface ItemBase {
 	/** Identity across click states: same key in (nearly) the same place is the same object. */
 	key: string;
+	/** What the item is part of, for its name in PowerPoint's Selection Pane when its own content doesn't say. */
+	label?: string;
 	/** Paint order within a state. */
 	order: number;
 }
@@ -134,6 +136,8 @@ export interface Run {
 	font: string;
 	gradient?: Gradient;
 	italic: boolean;
+	/** The link target, for text inside a link. */
+	href?: string;
 	/** px */
 	letterSpacing: number;
 	/** A spacer run standing in for padding, margins, or borders between runs. */
@@ -141,7 +145,7 @@ export interface Run {
 	shadow?: Shadow;
 	/** px */
 	size: number;
-	/** Starts a new line within its paragraph, where the browser wrapped. */
+	/** Starts a new line within its paragraph, where the browser wrapped; only boxes that can't wrap break there. */
 	softBreak?: boolean;
 	stroke?: { color: string; width: number };
 	superscript: boolean;
@@ -192,6 +196,12 @@ export interface TextStyle {
 	/** px */
 	lineHeight: number;
 	nowrap: boolean;
+
+	/**
+	 * Where the browser's longest wrapped line ends, in slide px, for wrapped text. PowerPoint
+	 * measures text a little differently, so wrapping there keeps the browser's line breaks.
+	 */
+	wrapRight?: number;
 }
 
 /** The slide canvas Slidev renders at, in CSS px. */

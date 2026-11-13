@@ -26,9 +26,14 @@ import { ID } from "./layout.ts";
 import { SLIDE } from "./model.ts";
 
 export interface Raster {
+	/** The slide area to render, in slide px: the element and its descendants, with room for glows. */
+	box: Box;
 	id: string;
 	selector: string;
 }
+
+/** Room around a raster's element for strokes, shadows, and glows that paint outside it. */
+const RASTER_MARGIN = 12;
 
 type ItemInput = Item extends infer T
 	? T extends Item
@@ -36,9 +41,12 @@ type ItemInput = Item extends infer T
 		: never
 	: never;
 
-/** A shape's paint: a color, or a gradient (with its average color for consumers without gradients). */
+/** A shape's paint: its fill (a color, or a gradient whose last stop is the fallback color) and borders. */
 interface BoxStyle {
+	/** A border drawn on every side alike. */
 	border?: Stroke;
+	/** Borders on only some sides (or differing by side), each drawn as a thin filled edge. */
+	edges?: { fill: Fill; side: Side; width: number }[];
 	fill?: Fill;
 	radius: number;
 }
@@ -55,12 +63,16 @@ interface Paint {
 	hex: string;
 }
 
+type Side = "bottom" | "left" | "right" | "top";
+
 /** Ascent as a fraction of the glyph box takumi reports for a run (ascent + descent). */
 const ASCENT_RATIOS: [RegExp, number][] = [
 	[/league spartan/i, 0.7 / 0.92],
 	[/impact/i, 1.0088 / 1.2197],
-	[/./, 0.928 / 1.164], // Menlo, the monospace font used for code
 ];
+
+/** Menlo's, the monospace font used for code; close enough for most other fonts. */
+const DEFAULT_ASCENT_RATIO = 0.928 / 1.164;
 
 const ALIGNMENTS: Record<string, TextStyle["align"]> = {
 	center: "center",
@@ -109,6 +121,13 @@ export function extractState(
 		parseFloat(styleOf(el)[prop] ?? "") || 0;
 	const idOf = (el: Element) => el.getAttribute(ID) ?? "";
 	const boxOf = (el: Element) => boxes.get(idOf(el));
+	// A short description of an element: its text, else its accessible name or first class.
+	const labelOf = (el: Element) =>
+		[
+			el.textContent.replace(/\s+/g, " ").trim().slice(0, 40),
+			el.getAttribute("aria-label")?.trim(),
+			el.classList[0],
+		].find(Boolean);
 
 	const opacityOf = (el: Element) => {
 		let product = 1;
@@ -209,6 +228,7 @@ export function extractState(
 			s["text-shadow"],
 		);
 		const shadowColor = shadow ? parseColor(shadow[4]) : undefined;
+		const href = el.closest("a[href]")?.getAttribute("href") ?? "";
 		return {
 			bold:
 				!font.startsWith("League Spartan") && Number(s["font-weight"]) >= 600,
@@ -218,6 +238,7 @@ export function extractState(
 				angle: gradient.angle,
 				stops: gradient.stops.map((stop) => ({ hex: stop.hex, pos: stop.pos })),
 			},
+			href: /^(?:https?|mailto):/i.test(href) ? href : undefined,
 			italic: s["font-style"] === "italic",
 			letterSpacing:
 				s["letter-spacing"] === "normal"
@@ -292,9 +313,12 @@ export function extractState(
 		el?: Element,
 	) => {
 		const k = runScale(entry);
-		const lines: Run[][] = [[]];
+		// One paragraph; browser line wraps become soft breaks within it.
+		const paragraph: Run[] = [];
 		const baselines: number[] = [];
 		let previous: LaidOutRun | undefined;
+		let right = -Infinity;
+		let wrapped = false;
 		for (const run of entry.runs) {
 			const owner = byId.get(run.owner);
 			if (!owner || /^\n+$/.test(run.text)) {
@@ -303,6 +327,7 @@ export function extractState(
 
 			const style = runStyle(owner, opacityFor(owner));
 			const rect = runRect(entry, el, run);
+			right = Math.max(right, rect.x + rect.w);
 			const baseline = rect.y + rect.h * ascentRatio(style.font);
 			// A new line starts where a run jumps back left and down; runs in other fonts
 			// (inline code) sit at different heights on the same line.
@@ -329,11 +354,10 @@ export function extractState(
 				text = text.toUpperCase();
 			}
 
-			const line = lines[lines.length - 1];
 			// Gaps between runs on a line (padding, margins, borders of inline elements) become
 			// spacer runs: a Menlo no-break space widened to the gap with letter-spacing.
-			if (gap > 0.75 && line.length) {
-				line.push({
+			if (gap > 0.75 && paragraph.length) {
+				paragraph.push({
 					...style,
 					bold: false,
 					font: "Menlo",
@@ -347,18 +371,21 @@ export function extractState(
 			}
 
 			if (newLine) {
-				const last = line.at(-1);
+				wrapped = true;
+				// The browser wrapped at a space (which collapses away at the wrap) unless the
+				// line ends at another break opportunity, a hyphen or zero-width space.
+				const last = paragraph.at(-1);
 				if (last && !last.pad) {
-					last.text = last.text.trimEnd();
+					const trimmed = last.text.trimEnd();
+					last.text = /[-\u200B]$/.test(trimmed) ? trimmed : `${trimmed} `;
 				}
 
-				line.push({ ...style, softBreak: true, text: text.trimStart() });
+				paragraph.push({ ...style, softBreak: true, text: text.trimStart() });
 			} else {
-				line.push({ ...style, text });
+				paragraph.push({ ...style, text });
 			}
 		}
 
-		const paragraph = lines[0];
 		if (paragraph.length) {
 			if (!paragraph[0].pad) {
 				paragraph[0].text = paragraph[0].text.trimStart();
@@ -377,6 +404,7 @@ export function extractState(
 			paragraphs: [
 				{ runs: paragraph.filter((run) => run.text.length) },
 			] as Paragraph[],
+			wrapRight: wrapped ? right : undefined,
 		};
 	};
 
@@ -397,21 +425,43 @@ export function extractState(
 			}
 		}
 
-		const borderWidth = px(el, "border-top-width");
-		const border =
-			borderWidth > 0 ? parseColor(s["border-top-color"], s.color) : undefined;
+		const sides = (["top", "right", "bottom", "left"] as const).flatMap(
+			(side) => {
+				const width = px(el, `border-${side}-width`);
+				const color =
+					width > 0
+						? parseColor(s[`border-${side}-color`], s.color)
+						: undefined;
+				return color && color.a > 0.01
+					? [
+							{
+								fill: {
+									color: color.hex,
+									transparency: Math.round((1 - color.a * opacity) * 100),
+								},
+								side,
+								width,
+							},
+						]
+					: [];
+			},
+		);
+		const uniform =
+			sides.length === 4 &&
+			sides.every(
+				(side) =>
+					side.width === sides[0].width &&
+					side.fill.color === sides[0].fill.color &&
+					side.fill.transparency === sides[0].fill.transparency,
+			);
 		const visibleFill = fill && fill.a > 0.004 ? fill : undefined;
-		const visibleBorder = border && border.a > 0.01 ? border : undefined;
-		if (!visibleFill && !visibleBorder) {
+		if (!visibleFill && !sides.length) {
 			return undefined;
 		}
 
 		return {
-			border: visibleBorder && {
-				color: visibleBorder.hex,
-				transparency: Math.round((1 - visibleBorder.a * opacity) * 100),
-				width: borderWidth,
-			},
+			border: uniform ? { ...sides[0].fill, width: sides[0].width } : undefined,
+			edges: uniform || !sides.length ? undefined : sides,
 			fill: visibleFill && {
 				color: visibleFill.hex,
 				gradient,
@@ -444,7 +494,7 @@ export function extractState(
 	const textItem = (el: Element, entry: LaidOutRuns, opacity: number) => {
 		const { box: rawBox, rotation, scale } = geometry(entry.box);
 		const box = entry.anonymous ? rawBox : contentBox(el, rawBox, scale);
-		const { baselines, paragraphs } = runsToParagraphs(
+		const { baselines, paragraphs, wrapRight } = runsToParagraphs(
 			entry,
 			(owner) => (entry.anonymous ? opacity : opacityOf(owner)),
 			entry.anonymous ? undefined : el,
@@ -464,6 +514,7 @@ export function extractState(
 				align: alignOf(el),
 				lineHeight: lineHeightOf(el) * scale,
 				nowrap: nowrapOf(el) || Boolean(rotation),
+				wrapRight,
 			},
 		});
 	};
@@ -536,11 +587,16 @@ export function extractState(
 		const { box: listBox, scale } = geometry(laidOut);
 		const lis = [...list.children].filter((li) => li.tagName === "LI");
 		const listStyle = styleOf(list)["list-style-type"];
+		let wrapRight: number | undefined;
 		const paragraphs: ListParagraph[] = lis.map((li) => {
 			const entry = runs.get(idOf(li));
 			const converted = entry
 				? runsToParagraphs(entry, () => opacity, li)
-				: { baselines: [], paragraphs: [{ runs: [] }] };
+				: { baselines: [], paragraphs: [{ runs: [] }], wrapRight: undefined };
+			if (converted.wrapRight !== undefined) {
+				wrapRight = Math.max(wrapRight ?? -Infinity, converted.wrapRight);
+			}
+
 			const liRuns = converted.paragraphs.flatMap((p) => p.runs);
 			return {
 				baselines: converted.baselines,
@@ -565,6 +621,7 @@ export function extractState(
 				align: alignOf(first ?? list),
 				lineHeight: lineHeightOf(first ?? list) * scale,
 				nowrap: false,
+				wrapRight,
 			},
 		});
 	};
@@ -609,14 +666,54 @@ export function extractState(
 		});
 	};
 
+	// The whole-pixel area covering an element and everything inside it, or the whole
+	// slide when anything is rotated (its unrotated boxes don't bound what it paints).
+	const rasterBox = (el: Element): Box => {
+		const slide = { h: SLIDE.height, w: SLIDE.width, x: 0, y: 0 };
+		let left = Infinity;
+		let top = Infinity;
+		let right = -Infinity;
+		let bottom = -Infinity;
+		for (const node of [el, ...el.querySelectorAll("*")]) {
+			const laidOut = boxOf(node);
+			if (!laidOut) {
+				continue;
+			}
+
+			const { box, rotation } = geometry(laidOut);
+			if (Math.abs(rotation) > 0.01) {
+				return slide;
+			}
+
+			left = Math.min(left, box.x);
+			top = Math.min(top, box.y);
+			right = Math.max(right, box.x + box.w);
+			bottom = Math.max(bottom, box.y + box.h);
+		}
+
+		if (!Number.isFinite(left)) {
+			return slide;
+		}
+
+		const x = Math.max(0, Math.floor(left - RASTER_MARGIN));
+		const y = Math.max(0, Math.floor(top - RASTER_MARGIN));
+		return {
+			h: Math.min(SLIDE.height, Math.ceil(bottom + RASTER_MARGIN)) - y,
+			w: Math.min(SLIDE.width, Math.ceil(right + RASTER_MARGIN)) - x,
+			x,
+			y,
+		};
+	};
+
 	const rasterItem = (el: Element, reason: string) => {
 		const id = `r${String(no)}-${String(rasters.length)}`;
-		rasters.push({ id, selector: `[${ID}="${idOf(el)}"]` });
-		// Rasters render as full-slide transparent images, so they cover the whole slide.
+		const box = rasterBox(el);
+		rasters.push({ box, id, selector: `[${ID}="${idOf(el)}"]` });
 		push({
-			box: { h: SLIDE.height, w: SLIDE.width, x: 0, y: 0 },
+			box,
 			key: `${pathOf(el)}#raster`,
 			kind: "raster",
+			label: labelOf(el),
 			rasterId: id,
 			reason,
 		});
@@ -809,7 +906,11 @@ export function extractState(
 		const k = runScale(entry);
 		for (const child of el.querySelectorAll("*")) {
 			const style = boxStyle(child, opacity);
-			if (!style || !styleOf(child).display.startsWith("inline")) {
+			if (
+				!style ||
+				!(style.fill || style.border) ||
+				!styleOf(child).display.startsWith("inline")
+			) {
 				continue;
 			}
 
@@ -846,18 +947,20 @@ export function extractState(
 			const padX = px(child, "padding-left");
 			const padY = px(child, "padding-top");
 			const origin = runOrigin(entry, el);
+			const { border, fill, radius } = style;
 			for (const line of lines) {
 				push({
-					...style,
+					border,
 					box: {
 						h: (line.bottom - line.top + padY * 2) * k,
 						w: (line.right - line.left + padX * 2) * k,
 						x: origin.x + (line.left - padX) * k,
 						y: origin.y + (line.top - padY) * k,
 					},
+					fill,
 					key: `${pathOf(child)}#pill:${String(Math.round(line.left))}`,
 					kind: "box",
-					radius: style.radius * k,
+					radius: radius * k,
 					rotation: 0,
 				});
 			}
@@ -885,14 +988,37 @@ export function extractState(
 
 		const box = boxStyle(el, opacity);
 		if (box && tag !== "img") {
-			const { box: b, rotation } = geometry(laidOut);
-			push({
-				...box,
-				box: b,
-				key: `${pathOf(el)}#box:${box.fill?.color ?? ""}${String(box.fill?.transparency ?? "")}${box.border?.color ?? ""}`,
-				kind: "box",
-				rotation,
-			});
+			const { box: b, rotation, scale } = geometry(laidOut);
+			const { edges, ...shape } = box;
+			const label = labelOf(el);
+			if (shape.fill || shape.border) {
+				push({
+					...shape,
+					box: b,
+					key: `${pathOf(el)}#box`,
+					kind: "box",
+					label,
+					rotation,
+				});
+			}
+
+			for (const edge of edges ?? []) {
+				const w = edge.width * scale;
+				push({
+					box: {
+						h: ["left", "right"].includes(edge.side) ? b.h : w,
+						w: ["left", "right"].includes(edge.side) ? w : b.w,
+						x: edge.side === "right" ? b.x + b.w - w : b.x,
+						y: edge.side === "bottom" ? b.y + b.h - w : b.y,
+					},
+					fill: edge.fill,
+					key: `${pathOf(el)}#border-${edge.side}`,
+					kind: "box",
+					label: `${edge.side} border${label ? ` of ${label}` : ""}`,
+					radius: 0,
+					rotation,
+				});
+			}
 		}
 
 		if (tag === "img") {
@@ -955,7 +1081,8 @@ function imageSize(file: string): undefined | { h: number; w: number } {
 }
 
 const ascentRatio = (font: string) =>
-	ASCENT_RATIOS.find(([pattern]) => pattern.test(font))?.[1] ?? 0.8;
+	ASCENT_RATIOS.find(([pattern]) => pattern.test(font))?.[1] ??
+	DEFAULT_ASCENT_RATIO;
 
 /** The unrotated box, rotation (degrees), and scale of a node from takumi's absolute transform. */
 function geometry(box: LaidOutBox): Geometry {
@@ -1111,8 +1238,15 @@ function svgGradient(
 		return undefined;
 	}
 
-	const coordinate = (attribute: string, fallback: number) =>
-		Number(gradient.getAttribute(attribute) ?? fallback);
+	// Coordinates are fractions of the bounding box, or percentages of it.
+	const coordinate = (attribute: string, fallback: number) => {
+		const value = gradient.getAttribute(attribute)?.trim();
+		const parsed = value
+			? parseFloat(value) / (value.endsWith("%") ? 100 : 1)
+			: fallback;
+		return Number.isFinite(parsed) ? parsed : fallback;
+	};
+
 	const angle =
 		(Math.atan2(
 			coordinate("y2", 0) - coordinate("y1", 0),

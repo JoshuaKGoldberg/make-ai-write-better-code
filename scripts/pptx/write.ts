@@ -22,9 +22,16 @@ import {
 	type Slide,
 	type TextItem,
 } from "./model.ts";
-import { GradientRegistry, patchSlide, tidyPackage } from "./ooxml.ts";
+import {
+	DECORATIVE,
+	GradientRegistry,
+	patchSlide,
+	tidyPackage,
+} from "./ooxml.ts";
 
 export interface WriteOptions {
+	/** The deck's author, for the file's properties. */
+	author?: string;
 	/** Full-slide background image. */
 	background: string;
 	deck: Deck;
@@ -48,6 +55,8 @@ export interface WriteOptions {
 interface Entry {
 	anchor: Box;
 	item: Item;
+	/** What the item looks like, apart from where it is and (for lists) which paragraphs show. */
+	look: string;
 	order: number;
 	/** For lists: the states each paragraph is visible in. */
 	paragraphStates?: Set<number>[];
@@ -87,7 +96,11 @@ const BULLET_GAP = 0.75;
 /** PowerPoint shrinks superscripts to about 2/3 of their size; 1.12x renders like a browser's 75% &lt;sup>. */
 const SUPERSCRIPT_SCALE = 1.12;
 
+/** The slide layout every slide uses, carrying the deck's background. */
+const SLIDE_LAYOUT = "Slidev";
+
 export async function writePptx({
+	author = "",
 	background,
 	deck,
 	fallbackFont = "Lucida Grande",
@@ -101,9 +114,28 @@ export async function writePptx({
 	const pres = new PptxGenJS();
 	pres.layout = "LAYOUT_WIDE";
 	pres.title = title;
+	pres.author = author;
+	pres.subject = "";
 	const gradients = new GradientRegistry();
 	const font = fontkit.openSync(sansFont);
 	const coverage = new Set("characterSet" in font ? font.characterSet : []);
+	// New text and new slides in PowerPoint start from the deck's font and background.
+	// A variable font's family name can carry its default instance's weight ("… Thin").
+	const family =
+		"familyName" in font
+			? font.familyName.replace(
+					/\s+(?:Thin|Hairline|ExtraLight|UltraLight|Light|Regular|Medium|SemiBold|DemiBold|Bold|ExtraBold|UltraBold|Black|Heavy)$/i,
+					"",
+				)
+			: undefined;
+	if (family) {
+		pres.theme = { bodyFontFace: family, headFontFace: family };
+	}
+
+	pres.defineSlideMaster({
+		background: { path: path.resolve(background) },
+		title: SLIDE_LAYOUT,
+	});
 	const writer = createItemWriter({
 		coverage,
 		fallbackFont,
@@ -119,8 +151,7 @@ export async function writePptx({
 		for (const only of review
 			? slide.states.map((_, state) => state)
 			: [undefined]) {
-			const pptSlide = pres.addSlide();
-			pptSlide.background = { path: path.resolve(background) };
+			const pptSlide = pres.addSlide({ masterName: SLIDE_LAYOUT });
 			pptSlide.addNotes(
 				only === undefined
 					? note
@@ -293,6 +324,7 @@ function createItemWriter({
 			indent = 0,
 			lineHeight = 0,
 			strokeLayer = false,
+			wrap = true,
 		},
 	): pptxgen.default.TextProps[] => {
 		const runs: pptxgen.default.TextProps[] = [];
@@ -322,12 +354,15 @@ function createItemWriter({
 								run.superscript ? SUPERSCRIPT_SCALE * surrounding : run.size,
 							) * 10,
 						) / 10,
+					// Spacer runs stand in for padding, so they don't link anywhere.
+					hyperlink: run.href && !run.pad ? { url: run.href } : undefined,
 					italic: run.italic,
 					lineSpacingMultiple: multiple,
 					paraSpaceAfter: paragraph.spaceAfter
 						? Math.round(points(paragraph.spaceAfter) * 10) / 10
 						: undefined,
-					softBreakBefore: run.softBreak,
+					// Wrapping boxes rewrap as their text is edited; others keep the browser's lines.
+					softBreakBefore: !wrap && run.softBreak === true ? true : undefined,
 					superscript: run.superscript || undefined,
 					transparency: run.transparency || undefined,
 					underline: run.underline ? { style: "sng" } : undefined,
@@ -442,9 +477,15 @@ function createItemWriter({
 			);
 		}
 
-		// Browsers and PowerPoint measure text slightly differently, so give wrapping text some
-		// slack. Rotated boxes turn about their centers, so they keep the browser's exact size.
-		const slack = style.nowrap || rotation ? 0 : Math.max(10, box.w * 0.06);
+		// PowerPoint rewraps wrapping text itself, so it gets the browser's width plus just
+		// enough slack for rounding: any more and lines would take words the browser wrapped.
+		// Rotated boxes turn about their centers, so they keep the browser's exact size.
+		const slack = style.nowrap || rotation ? 0 : Math.max(2, box.w * 0.01);
+		// Wrapped left-aligned text wraps where the browser's longest line ended.
+		const width =
+			style.wrapRight !== undefined && style.align === "left" && !rotation
+				? Math.min(box.w, style.wrapRight - box.x)
+				: box.w;
 		const extra = style.nowrap && !rotation ? Math.max(8, box.w * 0.08) : 0;
 		const bulletGap =
 			item.kind === "list" ? BULLET_GAP * (firstRun?.size ?? 16) : 0;
@@ -474,7 +515,7 @@ function createItemWriter({
 				type: "outer",
 			},
 			valign: "top",
-			w: inches(box.w + slack + extra + bulletGap),
+			w: inches(width + slack + extra + bulletGap),
 			wrap: !style.nowrap,
 			x: inches(box.x - bulletGap - shift),
 			y: inches(top),
@@ -484,6 +525,7 @@ function createItemWriter({
 			code: item.kind === "code",
 			indent: bulletGap,
 			lineHeight: style.lineHeight,
+			wrap: !style.nowrap,
 		};
 		if (paragraphs.some((p) => p.runs.some((run) => run.stroke))) {
 			// pptxgenjs mutates option objects, so never share one between calls.
@@ -538,7 +580,8 @@ function createItemWriter({
 				case "raster":
 					slide.addImage({
 						...position(item.box),
-						altText: item.kind === "image" ? item.alt : "",
+						// pptxgenjs falls back to the file path for empty alt text; mark it decorative instead.
+						altText: (item.kind === "image" && item.alt) || DECORATIVE,
 						objectName: name,
 						path:
 							item.kind === "image"
@@ -613,13 +656,33 @@ const position = (box: Box) => ({
 	y: inches(box.y),
 });
 
+/** A fingerprint of an item's appearance, ignoring identity, naming, position, and list paragraph visibility. */
+function appearanceOf(item: Item) {
+	const ignored = new Set([
+		"baselines",
+		"box",
+		"key",
+		"label",
+		"order",
+		"visible",
+	]);
+	return JSON.stringify(item, (name, value: unknown) =>
+		ignored.has(name)
+			? undefined
+			: typeof value === "number"
+				? Math.round(value * 10) / 10
+				: value,
+	);
+}
+
 /** Merges a slide's click states into items, each with the states it's visible in. */
 function timeline(slide: Slide): Entry[] {
 	const byKey = new Map<string, Entry[]>();
 	slide.states.forEach((state, index) => {
 		for (const item of state.items) {
-			// Same content in (nearly) the same place is the same object; anything that moved
-			// or resized between clicks becomes a new object that crossfades in.
+			// Same content looking the same in (nearly) the same place is the same object;
+			// anything that moved, resized, or restyled between clicks becomes a new object
+			// that crossfades in.
 			const anchor: Box =
 				"box" in item
 					? item.box
@@ -629,10 +692,12 @@ function timeline(slide: Slide): Entry[] {
 							x: item.points[0]?.x ?? 0,
 							y: item.points[0]?.y ?? 0,
 						};
+			const look = appearanceOf(item);
 			const candidates = byKey.get(item.key) ?? [];
 			let entry = candidates.find(
 				(candidate) =>
 					!candidate.states.has(index) &&
+					candidate.look === look &&
 					(["h", "w", "x", "y"] as const).every(
 						(k) => Math.abs(candidate.anchor[k] - anchor[k]) < 1.5,
 					),
@@ -641,6 +706,7 @@ function timeline(slide: Slide): Entry[] {
 				entry = {
 					anchor,
 					item,
+					look,
 					order: item.order + index * 0.001,
 					states: new Set(),
 				};
@@ -668,8 +734,10 @@ function timeline(slide: Slide): Entry[] {
 function uniqueName(item: Item, used: Set<string>) {
 	const text =
 		"paragraphs" in item
-			? item.paragraphs.flatMap((p) => p.runs.map((run) => run.text)).join("")
-			: "";
+			? item.paragraphs
+					.map((p) => p.runs.map((run) => run.text).join(""))
+					.join(" ")
+			: (item.label ?? "");
 	const label = (
 		{
 			box: "Box",
@@ -684,7 +752,9 @@ function uniqueName(item: Item, used: Set<string>) {
 	)[item.kind];
 	// Names are matched back to shapes in the XML, so keep them free of characters XML escapes.
 	const base = `${label}${text ? `: ${text}` : ""}`
-		.replace(/["&'<>]/g, "")
+		.replace(/&/g, "and")
+		.replace(/'/g, "\u2019")
+		.replace(/["<>\u200B]/g, "")
 		.replace(/\s+/g, " ")
 		.trim()
 		.slice(0, 48);

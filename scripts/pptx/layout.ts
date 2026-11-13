@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { CascadeRule, ComputedStyle } from "./cascade.ts";
+import type { Box } from "./model.ts";
 
 import { computeStyles } from "./cascade.ts";
 import { SLIDE } from "./model.ts";
@@ -68,7 +69,7 @@ export interface LayoutOptions {
 
 type FontInput = Parameters<Renderer["registerFont"]>[0];
 
-/** Fonts for layout: the deck's League Spartan, plus monospace, Impact, and emoji from the system when available. */
+/** Lays out slide states with takumi, and renders the parts of slides PowerPoint can't draw. */
 export async function createLayout({
 	fonts,
 	publicDir,
@@ -177,11 +178,12 @@ export async function createLayout({
 	}
 
 	/** Renders one element of a slide state (everything else hidden) to a full-slide transparent PNG at 2x. */
+	/** Renders just the element `selector` matches, cropped to `box` (in slide px), as a transparent PNG at 2x. */
 	async function rasterize(
 		no: number,
 		html: string,
 		{ rules, sheets }: Css,
-		selector: string,
+		{ box, selector }: { box: Box; selector: string },
 		options: LayoutOptions = {},
 	) {
 		const document = buildDocument(no, html, options);
@@ -208,16 +210,19 @@ export async function createLayout({
 
 		const content = document.querySelector("#slide-content");
 		if (content) {
-			appendStyle(content, "background:transparent !important");
+			appendStyle(
+				content,
+				`background:transparent !important;transform:translate(${String(-box.x)}px,${String(-box.y)}px)`,
+			);
 		}
 
 		return renderer.render(toTakumi(document), {
 			css: sheets,
 			devicePixelRatio: 2,
 			format: "png",
-			height: SLIDE.height * 2,
+			height: box.h * 2,
 			images: imagesIn(html),
-			width: SLIDE.width * 2,
+			width: box.w * 2,
 		});
 	}
 
@@ -239,6 +244,7 @@ export async function createLayout({
 	return { layoutState, rasterize, renderBackground };
 }
 
+/** Fonts for layout: the deck's League Spartan, plus monospace, Impact, and emoji from the system when available. */
 export function loadFonts(root: string): FontInput[] {
 	const fonts: FontInput[] = [
 		{
@@ -311,6 +317,11 @@ function buildDocument(
 	const { document } = parseHTML(
 		`<html class="dark"><head></head><body><div id="app"><div id="page-root"><div id="slide-container"><div id="slide-content" class="slidev-slide-content" style="width:${String(SLIDE.width)}px;height:${String(SLIDE.height)}px;position:relative;overflow:hidden">${globalBottom}<div class="slidev-page slidev-page-${String(no)}" style="${page}">${html}</div></div></div></div></div></body></html>`,
 	);
+	// takumi has no <wbr>; a zero-width space is the same line-break opportunity.
+	for (const wbr of document.querySelectorAll("wbr")) {
+		wbr.replaceWith(document.createTextNode("\u200B"));
+	}
+
 	let next = 0;
 	for (const el of document.querySelectorAll("*")) {
 		el.setAttribute(ID, String(next++));
@@ -319,13 +330,14 @@ function buildDocument(
 	return document;
 }
 
-/** Margin-box heights of multi-column items, from a measured tree. */
+/** A container laid out in CSS columns. */
 interface MultiColumn {
 	count: number;
 	el: Element;
 	gap: string;
 }
 
+/** Margin-box heights of multi-column items, from a measured tree. */
 function itemHeights(
 	node: TakumiNode,
 	measured: MeasuredNode,
@@ -369,6 +381,7 @@ function itemHeights(
 	return heights;
 }
 
+/** Finds containers laid out in CSS columns, which takumi doesn't support. */
 function multiColumns(
 	document: Document,
 	styles: Map<Element, ComputedStyle>,
