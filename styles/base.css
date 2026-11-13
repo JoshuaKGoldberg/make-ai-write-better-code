@@ -269,9 +269,14 @@
 	justify-items: center;
 }
 
+/* Classic meme caption: white Impact with a black outline. */
 .captioned-gif p {
-	color: var(--jg-fg-strong);
-	font-size: var(--jg-size-large);
-	font-weight: var(--jg-weight-bold);
-	letter-spacing: 0.04em;
+	color: #ffffff;
+	font-family: Impact, "Arial Narrow Bold", sans-serif;
+	font-size: 3.25rem;
+	letter-spacing: 0.02em;
+	line-height: 1;
+	paint-order: stroke fill;
+	text-transform: uppercase;
+	-webkit-text-stroke: 0.4rem #000000;
 }

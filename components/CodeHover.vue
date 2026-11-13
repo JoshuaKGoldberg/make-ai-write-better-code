@@ -36,18 +36,35 @@ withDefaults(
 	font-size: var(--slidev-code-font-size);
 	left: calc(var(--code-origin-left) + var(--col) * 1ch);
 	line-height: var(--slidev-code-line-height);
-	opacity: 0;
 	pointer-events: none;
 	position: absolute;
 	top: calc(
 		var(--code-origin-top) + (var(--line) + 1) * var(--slidev-code-line-height)
 	);
-	transition: opacity var(--jg-duration-medium) ease;
 	z-index: 1;
 }
 
-.code-hover.shown {
+/* The squiggle appears first, then the tooltip slides down into place. */
+.squiggle,
+.tooltip {
+	opacity: 0;
+	transition:
+		opacity var(--jg-duration-medium) ease,
+		transform var(--jg-duration-medium) ease;
+}
+
+.tooltip {
+	transform: translateY(-0.5rem);
+}
+
+.shown .squiggle {
 	opacity: 1;
+}
+
+.shown .tooltip {
+	opacity: 1;
+	transform: none;
+	transition-delay: 300ms;
 }
 
 .squiggle {

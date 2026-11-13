@@ -178,6 +178,28 @@ https://learningtypescript.com
 layout: center
 ---
 
+<GitHubSquares />
+
+<p class="muted squares-caption">github.com/JoshuaKGoldberg</p>
+
+<style>
+.squares-caption {
+  font-size: 1rem;
+  margin-top: 1.25rem !important;
+  text-align: center;
+}
+</style>
+
+<!--
+These are my GitHub squares for the last five years. I've been in open source for over a decade now.
+
+For four of those years I was focused on dev tooling: typescript-eslint, create-typescript-app, and friends. Tools to make development better.
+-->
+
+---
+layout: center
+---
+
 # Quick Thoughts on Terminology
 
 <div class="big">
@@ -198,22 +220,6 @@ I really don't love that we call this "AI".
 So everything in this talk is about one question: how do you check the guesses?
 
 Better dev tooling has always made me a better developer. It turns out it also makes AI-written code better.
--->
-
----
-layout: default
----
-
-## A Note on Ecosystems
-
-<p class="big">This talk's examples are for TypeScript and React.</p>
-
-<p class="big" v-click>Its ideas apply to all ecosystems.</p>
-
-<!--
-A quick note before we dive in: this talk's examples are for TypeScript and React. This is React Summit, after all.
-
-[click] But the ideas apply to all ecosystems. Every language has type checkers, linters, tests, and reviewers, and every agent works better with them.
 -->
 
 ---
@@ -780,23 +786,31 @@ layout: default
 <div class="code-hovers hovers-below">
 
 ```ts
-const search = document.querySelector("input");
+let count: number | undefined;
 
-search.focus();
+try {
+	count = await fetchCount();
+} catch (error) {
+	console.error("Oh no:", error);
+}
+
+console.log(`I have ${count * 2} items.`);
 ```
 
-<CodeHover :col="0" :length="6" :line="2" message="'search' is possibly 'null'." source="ts(18047)" />
+<CodeHover :col="22" :length="5" :line="8" :shown="$clicks >= 1" message="'count' is possibly 'undefined'." source="ts(18048)" />
 
 </div>
 
-<p v-click>Without it, this compiles, then crashes on any page without an <code>&lt;input&gt;</code>.</p>
+<p v-click="2">Without it, this compiles, then prints “I have NaN items.” whenever the request fails.</p>
 
 <!--
 Type checkers flag code that blatantly doesn't make sense. The two compiler options that do the most here are strictNullChecks and noImplicitAny.
 
-strictNullChecks means null and undefined have to be handled. querySelector returns null when nothing matches, so TypeScript won't let you call focus on the result without checking it first.
+strictNullChecks means null and undefined have to be handled. Here, count only gets a value if the request succeeds.
 
-[click] Without strictNullChecks, this compiles just fine. Then it crashes at runtime on any page that doesn't have an input. Generated code makes this kind of "it's surely there" assumption constantly.
+[click] So TypeScript won't let you multiply it until you've handled the case where it didn't.
+
+[click] Without strictNullChecks, this compiles just fine. Then the first time the network hiccups, your users see "I have NaN items." And networks do hiccup. Generated code makes this kind of happy-path assumption constantly.
 -->
 
 ---
@@ -815,13 +829,13 @@ function formatTalk(talk) {
 }
 ```
 
-<CodeHover :col="20" :length="4" :line="0" :shown="$clicks < 1" message="Parameter 'talk' implicitly has an 'any' type." source="ts(7006)" />
+<CodeHover :col="20" :length="4" :line="0" :shown="$clicks === 1" message="Parameter 'talk' implicitly has an 'any' type." source="ts(7006)" />
 
 </div>
 
-<p v-click>Without it, <code>talk</code> is <code>any</code>, so the <code>speakr</code> typo isn't caught.</p>
+<p v-click="2">Without it, <code>talk</code> is <code>any</code>, so the <code>speakr</code> typo isn't caught.</p>
 
-<div v-click>
+<div v-click="3">
 
 <p class="muted">Both are on with:</p>
 
@@ -834,7 +848,7 @@ function formatTalk(talk) {
 </div>
 
 <!--
-noImplicitAny means every value needs a type TypeScript knows. Here, talk has no type annotation, so TypeScript reports an error.
+noImplicitAny means every value needs a type TypeScript knows. [click] Here, talk has no type annotation, so TypeScript reports an error.
 
 [click] Without noImplicitAny, talk is silently any. Anything goes, including the typo in "speakr". It'll print "undefined" at runtime and nothing will tell you.
 
@@ -883,7 +897,7 @@ layout: default
 
 <div class="code-hovers">
 
-````md magic-move {duration: 700}
+````md magic-move {duration: 700, at: 2}
 ```tsx
 function TalkCard({ talk }: TalkCardProps) {
 	const [favorite, setFavorite] = useState(false);
@@ -903,11 +917,11 @@ function TalkCard({ talk }: TalkCardProps) {
 ```
 ````
 
-<CodeHover :col="4" :length="11" :line="4" :shown="$clicks === 0" message="Calling setState synchronously within an effect can trigger cascading renders" source="eslint(react-hooks/set-state-in-effect)" />
+<CodeHover :col="4" :length="11" :line="4" :shown="$clicks === 1" message="Calling setState synchronously within an effect can trigger cascading renders" source="eslint(react-hooks/set-state-in-effect)" />
 
 </div>
 
-<p class="success" :class="{ shown: $clicks >= 1 }">so smart look at you ✅</p>
+<p class="success" :class="{ shown: $clicks >= 2 }">so smart look at you ✅</p>
 
 <style>
 .success {
@@ -925,7 +939,7 @@ function TalkCard({ talk }: TalkCardProps) {
 <!--
 Here's an example of code that type checks, but is probably wrong. It works. It's also an extra render, and it's a pattern React's docs tell you to avoid. Generated React code does it constantly.
 
-The React Compiler's rules are now in eslint-plugin-react-hooks's recommended config. `set-state-in-effect` flags exactly this: calling setState synchronously within an effect can trigger cascading renders.
+[click] The React Compiler's rules are now in eslint-plugin-react-hooks's recommended config. `set-state-in-effect` flags exactly this: calling setState synchronously within an effect can trigger cascading renders.
 
 [click] And the fix is less code. So smart, look at you.
 -->
@@ -970,7 +984,7 @@ zoom: 0.9
 
 <div class="code-hovers">
 
-````md magic-move {duration: 700, at: 2}
+````md magic-move {duration: 700, at: 3}
 ```tsx
 function MyButton({ onClick }: { onClick: () => void }) {
 	const [running, setRunning] = useState(false);
@@ -1084,17 +1098,17 @@ function MyButton({ onClick }: { onClick: () => void }) {
 ```
 ````
 
-<CodeHover :col="4" :length="15" :line="5" :shown="$clicks === 0" message="Unexpected `await` of a non-Promise (non-&quot;Thenable&quot;) value." source="eslint(@typescript-eslint/await-thenable)" />
+<CodeHover :col="4" :length="15" :line="5" :shown="$clicks === 1" message="Unexpected `await` of a non-Promise (non-&quot;Thenable&quot;) value." source="eslint(@typescript-eslint/await-thenable)" />
 
-<CodeHover :col="39" :length="19" :line="10" :shown="$clicks === 1" message="Promise-returning function provided to attribute where a void return was expected." source="eslint(@typescript-eslint/no-misused-promises)" />
+<CodeHover :col="39" :length="19" :line="10" :shown="$clicks === 2" message="Promise-returning function provided to attribute where a void return was expected." source="eslint(@typescript-eslint/no-misused-promises)" />
 
-<CodeHover :col="2" :length="34" :line="3" :shown="$clicks === 3" message="Async function 'onClickAndDisable' has no 'await' expression." source="eslint(@typescript-eslint/require-await)" />
+<CodeHover :col="2" :length="34" :line="3" :shown="$clicks === 4" message="Async function 'onClickAndDisable' has no 'await' expression." source="eslint(@typescript-eslint/require-await)" />
 
-<CodeHover :col="18" :length="10" :line="1" :shown="$clicks === 5" message="'setRunning' is assigned a value but never used." source="eslint(@typescript-eslint/no-unused-vars)" />
+<CodeHover :col="18" :length="10" :line="1" :shown="$clicks === 6" message="'setRunning' is assigned a value but never used." source="eslint(@typescript-eslint/no-unused-vars)" />
 
 </div>
 
-<p class="success" :class="{ shown: $clicks >= 8 }">so smart look at you ✅</p>
+<p class="success" :class="{ shown: $clicks >= 9 }">so smart look at you ✅</p>
 
 <style>
 .success {
@@ -1116,7 +1130,7 @@ I've been giving this example for years, and it's even more relevant now.
 
 This button component receives an onClick prop. It sets up a running state. When clicked, it sets running to true, awaits the onClick, then sets running to false. The button is disabled while running.
 
-Generated code loves this pattern. But typed linting knows onClick is typed as returning void. So `await onClick()` is awaiting something that isn't a Promise.
+[click] Generated code loves this pattern. But typed linting knows onClick is typed as returning void. So `await onClick()` is awaiting something that isn't a Promise.
 
 [click] And passing an async function to onClick means a Promise nobody handles.
 
@@ -1207,37 +1221,47 @@ That's what static analysis is for: an agent can run these in seconds after ever
 -->
 
 ---
-layout: center
----
-
-<img alt="Comic: a cyclist labeled 'Red editor squigglies' rides along; he puts a stick in his own front wheel labeled 'Disable the linter'; he crashes, labeled 'Why do we have so many bugs?!'" class="bike" src="/images/bike-meme.png" />
-
-<style>
-.bike {
-  height: 27rem;
-}
-</style>
-
-<!--
-Of course, the fastest way to make a lint error go away is to disable the rule.
--->
-
----
 layout: default
 ---
 
 ## Protip: Make Disables Explain Themselves
 
+<div class="disables">
+<div>
+
 <p class="big">Sometimes disabling a rule is right.</p>
 
-<p class="big" v-click>Most of the time it's not.</p>
+<p class="big" v-click="1">Most of the time it's not.</p>
 
-<p class="big" v-click>Every disable should say why.</p>
+<p class="big" v-click="3">Every disable should say why.</p>
+
+</div>
+
+<img alt="Comic: a cyclist labeled 'Red editor squigglies' rides along; he puts a stick in his own front wheel labeled 'Disable the linter'; he crashes, labeled 'Why do we have so many bugs?!'" class="bike" v-click="2" src="/images/bike-meme.png" />
+
+</div>
+
+<style>
+.disables {
+  align-items: start;
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: 1fr auto;
+}
+
+.bike {
+  height: 24rem;
+}
+</style>
 
 <!--
+Of course, the fastest way to make a lint error go away is to disable the rule.
+
 I'm not going to tell you to never disable the linter. Every project is unique, and sometimes disabling a rule is the right call.
 
 [click] Most of the time it's not. Most of the time, the rule found something real.
+
+[click] And that's how it goes: disable the linter, then wonder where all the bugs came from.
 
 [click] So every disable should say why. That way a reviewer, human or not, can check whether the reason holds up.
 -->
@@ -1298,12 +1322,46 @@ So tell them. Mention linting, type checking, and testing in your AGENTS.md. Inc
 -->
 
 ---
+layout: default
+---
+
+## Protip: Enable All the Lint Rules Relevant to You
+
+<p class="big">Every part of your stack has a plugin.</p>
+
+<p class="big" v-click>Use the strictest configs you can.</p>
+
+<div v-click>
+
+```ts
+export default defineConfig(
+	eslint.configs.recommended,
+	tseslint.configs.strictTypeChecked,
+	tseslint.configs.stylisticTypeChecked,
+	reactHooks.configs.flat.recommended,
+	jsxA11y.flatConfigs.strict,
+);
+```
+
+</div>
+
+<!--
+Most projects only turn on a fraction of the lint rules that apply to them. ESLint's own recommended config is a small core.
+
+But every part of your stack probably has a plugin: typescript-eslint for TypeScript, react-hooks for hooks and the React Compiler, jsx-a11y for accessibility.
+
+[click] And many plugins ship stricter configs past their recommended ones. Use the strictest ones your team can live with.
+
+[click] Every rule you turn on is one more check that runs on every change, for humans and agents alike.
+-->
+
+---
 layout: center
 ---
 
 <div class="captioned-gif">
+  <p>Needs more lint rules</p>
   <img alt="SNL's More Cowbell sketch: Will Ferrell gyrating with a cowbell behind Blue Oyster Cult" class="reaction" src="/images/needs-more-lint-rules.gif" />
-  <p>NEEDS MORE LINT RULES</p>
 </div>
 
 <!--
@@ -1954,7 +2012,7 @@ layout: default
 <ul>
   <li v-click>Gathered 3,092 review comments on ESLint, typescript-eslint, and Flint rule PRs</li>
   <li v-click>Distilled them into 178 patterns</li>
-  <li v-click>Tested on 5 PRs it had never seen: found 71% of the real reviewers' comments, vs. 64% for a plain review</li>
+  <li v-click>Rolled it out at Sentry: it found hundreds of improvements</li>
 </ul>
 
 <p class="protip" v-click>Writing custom lint rules? Review them with github.com/JoshuaKGoldberg/lint-rule-review-skill</p>
@@ -1974,7 +2032,7 @@ Here's an example. I review a lot of lint rules.
 
 [click] Distill: it found 178 recurring patterns and wrote them into a skill.
 
-[click] Test: we ran it on five pull requests it had never seen, graded blind against what the real reviewers said. The skill found 71% of their comments. A plain review found 64%. Not a replacement for a human, but a good first pass.
+[click] Then we rolled it out at Sentry, and it found hundreds of improvements. Not a replacement for a human, but a good first pass.
 
 [click] And a protip: if you're writing custom lint rules, like we talked about earlier, run them through this skill.
 -->
@@ -2206,8 +2264,6 @@ layout: center
 <Funnel
   :highlight="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
   :stages="['Core Systems', 'Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review', 'Telemetry', 'User Feedback']"
-  bottom="Some (never none)"
-  top="Many bugs"
 />
 
 <!--
