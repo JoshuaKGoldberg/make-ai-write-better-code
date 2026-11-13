@@ -161,12 +161,12 @@ export function extractState(
 			el.closest("[class]")?.getAttribute("class")?.trim().split(/\s+/)[0],
 			el.tagName.toLowerCase(),
 		].find(Boolean);
-	// An SVG shape's label: what its drawing is labeled as, else its own description.
+	// An SVG shape's label: its own class (like "bug"), else its drawing's label.
 	const shapeLabelOf = (shape: Element) =>
-		truncate(
-			shape.closest("[aria-label]")?.getAttribute("aria-label")?.trim() ?? "",
-			40,
-		) || labelOf(shape);
+		[
+			shape.getAttribute("class")?.trim().split(/\s+/)[0],
+			shape.closest("[aria-label]")?.getAttribute("aria-label")?.trim(),
+		].find(Boolean) ?? labelOf(shape);
 	// Text with spaces between blocks, so "<p>a</p><p>b</p>" reads "a b".
 	const textOf = (el: Element): string => {
 		const visit = (parent: Element): string =>
@@ -428,10 +428,8 @@ export function extractState(
 			let text = run.text.replace(/\s+/g, " ");
 			const core = text.trim();
 			if (style.upper && found >= 0 && core.length === needle.length) {
-				text = text.replace(
-					core,
-					sourceText.slice(found, found + needle.length),
-				);
+				const original = sourceText.slice(found, found + needle.length);
+				text = text.replace(core, () => original);
 			}
 
 			// Gaps between runs on a line (padding, margins, borders of inline elements) become
@@ -457,7 +455,7 @@ export function extractState(
 				const breaks = Math.max(newlineRun ? 1 : 0, newlines);
 				// PowerPoint can't break at a zero-width space (and the text drops them), so a
 				// wrap there is kept as a line break.
-				const atZeroWidth = (paragraph.at(-1)?.text ?? "").endsWith("​");
+				const atZeroWidth = (paragraph.at(-1)?.text ?? "").endsWith("\u200B");
 				const forced = breaks > 0 || atZeroWidth;
 				const spaced =
 					between === undefined
@@ -471,11 +469,13 @@ export function extractState(
 
 				// Each break past the first (as in "<br><br>") holds an empty line.
 				for (let extra = 1; extra < breaks; extra++) {
+					// A plain space, so text typed on the blank line looks like its neighbors.
 					paragraph.push({
 						...style,
+						href: undefined,
 						lineBreak: true,
 						text: " ",
-						transparency: 100,
+						underline: false,
 					});
 				}
 
@@ -750,7 +750,7 @@ export function extractState(
 			return;
 		}
 
-		const { box } = geometry(laidOut);
+		const { box, scale } = geometry(laidOut);
 		const natural = imageSize(
 			path.join(publicDir, decodeURIComponent(src.replace(/^\//, ""))),
 		);
@@ -768,7 +768,7 @@ export function extractState(
 		}
 
 		const radiusValue = styleOf(img)["border-top-left-radius"];
-		const radius = px(img, "border-top-left-radius");
+		const radius = px(img, "border-top-left-radius") * scale;
 		push({
 			alt: img.getAttribute("alt") ?? "",
 			box: content,
@@ -1104,7 +1104,7 @@ export function extractState(
 			const { border, fill, radius } = style;
 			for (const line of lines) {
 				push({
-					border,
+					border: border && { ...border, width: border.width * k },
 					box: {
 						h: (line.bottom - line.top + padY * 2) * k,
 						w: (line.right - line.left + padX * 2) * k,

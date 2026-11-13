@@ -117,6 +117,7 @@ const INITIAL = {
 const BORDER_WIDTHS: StyleMap = { medium: "3px", thick: "5px", thin: "1px" };
 
 const LENGTHS = [
+	"-webkit-text-stroke-width",
 	"border-bottom-width",
 	"border-left-width",
 	"border-right-width",
