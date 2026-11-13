@@ -949,7 +949,7 @@ layout: default
 
 </div>
 
-<img alt="Goku from Dragon Ball Z screaming as he powers up into a Super Saiyan" class="saiyan" src="/images/super-saiyan.gif" v-click="2" />
+<img alt="Goku from Dragon Ball Z screaming as he powers up into a Super Saiyan" class="saiyan" src="/images/super-saiyan.gif" v-click="4" />
 
 </div>
 
@@ -988,6 +988,8 @@ ESLint on its own sees the raw syntax of your code.
 [click] Using types to power up linting is next level power.
 
 [click] Typed linting gives lint rules access to TypeScript's type information. In typescript-eslint, that's the type-checked configs plus the project service. It's slower than syntax-only linting, and it catches a whole category of bugs nothing else does.
+
+[click] Next level power.
 
 Goku: https://giphy.com/gifs/super-saiyan-UBB6f0hKhlShy
 -->
