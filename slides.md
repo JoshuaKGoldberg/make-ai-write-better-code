@@ -938,11 +938,22 @@ layout: default
 
 ## Typed Linting
 
+<div class="typed-linting">
+<div>
+
 <p class="big">ESLint sees the raw syntax of your code.</p>
 
-<p class="big" v-click>TypeScript understands what that code means.</p>
+<p class="big" v-click="1">TypeScript understands what that code means.</p>
 
-<div v-click>
+<p class="big" v-click="2">Using types to power up linting is next level power.</p>
+
+</div>
+
+<img alt="Goku from Dragon Ball Z screaming as he powers up into a Super Saiyan" class="saiyan" src="/images/super-saiyan.gif" v-click="2" />
+
+</div>
+
+<div v-click="3">
 
 ```ts
 export default defineConfig(
@@ -953,6 +964,20 @@ export default defineConfig(
 
 </div>
 
+<style>
+.typed-linting {
+  align-items: center;
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: 1fr auto;
+}
+
+.saiyan {
+  border-radius: var(--jg-card-radius);
+  width: 11rem;
+}
+</style>
+
 <!--
 That rule only needed syntax. But a lot of the most useful rules need more.
 
@@ -960,7 +985,11 @@ ESLint on its own sees the raw syntax of your code.
 
 [click] TypeScript understands what that code means: what every value's type is.
 
+[click] Using types to power up linting is next level power.
+
 [click] Typed linting gives lint rules access to TypeScript's type information. In typescript-eslint, that's the type-checked configs plus the project service. It's slower than syntax-only linting, and it catches a whole category of bugs nothing else does.
+
+Goku: https://giphy.com/gifs/super-saiyan-UBB6f0hKhlShy
 -->
 
 ---
