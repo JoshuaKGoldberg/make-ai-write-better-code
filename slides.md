@@ -182,32 +182,8 @@ layout: full
 
 <!--
 I've been in open source for over a decade now. For four of those years I was focused on dev tooling: typescript-eslint, create-typescript-app, and friends. Tools to make development better.
--->
 
----
-layout: center
----
-
-# Quick Thoughts on Terminology
-
-<div class="big">
-  <p v-click>It's "<strong>Artificial</strong>".</p>
-  <p v-click>It's not real.</p>
-  <p v-click>The tools are guessing.</p>
-</div>
-
-<!--
-I really don't love that we call this "AI".
-
-[click] It's "artificial".
-
-[click] There's no real intelligence in there.
-
-[click] These tools are guessing. Often very good guessing, but guessing. Cory Doctorow called an LLM "the word-guessing machine" when he was on Software Engineering Daily with me.
-
-So everything in this talk is about one question: how do you check the guesses?
-
-Better dev tooling has always made me a better developer. It turns out it also makes AI-written code better.
+In my time working on corporate products, then on dev tooling in open source, then on corporate products again, I've come to really respect one idea above most others...
 -->
 
 ---
@@ -603,6 +579,11 @@ layout: default
   grid-template-columns: repeat(3, 1fr);
   margin: 2rem 0;
 }
+
+/* Keep the AGENTS.md heading flush with the text below it. */
+.context-grid h3 code {
+  padding-inline: 0;
+}
 </style>
 
 <!--
@@ -761,6 +742,24 @@ layout: section
 
 <!--
 First up, type checking.
+-->
+
+---
+layout: default
+---
+
+## TypeScript
+
+<p class="big">TypeScript is JavaScript with syntax for types.</p>
+
+<p class="big" v-click>Its type checker reads your code and reports what doesn't line up.</p>
+
+<!--
+TypeScript is JavaScript with syntax for types. You describe the shapes of your values: what's a string, what might be undefined, what a function takes and returns.
+
+[click] Its type checker reads your code without running it, and reports places where values are used in ways that don't line up with those types. You see those reports as red squiggles in your editor and as errors in CI. Agents can read them too.
+
+Two compiler options do most of the work for catching agent mistakes.
 -->
 
 ---
@@ -1357,6 +1356,7 @@ export default defineConfig(
 	eslint.configs.recommended,
 	tseslint.configs.strictTypeChecked,
 	tseslint.configs.stylisticTypeChecked,
+	react.configs.flat.recommended,
 	reactHooks.configs.flat.recommended,
 	jsxA11y.flatConfigs.strict,
 );
@@ -1364,27 +1364,34 @@ export default defineConfig(
 
 </div>
 
-<!--
-Most projects only turn on a fraction of the lint rules that apply to them. ESLint's own recommended config is a small core.
-
-But every part of your stack probably has a plugin: typescript-eslint for TypeScript, react-hooks for hooks and the React Compiler, jsx-a11y for accessibility.
-
-[click] And many plugins ship stricter configs past their recommended ones. Use the strictest ones your team can live with.
-
-[click] Every rule you turn on is one more check that runs on every change, for humans and agents alike.
--->
-
----
-layout: center
----
-
-<div class="captioned-gif">
+<div class="captioned-gif cowbell" v-click>
   <img alt="SNL's More Cowbell sketch: Will Ferrell gyrating with a cowbell behind Blue Oyster Cult" class="reaction" src="/images/needs-more-lint-rules.gif" />
   <p>Needs more lint rules</p>
 </div>
 
+<style>
+.cowbell {
+  left: 50%;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.cowbell.slidev-vclick-target {
+  transition: none;
+}
+</style>
+
 <!--
-Much of my career, this has been my reaction to lint rules.
+Most projects only turn on a fraction of the lint rules that apply to them. ESLint's own recommended config is a small core.
+
+But every part of your stack probably has a plugin: typescript-eslint for TypeScript, eslint-plugin-react and react-hooks for React and the React Compiler, jsx-a11y for accessibility.
+
+[click] And many plugins ship stricter configs past their recommended ones. Use the strictest ones your team can live with.
+
+[click] Every rule you turn on is one more check that runs on every change, for humans and agents alike.
+
+[click] Much of my career, this has been my reaction to lint rules.
 
 “More Cowbell”: Saturday Night Live
 -->
@@ -1749,6 +1756,89 @@ Next, integration and end-to-end testing.
 layout: default
 ---
 
+## Testing More Than One Piece
+
+<div class="principles test-scopes">
+  <div>
+    <h3>Unit</h3>
+    <p>One piece, in isolation.</p>
+  </div>
+  <div v-click>
+    <h3>Integration</h3>
+    <p>Pieces working together.</p>
+  </div>
+  <div v-click>
+    <h3>End-to-end</h3>
+    <p>The real app in a real browser, used the way a person would.</p>
+  </div>
+</div>
+
+<style>
+.test-scopes {
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 1.5rem;
+}
+</style>
+
+<!--
+Unit tests check one piece at a time, in isolation: a function, a hook, a component with everything around it mocked.
+
+[click] Integration tests check pieces working together: a component with its real state and data layer, with only the network faked.
+
+[click] End-to-end tests run the real app in a real browser and use it the way a person would. They're slower, and they catch the bugs that live between the pieces. Those are exactly the bugs an agent misses when it only reads one file at a time.
+-->
+
+---
+layout: default
+---
+
+## Example: An End-To-End Test
+
+```ts
+test("favorites survive a reload", async ({ page }) => {
+	await page.goto("/talks");
+	await page.getByRole("button", { name: "Favorite" }).first().click();
+
+	await page.reload();
+
+	await expect(
+		page.getByRole("button", { name: "Unfavorite" }).first(),
+	).toBeVisible();
+});
+```
+
+<p class="big" v-click>It fails when the page is broken, even if every function works.</p>
+
+<!--
+Here's what one looks like, in Playwright. Go to the talks page, favorite a talk, reload, and expect it to still be a favorite.
+
+Notice it finds things the way a user does: by role and by name. That doubles as an accessibility check.
+
+[click] And it fails when the page is broken, even if every function in it works on its own. That's the gap between unit tests and what users see.
+
+Agents are good at writing these, and good at running them. Put them in CI, and tell your agent to run them before it says it's done.
+-->
+
+---
+layout: default
+---
+
+## Agents Can Drive a Browser, Too
+
+<p class="big">Tests check the flows you thought to write down.</p>
+
+<p class="big" v-click>A browser lets an agent check the flow it just changed.</p>
+
+<!--
+End-to-end tests check the flows you thought to write down ahead of time.
+
+[click] But agents can also drive a browser directly, while they work. That lets an agent check the flow it just changed: click through it, look at it, read the console. Before it tells you it's done.
+-->
+
+---
+layout: default
+---
+
 ## Example: Giving the Agent a Browser
 
 ```json
@@ -1805,7 +1895,7 @@ You sure about that?
 layout: default
 ---
 
-## Protip: Check the Screen, Not the Numbers
+## Protip: Actually Verify Outputs
 
 <p class="big" v-click>Reasoning about code isn't running it.</p>
 
@@ -1826,6 +1916,58 @@ Agents verify their own work by reasoning about it all the time: "The code says 
 [click] Reasoning about code isn't running it. A unit test, or a model reading its own code, can say "this should work." Only the screen says whether it does.
 
 [click] So ask for evidence from the running page: screenshots, console output, network requests. And look at it yourself.
+-->
+
+---
+layout: statement
+---
+
+# The best testing is in production.
+
+<p class="muted" v-click>(Please be gentle to your users.)</p>
+
+<!--
+Here's a slightly spicy one: the best testing is in production. That's the only place with your real users, real data, and real devices.
+
+[click] Please be gentle to your users. They didn't sign up to be your test suite.
+-->
+
+---
+layout: default
+---
+
+## Protip: Watch What Users Actually Hit
+
+<div class="principles prod-signals">
+  <div>
+    <h3>Errors</h3>
+    <p>Real exceptions, with stack traces and how many people hit them.</p>
+  </div>
+  <div>
+    <h3>Performance</h3>
+    <p>Slow pages and requests, traced across services.</p>
+  </div>
+  <div>
+    <h3>Replays</h3>
+    <p>What someone saw and did right before it broke.</p>
+  </div>
+</div>
+
+<p class="big" v-click>Agents can read these too, through MCP servers like Sentry's.</p>
+
+<style>
+.prod-signals {
+  grid-template-columns: repeat(3, 1fr);
+  margin: 1.5rem 0;
+}
+</style>
+
+<!--
+So watch what users actually hit, with an observability or monitoring tool. You want errors with real stack traces and counts, performance traces for slow pages and requests, and replays of what someone saw and did right before it broke.
+
+[click] And agents can read these too. Sentry has an MCP server, and so do other observability tools. Point an agent at a real production issue and it starts from evidence instead of a guess.
+
+Full disclosure: I work at Sentry, and this is the thing we build. Whatever you use, use something.
 -->
 
 ---
@@ -1868,54 +2010,23 @@ layout: default
 
 ## Is the Spec Correct?
 
-<div class="spec-checks">
-  <div v-click>
-    <p class="muted">Is it written right?</p>
-    <p class="accent">✓ Types ✓ Lint</p>
-  </div>
-  <div v-click>
-    <p class="muted">Does it match the spec?</p>
-    <p class="accent">✓ Tests ✓ Screenshots</p>
-  </div>
-</div>
-
-<p class="big" v-click>Tools check the code against the spec. Only people can check the spec against what users need.</p>
+<p class="big">Tools check the code against the spec. Only people can check the spec against what users need.</p>
 
 <p class="accent cta" v-click>Have a human review every PR that ships to real users.</p>
 
 <style>
-.spec-checks {
-  display: grid;
-  gap: 2.5rem;
-  grid-template-columns: 1fr 1fr;
-  margin: 1.5rem 0 2.5rem;
-}
-
-.spec-checks p {
-  margin: 0;
-}
-
 .cta {
   font-size: var(--jg-size-subtitle);
   font-weight: 600;
   margin-top: 1.5rem !important;
   white-space: nowrap;
 }
-
-.spec-checks .accent {
-  font-size: var(--jg-size-large);
-  font-weight: 600;
-}
 </style>
 
 <!--
-Let's look back at the funnel's questions.
+Types, lint, and tests all answer the funnel's earlier questions: is it written right, and does it match the spec?
 
-[click] Is it written right? Types and lint answer that.
-
-[click] Does it match the spec? Tests and screenshots answer that.
-
-[click] But the last question is different. Tools check the code against the spec. Only people can check the spec against what users actually need. That's the most valuable part of review now.
+But the last question is different. Tools check the code against the spec. Only people can check the spec against what users actually need. That's the most valuable part of review now.
 
 [click] Have a human review every PR that ships to real users. Spend that review time on the plan and the tests, not just the diff.
 -->
@@ -2252,9 +2363,11 @@ layout: default
   <p>Facts in <code>AGENTS.md</code>, procedures in skills, rules in CI.</p>
   <p>Make disables explain themselves.</p>
   <p>Tell your LLMs to respect the linter.</p>
+  <p>Enable all the lint rules relevant to you.</p>
   <p>Turn review comments into lint rules.</p>
   <p>Respect, add to, and use the spec.</p>
-  <p>Check the screen, not the numbers.</p>
+  <p>Actually verify outputs.</p>
+  <p>Watch what users actually hit.</p>
   <p>Distill repeated work into skills.</p>
   <p>Have a human review what ships.</p>
   <p>Never trust an AI.</p>
@@ -2278,38 +2391,6 @@ layout: default
 These are photo-capable slides, if you want.
 
 All the protips from today, in one place.
--->
-
----
-layout: statement
----
-
-# Progress Is Good, Actually
-
-<p>Web dev tooling is always in flux because we're always developing newer and better techniques.</p>
-
-<p v-click>The faster a platform is growing, the more painful it is to use.</p>
-
-<p v-click>The more painful a platform's growth, the faster it is improving. <span class="muted">(ish)</span></p>
-
-<!--
-Web dev tooling is always in flux because we're always developing newer and better techniques. Agents are one more of those.
-
-[click] And yes, the faster a platform is growing, the more painful it is to use. Agents are painful right now.
-
-[click] But flip it around: the more painful a platform's growth, the faster it's improving. Ish. The guardrails we already had are what make agents work well, and they're getting better too.
--->
-
----
-layout: center
----
-
-<img alt="SpongeBob grinning and pumping his fists, captioned: yay" class="reaction" src="/images/spongebob-yay.gif" />
-
-<!--
-Yay!
-
-“Yay”: https://giphy.com/gifs/dance-spongebob-bob-nDSlfqf0gn5g4
 -->
 
 ---
