@@ -28,6 +28,7 @@ import {
 	patchSlide,
 	tidyPackage,
 } from "./ooxml.ts";
+import { truncate } from "./text.ts";
 
 export interface WriteOptions {
 	/** The deck's author, for the file's properties. */
@@ -78,6 +79,8 @@ const LAYOUT_WIDTH_INCHES = 13.333;
 const EMU_PER_INCH = 914400;
 const inches = (px: number) => (px * LAYOUT_WIDTH_INCHES) / SLIDE.width;
 const points = (px: number) => inches(px) * 72;
+/** A rotation in [0, 360), as PowerPoint writes them. */
+const degrees = (rotation: number) => ((rotation % 360) + 360) % 360;
 
 /**
  * PowerPoint rounds exact line spacing to whole points, so text uses multiples: a
@@ -295,9 +298,10 @@ function createItemWriter({
 
 		const pieces: Run[] = [];
 		for (const ch of run.text) {
+			// Emoji and invisible format characters (like zero-width spaces) need no fallback.
 			const missing =
 				!coverage.has(ch.codePointAt(0) ?? 0) &&
-				!/\p{Extended_Pictographic}/u.test(ch);
+				!/[\p{Extended_Pictographic}\p{Cf}]/u.test(ch);
 			const font = missing ? fallbackFont : run.font;
 			const last = pieces.at(-1);
 			if (last?.font === font) {
@@ -307,6 +311,7 @@ function createItemWriter({
 					...run,
 					bold: missing ? /(?:SemiBold|Bold|Black)$/.test(run.font) : run.bold,
 					font,
+					lineBreak: pieces.length ? undefined : run.lineBreak,
 					softBreak: pieces.length ? undefined : run.softBreak,
 					text: ch,
 				});
@@ -332,7 +337,7 @@ function createItemWriter({
 		paragraphs.forEach((paragraph, i) => {
 			const last = i === paragraphs.length - 1;
 			const pieces: Run[] = paragraph.runs.length
-				? paragraph.runs.flatMap(splitFallback)
+				? mergeRuns(paragraph.runs.flatMap(splitFallback), wrap)
 				: [{ ...(first ?? emptyRun(code)), text: "", transparency: 100 }];
 			const surrounding =
 				pieces.find((run) => !run.superscript)?.size ?? pieces[0].size;
@@ -362,7 +367,10 @@ function createItemWriter({
 						? Math.round(points(paragraph.spaceAfter) * 10) / 10
 						: undefined,
 					// Wrapping boxes rewrap as their text is edited; others keep the browser's lines.
-					softBreakBefore: !wrap && run.softBreak === true ? true : undefined,
+					softBreakBefore:
+						run.lineBreak === true || (!wrap && run.softBreak === true)
+							? true
+							: undefined,
 					superscript: run.superscript || undefined,
 					transparency: run.transparency || undefined,
 					underline: run.underline ? { style: "sng" } : undefined,
@@ -477,16 +485,36 @@ function createItemWriter({
 			);
 		}
 
-		// PowerPoint rewraps wrapping text itself, so it gets the browser's width plus just
-		// enough slack for rounding: any more and lines would take words the browser wrapped.
-		// Rotated boxes turn about their centers, so they keep the browser's exact size.
-		const slack = style.nowrap || rotation ? 0 : Math.max(2, box.w * 0.01);
+		// Text the browser wrapped gets just enough slack for rounding, so PowerPoint's lines
+		// don't take words the browser wrapped; one-line text gets more, so PowerPoint's
+		// slightly different measuring never wraps it. Rotated boxes turn about their
+		// centers, so they keep the browser's exact size.
+		const slack =
+			style.nowrap || rotation
+				? 0
+				: style.wrapRight === undefined
+					? Math.max(10, box.w * 0.06)
+					: Math.max(2, box.w * 0.01);
 		// Wrapped left-aligned text wraps where the browser's longest line ended.
 		const width =
 			style.wrapRight !== undefined && style.align === "left" && !rotation
 				? Math.min(box.w, style.wrapRight - box.x)
 				: box.w;
-		const extra = style.nowrap && !rotation ? Math.max(8, box.w * 0.08) : 0;
+		// One-line text gets room to grow, but only as far as the slide's edges allow, on the
+		// side(s) its alignment grows it toward.
+		const roomLeft = Math.max(0, box.x);
+		const roomRight = Math.max(0, SLIDE.width - (box.x + box.w));
+		const extra =
+			style.nowrap && !rotation
+				? Math.min(
+						Math.max(8, box.w * 0.08),
+						style.align === "center"
+							? 2 * Math.min(roomLeft, roomRight)
+							: style.align === "right"
+								? roomLeft
+								: roomRight,
+					)
+				: 0;
 		const bulletGap =
 			item.kind === "list" ? BULLET_GAP * (firstRun?.size ?? 16) : 0;
 		const shift =
@@ -505,7 +533,7 @@ function createItemWriter({
 			isTextBox: true,
 			margin: 0,
 			objectName: name,
-			rotate: rotation || undefined,
+			rotate: rotation ? degrees(rotation) : undefined,
 			shadow: shadow && {
 				angle: Math.round((Math.atan2(shadow.dy, shadow.dx) * 180) / Math.PI),
 				blur: Math.max(0, points(shadow.blur)),
@@ -559,7 +587,7 @@ function createItemWriter({
 							line: lineFor(item.border),
 							objectName: name,
 							rectRadius: radius > 0.5 ? inches(radius) : undefined,
-							rotate: item.rotation || undefined,
+							rotate: item.rotation ? degrees(item.rotation) : undefined,
 						},
 					);
 					return [name];
@@ -656,6 +684,30 @@ const position = (box: Box) => ({
 	y: inches(box.y),
 });
 
+/**
+ * Joins neighboring runs that look alike (as takumi splits text per line), so each
+ * link, word, or phrase is one run to edit, except where a line break is kept.
+ */
+function mergeRuns(runs: Run[], wrap: boolean) {
+	const breakAndText = new Set(["lineBreak", "softBreak", "text"]);
+	const format = (run: Run) =>
+		JSON.stringify(run, (name, value: unknown) =>
+			breakAndText.has(name) ? undefined : value,
+		);
+	const merged: Run[] = [];
+	for (const run of runs) {
+		const previous = merged.at(-1);
+		const breaks = run.lineBreak === true || (!wrap && run.softBreak === true);
+		if (previous && !breaks && format(previous) === format(run)) {
+			previous.text += run.text;
+		} else {
+			merged.push({ ...run });
+		}
+	}
+
+	return merged;
+}
+
 /** A fingerprint of an item's appearance, ignoring identity, naming, position, and list paragraph visibility. */
 function appearanceOf(item: Item) {
 	const ignored = new Set([
@@ -750,14 +802,11 @@ function uniqueName(item: Item, used: Set<string>) {
 			text: "Text",
 		} satisfies Record<Item["kind"], string>
 	)[item.kind];
-	// Names are matched back to shapes in the XML, so keep them free of characters XML escapes.
-	const base = `${label}${text ? `: ${text}` : ""}`
-		.replace(/&/g, "and")
-		.replace(/'/g, "\u2019")
-		.replace(/["<>\u200B]/g, "")
+	const full = `${label}${text ? `: ${text}` : ""}`
+		.replace(/\p{Cf}/gu, "")
 		.replace(/\s+/g, " ")
-		.trim()
-		.slice(0, 48);
+		.trim();
+	const base = truncate(full, 48);
 	let name = base;
 	for (let n = 2; used.has(name); n++) {
 		name = `${base} (${String(n)})`;

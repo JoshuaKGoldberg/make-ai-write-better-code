@@ -140,6 +140,8 @@ export interface Run {
 	href?: string;
 	/** px */
 	letterSpacing: number;
+	/** Starts a new line within its paragraph where the source forced one, as a line break does. */
+	lineBreak?: boolean;
 	/** A spacer run standing in for padding, margins, or borders between runs. */
 	pad?: boolean;
 	shadow?: Shadow;

@@ -3,6 +3,7 @@
  * text with styled runs and exact line breaks, lists, code, boxes, images, SVG
  * shapes, and rasters for anything PowerPoint can't represent natively.
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -22,8 +23,9 @@ import type {
 } from "./model.ts";
 
 import { INITIAL_STYLE, parseColor, toPx } from "./cascade.ts";
-import { ID } from "./layout.ts";
+import { BACKGROUND_ONLY, ID } from "./layout.ts";
 import { SLIDE } from "./model.ts";
+import { truncate } from "./text.ts";
 
 export interface Raster {
 	/** The slide area to render, in slide px: the element and its descendants, with room for glows. */
@@ -32,8 +34,8 @@ export interface Raster {
 	selector: string;
 }
 
-/** Room around a raster's element for strokes, shadows, and glows that paint outside it. */
-const RASTER_MARGIN = 12;
+/** Room around a raster's element for strokes and antialiasing, beyond its shadows' reach. */
+const RASTER_MARGIN = 4;
 
 type ItemInput = Item extends infer T
 	? T extends Item
@@ -121,13 +123,66 @@ export function extractState(
 		parseFloat(styleOf(el)[prop] ?? "") || 0;
 	const idOf = (el: Element) => el.getAttribute(ID) ?? "";
 	const boxOf = (el: Element) => boxes.get(idOf(el));
+	// An element's text as the browser lays it out: collapsible white space as single
+	// spaces, and preserved newlines and <br>s as "\n".
+	const sourceTextOf = (root: Element | undefined) => {
+		let out = "";
+		const visit = (node: Node) => {
+			if (node.nodeType === node.TEXT_NODE) {
+				const parent = node.parentElement;
+				const preserved =
+					parent !== null &&
+					/^(?:pre|pre-wrap|pre-line|break-spaces)$/.test(
+						styleOf(parent)["white-space"],
+					);
+				out += (node.textContent ?? "").replace(
+					preserved ? /[ \t]+/g : /\s+/g,
+					" ",
+				);
+			} else if (node.nodeName === "BR") {
+				out += "\n";
+			} else {
+				node.childNodes.forEach(visit);
+			}
+		};
+
+		if (root) {
+			visit(root);
+		}
+
+		return out;
+	};
+
 	// A short description of an element: its text, else its accessible name or first class.
 	const labelOf = (el: Element) =>
 		[
-			el.textContent.replace(/\s+/g, " ").trim().slice(0, 40),
+			truncate(textOf(el), 40),
 			el.getAttribute("aria-label")?.trim(),
-			el.classList[0],
+			el.getAttribute("class")?.trim().split(/\s+/)[0],
+			el.tagName.toLowerCase(),
 		].find(Boolean);
+	// Text with spaces between blocks, so "<p>a</p><p>b</p>" reads "a b".
+	const textOf = (el: Element): string => {
+		const visit = (parent: Element): string =>
+			[...parent.childNodes]
+				.map((node) => {
+					if (node.nodeType === node.TEXT_NODE) {
+						return node.textContent ?? "";
+					}
+
+					if (node.nodeType !== node.ELEMENT_NODE) {
+						return "";
+					}
+
+					const child = node as Element;
+					const text = visit(child);
+					return styleOf(child).display.startsWith("inline")
+						? text
+						: ` ${text} `;
+				})
+				.join("");
+		return visit(el).replace(/\s+/g, " ").trim();
+	};
 
 	const opacityOf = (el: Element) => {
 		let product = 1;
@@ -319,10 +374,22 @@ export function extractState(
 		let previous: LaidOutRun | undefined;
 		let right = -Infinity;
 		let wrapped = false;
+		// takumi drops whatever the browser broke a line at, so read it from the DOM text.
+		const source = sourceTextOf(el ?? byId.get(entry.parent)).toLowerCase();
+		let cursor = 0;
+		let newlineRun = false;
 		for (const run of entry.runs) {
 			const owner = byId.get(run.owner);
 			if (!owner || /^\n+$/.test(run.text)) {
+				newlineRun ||= run.text.includes("\n");
 				continue;
+			}
+
+			const needle = run.text.replace(/\s+/g, " ").trim().toLowerCase();
+			const found = needle ? source.indexOf(needle, cursor) : -1;
+			const between = found < 0 ? undefined : source.slice(cursor, found);
+			if (found >= 0) {
+				cursor = found + needle.length;
 			}
 
 			const style = runStyle(owner, opacityFor(owner));
@@ -371,19 +438,29 @@ export function extractState(
 			}
 
 			if (newLine) {
-				wrapped = true;
-				// The browser wrapped at a space (which collapses away at the wrap) unless the
-				// line ends at another break opportunity, a hyphen or zero-width space.
+				// A forced break (<br>, or a newline in preserved white space) stays a line
+				// break; a wrap keeps the space it wrapped at, if any, so PowerPoint can rewrap.
+				const forced = newlineRun || (between?.includes("\n") ?? false);
+				const spaced =
+					between === undefined
+						? !/[-\u200B]$/.test(paragraph.at(-1)?.text.trimEnd() ?? "")
+						: /\s/.test(between);
+				wrapped ||= !forced;
 				const last = paragraph.at(-1);
 				if (last && !last.pad) {
-					const trimmed = last.text.trimEnd();
-					last.text = /[-\u200B]$/.test(trimmed) ? trimmed : `${trimmed} `;
+					last.text = last.text.trimEnd() + (spaced && !forced ? " " : "");
 				}
 
-				paragraph.push({ ...style, softBreak: true, text: text.trimStart() });
+				paragraph.push({
+					...style,
+					...(forced ? { lineBreak: true } : { softBreak: true }),
+					text: text.trimStart(),
+				});
 			} else {
 				paragraph.push({ ...style, text });
 			}
+
+			newlineRun = false;
 		}
 
 		if (paragraph.length) {
@@ -397,6 +474,7 @@ export function extractState(
 			}
 
 			paragraph[0].softBreak = undefined;
+			paragraph[0].lineBreak = undefined;
 		}
 
 		return {
@@ -404,6 +482,7 @@ export function extractState(
 			paragraphs: [
 				{ runs: paragraph.filter((run) => run.text.length) },
 			] as Paragraph[],
+			right,
 			wrapRight: wrapped ? right : undefined,
 		};
 	};
@@ -587,15 +666,20 @@ export function extractState(
 		const { box: listBox, scale } = geometry(laidOut);
 		const lis = [...list.children].filter((li) => li.tagName === "LI");
 		const listStyle = styleOf(list)["list-style-type"];
-		let wrapRight: number | undefined;
+		let right = -Infinity;
+		const wraps: boolean[] = [];
 		const paragraphs: ListParagraph[] = lis.map((li) => {
 			const entry = runs.get(idOf(li));
 			const converted = entry
 				? runsToParagraphs(entry, () => opacity, li)
-				: { baselines: [], paragraphs: [{ runs: [] }], wrapRight: undefined };
-			if (converted.wrapRight !== undefined) {
-				wrapRight = Math.max(wrapRight ?? -Infinity, converted.wrapRight);
-			}
+				: {
+						baselines: [],
+						paragraphs: [{ runs: [] }],
+						right: -Infinity,
+						wrapRight: undefined,
+					};
+			right = Math.max(right, converted.right);
+			wraps.push(converted.wrapRight !== undefined);
 
 			const liRuns = converted.paragraphs.flatMap((p) => p.runs);
 			return {
@@ -621,7 +705,8 @@ export function extractState(
 				align: alignOf(first ?? list),
 				lineHeight: lineHeightOf(first ?? list) * scale,
 				nowrap: false,
-				wrapRight,
+				// Where the longest line of any item ends, wrapped or not, once any item wrapped.
+				wrapRight: wraps.includes(true) ? right : undefined,
 			},
 		});
 	};
@@ -695,19 +780,49 @@ export function extractState(
 			return slide;
 		}
 
-		const x = Math.max(0, Math.floor(left - RASTER_MARGIN));
-		const y = Math.max(0, Math.floor(top - RASTER_MARGIN));
+		const margin = RASTER_MARGIN + paintOverflowOf(el);
+		const x = Math.max(0, Math.floor(left - margin));
+		const y = Math.max(0, Math.floor(top - margin));
 		return {
-			h: Math.min(SLIDE.height, Math.ceil(bottom + RASTER_MARGIN)) - y,
-			w: Math.min(SLIDE.width, Math.ceil(right + RASTER_MARGIN)) - x,
+			h: Math.min(SLIDE.height, Math.ceil(bottom + margin)) - y,
+			w: Math.min(SLIDE.width, Math.ceil(right + margin)) - x,
 			x,
 			y,
 		};
 	};
 
+	// How far shadows and filters may paint past an element or its descendants: at most
+	// the sum of their lengths (offsets, blur, spread), which bounds each shadow's reach.
+	const rootFontSize =
+		parseFloat(styleOf(document.documentElement)["font-size"]) || 16;
+	const paintOverflowOf = (el: Element) =>
+		Math.max(
+			0,
+			...[el, ...el.querySelectorAll("*")].map((node) => {
+				const style = styleOf(node);
+				const fontSize = parseFloat(style["font-size"]) || 16;
+				return Math.max(
+					...["box-shadow", "filter", "text-shadow"].map((property) =>
+						[
+							...(style[property] ?? "").matchAll(/-?[\d.]+(?:px|r?em)\b/g),
+						].reduce(
+							(sum, [length]) =>
+								sum + Math.abs(toPx(length, fontSize, rootFontSize)),
+							0,
+						),
+					),
+				);
+			}),
+		);
+
 	const rasterItem = (el: Element, reason: string) => {
-		const id = `r${String(no)}-${String(rasters.length)}`;
+		// Identified by the element, so its renders in different click states line up.
+		const id = `r${String(no)}-${createHash("sha1").update(pathOf(el)).digest("hex").slice(0, 8)}`;
 		const box = rasterBox(el);
+		if (box.w <= 0 || box.h <= 0) {
+			return;
+		}
+
 		rasters.push({ box, id, selector: `[${ID}="${idOf(el)}"]` });
 		push({
 			box,
@@ -960,6 +1075,7 @@ export function extractState(
 					fill,
 					key: `${pathOf(child)}#pill:${String(Math.round(line.left))}`,
 					kind: "box",
+					label: labelOf(child),
 					radius: radius * k,
 					rotation: 0,
 				});
@@ -976,7 +1092,7 @@ export function extractState(
 		if (
 			opacity < 0.05 ||
 			["head", "script", "style", "template"].includes(tag) ||
-			el.classList.contains("ambient")
+			el.matches(BACKGROUND_ONLY)
 		) {
 			return;
 		}
@@ -1003,20 +1119,13 @@ export function extractState(
 			}
 
 			for (const edge of edges ?? []) {
-				const w = edge.width * scale;
 				push({
-					box: {
-						h: ["left", "right"].includes(edge.side) ? b.h : w,
-						w: ["left", "right"].includes(edge.side) ? w : b.w,
-						x: edge.side === "right" ? b.x + b.w - w : b.x,
-						y: edge.side === "bottom" ? b.y + b.h - w : b.y,
-					},
+					...edgeBox(b, edge, box.radius * scale, scale, rotation),
 					fill: edge.fill,
 					key: `${pathOf(el)}#border-${edge.side}`,
 					kind: "box",
 					label: `${edge.side} border${label ? ` of ${label}` : ""}`,
 					radius: 0,
-					rotation,
 				});
 			}
 		}
@@ -1083,6 +1192,48 @@ function imageSize(file: string): undefined | { h: number; w: number } {
 const ascentRatio = (font: string) =>
 	ASCENT_RATIOS.find(([pattern]) => pattern.test(font))?.[1] ??
 	DEFAULT_ASCENT_RATIO;
+
+/**
+ * One side's border as its own thin rectangle. Rounded corners shorten it by the radius
+ * at each end, and a rotated element's edges turn with it about the element's center.
+ */
+function edgeBox(
+	box: Box,
+	edge: { side: Side; width: number },
+	radius: number,
+	scale: number,
+	rotation: number,
+): { box: Box; rotation: number } {
+	const thickness = edge.width * scale;
+	const vertical = edge.side === "left" || edge.side === "right";
+	const inset = Math.min(radius, (vertical ? box.h : box.w) / 2);
+	const local: Box = vertical
+		? {
+				h: box.h - inset * 2,
+				w: thickness,
+				x: edge.side === "right" ? box.x + box.w - thickness : box.x,
+				y: box.y + inset,
+			}
+		: {
+				h: thickness,
+				w: box.w - inset * 2,
+				x: box.x + inset,
+				y: edge.side === "bottom" ? box.y + box.h - thickness : box.y,
+			};
+	if (!rotation) {
+		return { box: local, rotation: 0 };
+	}
+
+	const angle = (rotation * Math.PI) / 180;
+	const dx = local.x + local.w / 2 - (box.x + box.w / 2);
+	const dy = local.y + local.h / 2 - (box.y + box.h / 2);
+	const cx = box.x + box.w / 2 + dx * Math.cos(angle) - dy * Math.sin(angle);
+	const cy = box.y + box.h / 2 + dx * Math.sin(angle) + dy * Math.cos(angle);
+	return {
+		box: { ...local, x: cx - local.w / 2, y: cy - local.h / 2 },
+		rotation,
+	};
+}
 
 /** The unrotated box, rotation (degrees), and scale of a node from takumi's absolute transform. */
 function geometry(box: LaidOutBox): Geometry {

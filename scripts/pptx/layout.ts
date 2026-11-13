@@ -21,6 +21,12 @@ import { SLIDE } from "./model.ts";
 /** The attribute that ties takumi's nodes back to DOM elements. */
 export const ID = "data-pptx-id";
 
+/**
+ * Decoration painted into the slide background image instead of becoming shapes: the
+ * deck's blurred ambient glows, which PowerPoint can't draw natively.
+ */
+export const BACKGROUND_ONLY = ".ambient";
+
 export interface Css {
 	rules: CascadeRule[];
 	sheets: string[];
@@ -177,8 +183,7 @@ export async function createLayout({
 		};
 	}
 
-	/** Renders one element of a slide state (everything else hidden) to a full-slide transparent PNG at 2x. */
-	/** Renders just the element `selector` matches, cropped to `box` (in slide px), as a transparent PNG at 2x. */
+	/** Renders just the element `selector` matches (everything else hidden), cropped to `box` in slide px, as a transparent PNG at 2x. */
 	async function rasterize(
 		no: number,
 		html: string,
@@ -226,12 +231,20 @@ export async function createLayout({
 		});
 	}
 
-	/** Renders the slide canvas background, and the deck's global-bottom layer, to a PNG at 2x. */
+	/** Renders the slide canvas background, and the global-bottom layer's background-only decoration, to a PNG at 2x. */
 	async function renderBackground(
 		globalBottom: string,
 		{ sheets }: Pick<Css, "sheets">,
 	) {
 		const document = buildDocument(1, "", { globalBottom });
+		// Everything else in the layer (like a progress bar) varies by slide and becomes shapes.
+		const keep = [...document.querySelectorAll(BACKGROUND_ONLY)];
+		for (const el of document.querySelectorAll(".slidev-slide-content > *")) {
+			if (!keep.some((kept) => el === kept || el.contains(kept))) {
+				appendStyle(el, "visibility:hidden");
+			}
+		}
+
 		return renderer.render(toTakumi(document), {
 			css: sheets,
 			devicePixelRatio: 2,

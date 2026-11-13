@@ -1,7 +1,8 @@
 /**
- * PresentationML post-processing for what pptxgenjs can't express: click
- * animations, transitions, gradient fills, bullet styling, kerning, rounded
- * picture corners, and deduplicated media.
+ * PresentationML post-processing for what pptxgenjs can't express or gets wrong: click
+ * animations, transitions, gradient fills, bullet styling, kerning, rounded picture
+ * corners, decorative pictures, one paragraph-properties element per paragraph, notes
+ * paragraphs, deduplicated media, and accurate content types.
  */
 import type JSZip from "jszip";
 
@@ -128,7 +129,7 @@ export function patchSlide(
 			.slice(start, end)
 			.replaceAll(
 				'<a:buSzPct val="100000"/><a:buChar char="&#x2022;"',
-				`<a:buClr><a:srgbClr val="${color}"/></a:buClr><a:buSzPct val="60000"/><a:buFont typeface="Arial"/><a:buChar char="&#x25CF;"`,
+				`<a:buClr><a:srgbClr val="${color.toUpperCase()}"/></a:buClr><a:buSzPct val="60000"/><a:buFont typeface="Arial"/><a:buChar char="&#x25CF;"`,
 			);
 		out = out.slice(0, start) + shape + out.slice(end);
 	}
@@ -175,7 +176,7 @@ function singleParagraphProperties(xml: string) {
 	});
 }
 
-/** Deduplicates identical media (pptxgenjs embeds a shared background once per slide) and drops folder entries. */
+/** Package-wide cleanup: deduplicates identical media, splits notes into paragraphs, prunes content types, and drops folder entries. */
 export async function tidyPackage(zip: JSZip) {
 	const canonical = new Map<string, string>();
 	const replacements = new Map<string, string>();
@@ -253,7 +254,7 @@ async function splitNotesParagraphs(zip: JSZip) {
 							.split(/\r?\n/)
 							.map((line) =>
 								line
-									? `<a:p><a:r>${properties}<a:t>${line}</a:t></a:r></a:p>`
+									? `<a:p>${notesRuns(line, properties)}</a:p>`
 									: `<a:p>${end}</a:p>`,
 							)
 							.join("")
@@ -263,6 +264,39 @@ async function splitNotesParagraphs(zip: JSZip) {
 			zip.file(name, out);
 		}
 	}
+}
+
+/** A notes line's runs, with Markdown's inline `code`, **bold**, and *italic* formatted. */
+function notesRuns(line: string, properties: string) {
+	const run = (text: string, format: "b" | "code" | "i" | undefined) => {
+		const rPr =
+			format === "code"
+				? properties.replace("/>", '><a:latin typeface="Menlo"/></a:rPr>')
+				: format
+					? properties.replace("<a:rPr ", `<a:rPr ${format}="1" `)
+					: properties;
+		return `<a:r>${rPr}<a:t>${text}</a:t></a:r>`;
+	};
+
+	let out = "";
+	let index = 0;
+	for (const match of line.matchAll(
+		/`([^`]+)`|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|\b_([^_\s][^_]*)_\b/g,
+	)) {
+		if (match.index > index) {
+			out += run(line.slice(index, match.index), undefined);
+		}
+
+		const [whole, ...groups] = match;
+		const text = groups.find(Boolean) ?? "";
+		out += run(
+			text,
+			whole.startsWith("`") ? "code" : whole.startsWith("**") ? "b" : "i",
+		);
+		index = match.index + match[0].length;
+	}
+
+	return out + (index < line.length ? run(line.slice(index), undefined) : "");
 }
 
 /** Drops content types for parts and extensions the package doesn't have, and fixes jpg's. */
@@ -290,15 +324,18 @@ async function tidyContentTypes(zip: JSZip) {
 	zip.file("[Content_Types].xml", xml);
 }
 
+/** Escapes text for an XML attribute exactly as pptxgenjs does, so names can be found again. */
 const escapeXml = (value: string) =>
 	value
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&apos;");
 const unescapeXml = (value: string) =>
 	value
 		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
 		.replace(/&lt;/g, "<")
 		.replace(/&gt;/g, ">")
 		.replace(/&amp;/g, "&");

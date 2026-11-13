@@ -52,10 +52,13 @@ export async function buildPptx({
 
 	const renderer = await createSlideRenderer(path.resolve(root, entry));
 	try {
-		const missing = only?.filter((no) => no > renderer.count) ?? [];
-		if (missing.length) {
+		const invalid =
+			only?.filter(
+				(no) => !Number.isInteger(no) || no < 1 || no > renderer.count,
+			) ?? [];
+		if (only?.length === 0 || invalid.length) {
 			throw new Error(
-				`The deck has ${String(renderer.count)} slides, so it has no slide ${missing.join(", ")}.`,
+				`Slides must be numbers from 1 to ${String(renderer.count)}; got ${only?.length ? invalid.join(", ") : "none"}.`,
 			);
 		}
 
