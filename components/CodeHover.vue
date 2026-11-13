@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef } from "vue";
 
-withDefaults(
+const props = withDefaults(
 	defineProps<{
 		/** Zero-based column, in characters, counting each tab as two. */
 		col: number;
@@ -27,7 +27,9 @@ const squiggle = {
 };
 
 const squiggleElement = useTemplateRef("squiggleElement");
-const squiggleWidth = ref(0);
+// Start from the code font's character width (0.602em at the deck's 15px code size), so
+// the squiggle renders without a browser too; the observer refines it once mounted.
+const squiggleWidth = ref(props.length * 0.602 * 15);
 
 const observer = new ResizeObserver(() => {
 	squiggleWidth.value = squiggleElement.value?.offsetWidth ?? 0;

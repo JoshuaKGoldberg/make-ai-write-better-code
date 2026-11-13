@@ -1,0 +1,311 @@
+/**
+ * Renders Slidev slides to static HTML for any click state, with no browser:
+ * Vite (with Slidev's own plugins) compiles each slide module for SSR, and Vue's
+ * server renderer renders it inside a Slidev-like click context.
+ */
+import type { ClicksContext, SlideInfo } from "@slidev/types";
+import type { App, Component, ObjectDirective } from "vue";
+
+import { createServer, resolveOptions } from "@slidev/cli";
+import { renderToString } from "@vue/server-renderer";
+import { existsSync } from "node:fs";
+import { createSSRApp, h, reactive, ref } from "vue";
+
+export interface RenderedSlide {
+	frontmatter: Record<string, unknown>;
+	/** The deck's global-bottom.vue layer for this slide, if any. */
+	globalBottom: string;
+	/** The deck's global-top.vue layer for this slide, if any. */
+	globalTop: string;
+	note: string;
+	/** HTML for each click state, from 0 to `total`. */
+	states: string[];
+	total: number;
+}
+
+export interface SlideRenderer {
+	close(): Promise<void>;
+	count: number;
+	/** CSS shared by every slide: Slidev's styles, the deck's styles, and UnoCSS utilities. */
+	globalCss(): Promise<string[]>;
+	renderSlide(no: number): Promise<RenderedSlide>;
+	/** CSS a slide's module pulls in: its scoped &lt;style> blocks and its components' styles. */
+	slideCss(no: number): Promise<string[]>;
+	slides: SlideInfo[];
+}
+
+declare global {
+	var __pptxNav: undefined | { currentPage: number; total: number };
+}
+
+const CLASS = {
+	current: "slidev-vclick-current",
+	hidden: "slidev-vclick-hidden",
+	hiddenExplicitly: "slidev-vclick-hidden-explicitly",
+	prior: "slidev-vclick-prior",
+	target: "slidev-vclick-target",
+};
+
+// Components may construct browser-only observers in setup; on the server they observe nothing.
+if (!("ResizeObserver" in globalThis)) {
+	Object.assign(globalThis, {
+		ResizeObserver: class {
+			disconnect() {
+				/* Nothing to observe on the server. */
+			}
+			observe() {
+				/* Nothing to observe on the server. */
+			}
+			unobserve() {
+				/* Nothing to observe on the server. */
+			}
+		},
+	});
+}
+
+const standIn = (name: string) =>
+	new URL(`./ssr/${name}`, import.meta.url).pathname;
+
+export async function createSlideRenderer(
+	entry = "slides.md",
+): Promise<SlideRenderer> {
+	const options = await resolveOptions({ entry }, "dev");
+	const server = await createServer(options, {
+		logLevel: "warn",
+		resolve: {
+			// Slidev's magic-move, code-highlight, and nav helpers do their work in onMounted
+			// or need the router, neither of which exists on the server.
+			alias: [
+				{
+					find: /^.*\/@slidev\/client\/builtin\/ShikiMagicMove\.vue$/,
+					replacement: standIn("ShikiMagicMove.vue"),
+				},
+				{
+					find: /^.*\/@slidev\/client\/builtin\/CodeBlockWrapper\.vue$/,
+					replacement: standIn("CodeBlockWrapper.vue"),
+				},
+				{
+					find: /^(?:.*\/@slidev\/client\/|\.\.?\/)(?:\.\.\/)*composables\/useNav(?:\.ts)?$/,
+					replacement: standIn("useNav.ts"),
+				},
+			],
+			dedupe: ["vue", "@vue/server-renderer"],
+		},
+		server: { hmr: false, middlewareMode: true, ws: false },
+		ssr: { noExternal: ["@slidev/client"] },
+	});
+	const root = options.userRoot;
+	const slides = options.data.slides;
+	const load = async <T>(path: string) =>
+		(await server.ssrLoadModule(path)) as T;
+	const { createClicksContextBase } = await load<{
+		createClicksContextBase: (
+			current: { value: number },
+			start?: number,
+			total?: number,
+		) => ClicksContext;
+	}>(`${options.clientRoot}/composables/useClicks.ts`);
+
+	const layers: Record<string, Component | undefined> = {};
+	for (const name of ["global-bottom", "global-top"]) {
+		if (existsSync(`${root}/${name}.vue`)) {
+			layers[name] = (
+				await load<{ default: Component }>(`${root}/${name}.vue`)
+			).default;
+		}
+	}
+
+	function createApp(
+		no: number,
+		component: Component,
+		clicks: number,
+		totalOverride?: number,
+	) {
+		const slide = slides[no - 1];
+		globalThis.__pptxNav = { currentPage: no, total: slides.length };
+		const ctx = createClicksContextBase(
+			ref(clicks),
+			0,
+			totalOverride ?? (slide.frontmatter.clicks as number | undefined),
+		);
+		const ctxRef = ref(ctx);
+		const app: App = createSSRApp({ render: () => h(component) });
+		app.provide("$$slidev-clicks-context", ctxRef);
+		app.provide("$$slidev-page", ref(no));
+		app.provide("$$slidev-render-context", ref("slide"));
+		// Slidev's own injection key, spelled as Slidev spells it.
+		app.provide("$$slidev-fontmatter", slide.frontmatter);
+		app.provide("$$slidev-slide-zoom", ref(slide.frontmatter.zoom ?? 1));
+		app.provide(
+			"$$slidev-context",
+			reactive({
+				configs: options.data.config,
+				nav: { clicks, currentPage: no, total: slides.length },
+			}),
+		);
+		app.directive("click", clickDirective(ctx, "click"));
+		app.directive("after", clickDirective(ctx, "after"));
+		app.directive("click-hide", clickDirective(ctx, "hide"));
+		return { app, ctx, slide };
+	}
+
+	async function renderState(
+		no: number,
+		clicks: number,
+		totalOverride?: number,
+	) {
+		const mod = await load<{ default: Component }>(
+			`${root}/${entry}__slidev_${String(no)}.md`,
+		);
+		const { app, ctx, slide } = createApp(
+			no,
+			mod.default,
+			clicks,
+			totalOverride,
+		);
+		const html = await renderToString(app);
+		const total =
+			totalOverride ??
+			(slide.frontmatter.clicks as number | undefined) ??
+			Math.max(0, ...ctx.maxMap.values());
+		return { html, total };
+	}
+
+	const renderLayer = async (no: number, component: Component | undefined) =>
+		component ? renderToString(createApp(no, component, 0).app) : "";
+
+	// Walks the client-side import graph from the given modules and returns their CSS,
+	// as Vite serves it (after PostCSS, UnoCSS directives, and Vue scoping).
+	const transforms = new Map<string, null | string>();
+	async function collectCss(entries: string[]) {
+		const seen = new Set<string>();
+		const sheets: string[] = [];
+		const visit = async (url: string) => {
+			if (seen.has(url)) {
+				return;
+			}
+
+			seen.add(url);
+			if (!transforms.has(url)) {
+				transforms.set(
+					url,
+					(await server.transformRequest(url).catch(() => null))?.code ?? null,
+				);
+			}
+
+			const code = transforms.get(url);
+			if (!code) {
+				return;
+			}
+
+			const css = /const __vite__css = ("(?:[^"\\]|\\.)*")/.exec(code);
+			if (css) {
+				sheets.push(JSON.parse(css[1]) as string);
+				return;
+			}
+
+			for (const match of code.matchAll(
+				/\bimport(?:[\w$*{},\s]+from)?\s*["']([^"']+)["']/g,
+			)) {
+				const dependency = match[1];
+				if (
+					!/^(?:vue|@vue\/|\/@vite\/|\/@id\/__x00__plugin-vue)/.test(
+						dependency,
+					) &&
+					/\.(?:css|vue|ts|js|mjs|md)(?:$|\?)|uno:|__uno|type=style|\/@slidev\//.test(
+						dependency,
+					)
+				) {
+					await visit(dependency);
+				}
+			}
+		};
+
+		for (const url of entries) {
+			await visit(url);
+		}
+
+		return sheets;
+	}
+
+	return {
+		close: () => server.close(),
+		count: slides.length,
+		globalCss: () => collectCss([`${options.clientRoot}/styles/index.ts`]),
+		async renderSlide(no) {
+			const first = await renderState(no, 0);
+			const states = [first.html];
+			for (let clicks = 1; clicks <= first.total; clicks++) {
+				states.push((await renderState(no, clicks, first.total)).html);
+			}
+
+			return {
+				frontmatter: slides[no - 1].frontmatter,
+				globalBottom: await renderLayer(no, layers["global-bottom"]),
+				globalTop: await renderLayer(no, layers["global-top"]),
+				note: slides[no - 1].note ?? "",
+				states,
+				total: first.total,
+			};
+		},
+		slideCss: (no) =>
+			collectCss([
+				`${root}/${entry}__slidev_${String(no)}.md`,
+				...Object.keys(layers).map((name) => `${root}/${name}.vue`),
+			]),
+		slides,
+	};
+}
+
+/**
+ * A server-render stand-in for Slidev's v-click, v-after, and v-click-hide: each
+ * resolves its click range against the slide's clicks context in render (document)
+ * order, and outputs the classes Slidev's directives toggle in the browser.
+ */
+function clickDirective(
+	ctx: ClicksContext,
+	kind: "after" | "click" | "hide",
+): ObjectDirective {
+	let registered = 0;
+	return {
+		getSSRProps(binding) {
+			const info = ctx.calculate(
+				kind === "after"
+					? "+0"
+					: (binding.value as Parameters<ClicksContext["calculate"]>[0]),
+			);
+			if (!info) {
+				return {};
+			}
+
+			ctx.register(`v-${kind}-${String(registered++)}`, info);
+			const hide = kind === "hide" || Boolean(binding.modifiers.hide);
+			const active = info.isActive.value;
+			const current = info.isCurrent.value;
+			const classes = [CLASS.target];
+			if (hide ? active : !active) {
+				classes.push(CLASS.hidden);
+			}
+
+			if (hide && active) {
+				classes.push(CLASS.hiddenExplicitly);
+			}
+
+			if (current) {
+				classes.push(CLASS.current);
+			}
+
+			if (active && !current) {
+				classes.push(CLASS.prior);
+			}
+
+			return {
+				class: classes.join(" "),
+				"data-slidev-clicks-start": String(info.start),
+				...(Number.isFinite(info.end)
+					? { "data-slidev-clicks-end": String(info.end) }
+					: {}),
+			};
+		},
+	};
+}
