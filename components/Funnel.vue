@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useSlideContext } from "@slidev/client";
-import { computed } from "vue";
+import { computed, useId } from "vue";
 
 const props = withDefaults(
 	defineProps<{
@@ -20,6 +20,10 @@ const props = withDefaults(
 );
 
 const { $clicks } = useSlideContext();
+
+// Slidev keeps neighboring slides mounted, so each funnel needs its own
+// gradient ids: url(#id) would otherwise resolve to a hidden slide's gradient.
+const gradientId = `funnel-band-${useId()}`;
 
 const bugs = { bottom: 62, radius: 4.5, top: 16 };
 const cone = { bottom: 362, gap: 6, top: 82 };
@@ -93,7 +97,7 @@ const spout = computed(() => {
 		:viewBox="`0 0 ${width} 450`"
 	>
 		<defs>
-			<linearGradient id="funnel-band" x1="0" x2="0" y1="0" y2="1">
+			<linearGradient :id="gradientId" x1="0" x2="0" y1="0" y2="1">
 				<stop offset="0%" stop-color="rgb(119 187 255)" stop-opacity="0.14" />
 				<stop
 					offset="100%"
@@ -101,7 +105,13 @@ const spout = computed(() => {
 					stop-opacity="0.095"
 				/>
 			</linearGradient>
-			<linearGradient id="funnel-band-highlighted" x1="0" x2="1" y1="0" y2="0">
+			<linearGradient
+				:id="`${gradientId}-highlighted`"
+				x1="0"
+				x2="1"
+				y1="0"
+				y2="0"
+			>
 				<stop offset="0%" stop-color="rgb(0 163 255)" stop-opacity="0.46" />
 				<stop offset="100%" stop-color="rgb(119 187 255)" stop-opacity="0.38" />
 			</linearGradient>
@@ -126,6 +136,7 @@ const spout = computed(() => {
 			<polygon
 				class="band"
 				:class="{ highlighted: band.highlighted }"
+				:fill="`url(#${gradientId}${band.highlighted ? '-highlighted' : ''})`"
 				:points="band.points"
 			/>
 			<text
@@ -146,7 +157,7 @@ const spout = computed(() => {
 				{{ band.question }}
 			</text>
 		</g>
-		<polygon class="band" :points="spout" />
+		<polygon class="band" :fill="`url(#${gradientId})`" :points="spout" />
 		<circle class="bug" :cx="center" cy="432" :r="bugs.radius" />
 		<text v-if="bottom" class="end-label after" :x="center + 18" y="432">
 			{{ bottom }}
@@ -166,13 +177,11 @@ const spout = computed(() => {
 }
 
 .band {
-	fill: url("#funnel-band");
 	stroke: rgb(119 187 255 / 7%);
 	stroke-width: 1;
 }
 
 .band.highlighted {
-	fill: url("#funnel-band-highlighted");
 	filter: drop-shadow(0 0 5px rgb(0 163 255 / 22%));
 	stroke: rgb(119 187 255 / 22%);
 }
