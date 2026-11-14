@@ -31,6 +31,12 @@ To build a static copy of the deck into `dist/`:
 pnpm build
 ```
 
+To build an editable PowerPoint copy of the deck into `dist/make-ai-write-better-code.pptx`:
+
+```shell
+pnpm build:pptx
+```
+
 ## Development
 
 See [`.github/CONTRIBUTING.md`](./.github/CONTRIBUTING.md), then [`.github/DEVELOPMENT.md`](./.github/DEVELOPMENT.md).

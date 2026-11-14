@@ -19,6 +19,22 @@ Run [Slidev](https://sli.dev) to build the deck into a static site in `dist/`:
 pnpm build
 ```
 
+### PowerPoint
+
+`pnpm build:pptx` builds the deck into a native, editable PowerPoint file in `dist/`, with no browser involved.
+The pipeline in [`scripts/pptx/`](../scripts/pptx) renders each slide and click state with Vite's server-side rendering, lays it out with [takumi](https://www.npmjs.com/package/@takumi-rs/core), and writes native text, lists, shapes, and pictures with [PptxGenJS](https://gitbrent.github.io/PptxGenJS).
+
+Run its CLI directly for more options, such as building a range of slides or one slide per click:
+
+```shell
+node scripts/pptx/bin.ts --help
+```
+
+Text is measured with the fonts installed on your machine, so builds are most faithful on macOS, which has the deck's monospace and symbol fonts.
+Exit code 1 means an error left content out of the file; warnings mean content is there but may look different.
+
+[`scripts/pptx/fixture/`](../scripts/pptx/fixture) is a small deck the tests build to cover Slidev features this deck doesn't use.
+
 ## Formatting
 
 [Prettier](https://prettier.io) is used to format code.
