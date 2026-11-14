@@ -16,6 +16,7 @@ import type {
 	Fill,
 	Item,
 	ListItem,
+	ListParagraph,
 	Paragraph,
 	Run,
 	Slide,
@@ -26,6 +27,7 @@ import type {
 import type { Gradients, SlidePatch } from "./ooxml.ts";
 
 import { unescapeCss } from "./cascade.ts";
+import { unquote } from "./css.ts";
 import {
 	createGradients,
 	DECORATIVE,
@@ -64,12 +66,20 @@ type Marker =
 	| { kind: "number"; style: string };
 
 type TextParagraph = Paragraph & {
-	bullet?: boolean;
-	hidden?: boolean;
-	number?: number;
+	/** For list items: the marker, and the hanging indent it sits in. */
+	bullet?: pptxgen.default.TextPropsOptions["bullet"];
+	indentLevel?: number;
 	/** pt */
 	spaceAfter?: number;
 };
+
+/** Consecutive numbered list paragraphs at one level, which PowerPoint numbers on from their start. */
+interface NumberSequence {
+	level: number;
+	next: number;
+	start: number;
+	style: string;
+}
 
 /** Converts canvas px to PowerPoint's units. */
 interface Units {
@@ -95,8 +105,11 @@ const LIST_LIFT = 0.035;
 /** Browsers draw a disc marker about 0.75em left of where each item's text starts. */
 const BULLET_GAP = 0.75;
 
-/** PowerPoint shrinks superscripts to about 2/3 of their size; 1.12x renders like a browser's 75% superscripts. */
-const SUPERSCRIPT_SCALE = 1.12;
+/** PowerPoint shrinks superscripts and subscripts to about 2/3 of their size; 1.12x renders like a browser's 75% superscripts. */
+const SCRIPT_SCALE = 1.12;
+
+/** pptxgenjs swaps a zero shadow blur or offset for its defaults, so zero is written as this. */
+const NEAR_ZERO = 0.01;
 
 const DEFAULT_FONT_SIZE = 16;
 const MIN_ROUNDED_RADIUS = 0.5;
@@ -315,8 +328,7 @@ function createItemWriter({
 			: { type: "none" };
 
 	const splitFallback = (run: Run): Run[] => {
-		const coverageUnknown = fonts.covers(run.font, 0x61) === undefined;
-		if (run.pad || coverageUnknown) {
+		if (run.pad) {
 			return [run];
 		}
 
@@ -344,47 +356,18 @@ function createItemWriter({
 		return pieces.length ? pieces : [run];
 	};
 
-	const bulletFor = (
-		paragraph: TextParagraph,
-		marker: Marker & { start?: number },
-		indent: number,
-	): pptxgen.default.TextPropsOptions["bullet"] => {
-		if (!paragraph.bullet) {
-			return false;
-		}
-
-		const hanging = Math.max(1, points(indent));
-		if (paragraph.hidden) {
-			return { characterCode: NO_BREAK_SPACE, indent: hanging };
-		}
-
-		return marker.kind === "number"
-			? {
-					indent: hanging,
-					numberStartAt: marker.start ?? paragraph.number ?? 1,
-					style: marker.style,
-					type: "number",
-				}
-			: { characterCode: marker.code, indent: hanging };
-	};
-
 	const textRuns = (
 		paragraphs: TextParagraph[],
 		{
 			code,
 			firstRun,
-			indent,
 			lineHeight,
-			marker,
 			outline,
 			wrap,
 		}: {
 			code: boolean;
 			firstRun: Run | undefined;
-			indent: number;
 			lineHeight: number;
-			/** For lists: their marker, and its numbering start if it numbers consecutively. */
-			marker?: Marker & { start?: number };
 			/** Whether this is the outlined copy behind a text stroke. */
 			outline: boolean;
 			wrap: boolean;
@@ -400,7 +383,7 @@ function createItemWriter({
 						),
 					];
 			const baseSize =
-				pieces.find((run) => !run.superscript)?.size ?? pieces[0].size;
+				pieces.find((run) => !run.script)?.size ?? pieces[0].size;
 			const multiple = lineHeight
 				? Math.round((lineHeight / (1.2 * baseSize)) * 1000) / 1000
 				: undefined;
@@ -409,7 +392,7 @@ function createItemWriter({
 				const options: pptxgen.default.TextPropsOptions = {
 					bold: run.bold,
 					breakLine: !last && runIndex === pieces.length - 1,
-					bullet: marker && bulletFor(paragraph, marker, indent),
+					bullet: paragraph.bullet,
 					charSpacing: run.letterSpacing
 						? Math.round(points(run.letterSpacing) * 100) / 100
 						: undefined,
@@ -417,11 +400,10 @@ function createItemWriter({
 					fontFace: run.font,
 					fontSize:
 						Math.round(
-							points(
-								run.superscript ? SUPERSCRIPT_SCALE * baseSize : run.size,
-							) * 10,
+							points(run.script ? SCRIPT_SCALE * baseSize : run.size) * 10,
 						) / 10,
 					hyperlink,
+					indentLevel: paragraph.indentLevel,
 					italic: run.italic,
 					lang: run.upper ? UPPERCASE_LANG : undefined,
 					lineSpacingMultiple: multiple,
@@ -434,7 +416,8 @@ function createItemWriter({
 							: undefined,
 					paraSpaceAfter: paragraph.spaceAfter,
 					softBreakBefore: breaksBefore(run, wrap) || undefined,
-					superscript: run.superscript || undefined,
+					subscript: run.script === "sub" || undefined,
+					superscript: run.script === "super" || undefined,
 					transparency: run.transparency || undefined,
 					underline: run.underline
 						? { style: "sng" }
@@ -466,7 +449,9 @@ function createItemWriter({
 	 * A list's paragraphs, each with the space after it in whole points (PowerPoint rounds
 	 * paragraph spacing to them), keeping the running total exact so errors never add up.
 	 */
-	const spacedListParagraphs = (item: ListItem): TextParagraph[] => {
+	const spacedListParagraphs = (
+		item: ListItem,
+	): (ListParagraph & { spaceAfter?: number })[] => {
 		let exact = 0;
 		let written = 0;
 		return item.paragraphs.map((paragraph, index) => {
@@ -485,24 +470,56 @@ function createItemWriter({
 		});
 	};
 
-	const hideParagraphs = (
-		paragraphs: TextParagraph[],
+	/**
+	 * A list's paragraphs with their markers, each hanging before its text. Hidden
+	 * paragraphs and later paragraphs of an item keep their place unmarked.
+	 */
+	const listParagraphs = (
+		item: ListItem,
 		visibleParagraphs: boolean[] | undefined,
-	) =>
-		visibleParagraphs
-			? paragraphs.map((paragraph, index) =>
-					visibleParagraphs[index]
-						? paragraph
-						: {
-								...paragraph,
-								hidden: true,
-								runs: paragraph.runs.map((run) => ({
-									...run,
-									transparency: 100,
-								})),
-							},
-				)
-			: paragraphs;
+		markerGap: number,
+	): TextParagraph[] => {
+		let sequence: NumberSequence | undefined;
+		return spacedListParagraphs(item).map((paragraph, index) => {
+			const { level, number } = paragraph;
+			const visible = visibleParagraphs?.[index] ?? true;
+			const marker =
+				paragraph.bullet && visible ? markerFor(paragraph.marker) : undefined;
+			const indent = Math.max(
+				1,
+				points((markerGap + paragraph.indent) / (level + 1)),
+			);
+			const start =
+				marker?.kind === "number" &&
+				sequence?.level === level &&
+				sequence.style === marker.style &&
+				sequence.next === number
+					? sequence.start
+					: number;
+			sequence =
+				marker?.kind === "number"
+					? { level, next: number + 1, start, style: marker.style }
+					: undefined;
+			return {
+				bullet:
+					marker === undefined
+						? { characterCode: NO_BREAK_SPACE, indent }
+						: marker.kind === "number"
+							? {
+									indent,
+									numberStartAt: start,
+									style: marker.style,
+									type: "number",
+								}
+							: { characterCode: marker.code, indent },
+				indentLevel: level || undefined,
+				runs: visible
+					? paragraph.runs
+					: paragraph.runs.map((run) => ({ ...run, transparency: 100 })),
+				spaceAfter: paragraph.spaceAfter,
+			};
+		});
+	};
 
 	/** Where the box's top goes so PowerPoint's first baseline lands on the browser's, and how tall it is. */
 	const verticalPlacement = (
@@ -599,22 +616,18 @@ function createItemWriter({
 				? { ...item.style, lineHeight: codePitch(item) }
 				: item.style;
 		const rotation = item.kind === "text" ? item.rotation : 0;
-		const paragraphs = hideParagraphs(
-			item.kind === "list" ? spacedListParagraphs(item) : item.paragraphs,
-			visibleParagraphs,
-		);
-		const firstRun = paragraphs.find((paragraph) => paragraph.runs.length)
-			?.runs[0];
-		const numbers =
-			item.kind === "list" ? item.paragraphs.map(({ number }) => number) : [];
-		const marker = item.kind === "list" ? markerFor(item.marker) : undefined;
-		const bulletGap =
+		const markerGap =
 			item.kind === "list"
-				? bulletGapOf(item, firstRun?.size ?? DEFAULT_FONT_SIZE)
+				? markerGapOf(
+						item,
+						firstRunOf(item.paragraphs)?.size ?? DEFAULT_FONT_SIZE,
+					)
 				: 0;
-		const consecutive =
-			!visibleParagraphs?.includes(false) &&
-			numbers.every((number, index) => number === numbers[0] + index);
+		const paragraphs: TextParagraph[] =
+			item.kind === "list"
+				? listParagraphs(item, visibleParagraphs, markerGap)
+				: item.paragraphs;
+		const firstRun = firstRunOf(paragraphs);
 		const { height, top } = verticalPlacement(item, style, rotation, firstRun);
 		const { left, width } = horizontalPlacement(item.box, style, rotation);
 		const shadow = paragraphs
@@ -634,27 +647,25 @@ function createItemWriter({
 						(Math.atan2(shadow.offsetY, shadow.offsetX) * 180) / Math.PI,
 					),
 				),
-				blur: Math.max(0, points(shadow.blur)),
+				blur: Math.max(NEAR_ZERO, points(shadow.blur)),
 				color: shadow.color,
-				offset: points(Math.hypot(shadow.offsetX, shadow.offsetY)),
+				offset: Math.max(
+					NEAR_ZERO,
+					points(Math.hypot(shadow.offsetX, shadow.offsetY)),
+				),
 				opacity: 1 - shadow.transparency / 100,
 				type: "outer",
 			},
 			valign: "top",
-			w: inches(width + bulletGap),
+			w: inches(width + markerGap),
 			wrap: !style.nowrap,
-			x: inches(left - bulletGap),
+			x: inches(left - markerGap),
 			y: inches(top),
 		};
 		const runOptions = {
 			code: item.kind === "code",
 			firstRun,
-			indent: bulletGap,
 			lineHeight: style.lineHeight,
-			marker: marker && {
-				...marker,
-				start: consecutive ? numbers[0] : undefined,
-			},
 			wrap: !style.nowrap,
 		};
 		const names = [name];
@@ -774,10 +785,11 @@ function describeShape(patch: SlidePatch, item: Item, name: string) {
 	}
 
 	if (item.kind === "list") {
-		const marker = markerFor(item.marker);
+		const first = item.paragraphs.at(0);
+		const marker = first && markerFor(first.marker);
 		patch.lists.push({
 			color: item.bulletColor,
-			keyword: marker.kind === "char" && marker.keyword,
+			keyword: marker?.kind === "char" && marker.keyword,
 			name,
 		});
 	}
@@ -794,9 +806,8 @@ function markerFor(listStyle: string): Marker {
 		return { code: keyword, keyword: true, kind: "char" };
 	}
 
-	const quoted = /^(["'])(.*)\1$/s.exec(listStyle)?.[2];
-	if (quoted !== undefined) {
-		const code = unescapeCss(quoted).trim().codePointAt(0);
+	if (/^["']/.test(listStyle)) {
+		const code = unescapeCss(unquote(listStyle)).trim().codePointAt(0);
 		return {
 			code:
 				code === undefined
@@ -812,13 +823,13 @@ function markerFor(listStyle: string): Marker {
 	return { kind: "number", style: NUMBER_STYLES[listStyle] ?? "arabicPeriod" };
 }
 
-/** Room for a list's markers in its hanging indent: for its widest number and period, or for a bullet. */
-function bulletGapOf(list: ListItem, size: number) {
-	return markerFor(list.marker).kind === "number"
+/** Room for a list's outermost markers in their hanging indent: for its widest number and period, or for a bullet. */
+function markerGapOf(list: ListItem, size: number) {
+	const outermost = list.paragraphs.filter(({ level }) => level === 0);
+	const first = outermost.at(0);
+	return first && markerFor(first.marker).kind === "number"
 		? (Math.max(
-				...list.paragraphs.map(({ number }) =>
-					numberLength(number, list.marker),
-				),
+				...outermost.map(({ marker, number }) => numberLength(number, marker)),
 			) *
 				0.55 +
 				0.6) *
@@ -854,7 +865,6 @@ const emptyRun = (font: string): Run => ({
 	italic: false,
 	letterSpacing: 0,
 	size: DEFAULT_FONT_SIZE,
-	superscript: false,
 	text: "",
 	transparency: 0,
 	underline: false,
@@ -870,6 +880,9 @@ const blankRun = (style: Run): Run => ({
 	text: "",
 	underline: false,
 });
+
+const firstRunOf = (paragraphs: Paragraph[]) =>
+	paragraphs.find(({ runs }) => runs.length)?.runs[0];
 
 const breaksBefore = (run: Run, wrap: boolean) =>
 	run.lineBreak === true || (!wrap && run.softBreak === true);

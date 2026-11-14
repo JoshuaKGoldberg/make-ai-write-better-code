@@ -66,7 +66,7 @@ export interface Viewport {
 	width: number;
 }
 
-type KnownProperty = "line-height-px" | keyof typeof INITIAL;
+type KnownProperty = keyof typeof INITIAL;
 
 type Pseudo = "after" | "before" | "marker";
 
@@ -328,10 +328,7 @@ const isPseudoElement = (
 const pixels = (value: number) => `${String(value)}px`;
 
 /** The computed style of an element no rule applies to. */
-export const INITIAL_STYLE: ComputedStyle = {
-	...INITIAL,
-	"line-height-px": String(16 * NORMAL_LINE_HEIGHT),
-};
+export const INITIAL_STYLE: ComputedStyle = INITIAL;
 
 /** Parses stylesheets (after the user-agent defaults) into an ordered rule list. */
 export function createCascade(sheets: string[], environment: CascadeOptions) {
@@ -592,11 +589,7 @@ export function computeStyles(
 			style["line-height"] = pixels(length(lineHeight, fontSize, fontSize));
 		}
 
-		const computed: ComputedStyle = {
-			...INITIAL,
-			...style,
-			"line-height-px": "",
-		};
+		const computed: ComputedStyle = { ...INITIAL, ...style };
 
 		if (
 			(/flex|grid/.test(parent.display ?? "") ||
@@ -625,7 +618,6 @@ export function computeStyles(
 			}
 		}
 
-		computed["line-height-px"] = String(lineHeightOf(computed));
 		return { declared, style: computed };
 	};
 
@@ -734,22 +726,6 @@ export function resolveLength(
 
 	const match = LENGTH.exec(text);
 	return match ? toPixels(match[1], match.at(2) ?? "") : 0;
-}
-
-/** Resolves a length to px, like {@link resolveLength} with positional context. */
-export function toPx(
-	value: string | undefined,
-	fontSize: number,
-	rootFontSize = 16,
-	percentBase = 0,
-	viewport: Viewport = { height: 0, width: 0 },
-) {
-	return resolveLength(value, {
-		fontSize,
-		percentBase,
-		rootFontSize,
-		viewport,
-	});
 }
 
 /** Unescapes a CSS string's escapes, like "\\2192 " for an arrow. */

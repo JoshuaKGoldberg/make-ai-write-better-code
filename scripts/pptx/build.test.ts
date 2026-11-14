@@ -48,8 +48,24 @@ describe(buildPptx, () => {
 					),
 					slide: 8,
 				},
+				{
+					click: 0,
+					message: "<span> has 2 children but takumi measured 4: ab\u200B",
+					slide: 11,
+				},
+				{
+					click: 0,
+					message:
+						"<li> has 3 children but takumi measured 2: Term: description Sub item",
+					slide: 12,
+				},
+				{
+					click: 0,
+					message: "<h1> has 2 children but takumi measured 1: Inline Content",
+					slide: 13,
+				},
 			],
-			slides: 8,
+			slides: 14,
 		});
 	});
 
@@ -77,9 +93,9 @@ describe(buildPptx, () => {
 			buildPptx({
 				...options,
 				out: path.join(directory, "invalid.pptx"),
-				slides: [9],
+				slides: [15],
 			}),
-		).rejects.toThrow("Slides must be numbers from 1 to 8; got 9.");
+		).rejects.toThrow("Slides must be numbers from 1 to 14; got 15.");
 	}, 120_000);
 
 	it("sizes the page by the deck's canvas and aspect ratio", async () => {
@@ -99,12 +115,12 @@ describe(buildPptx, () => {
 			"Box: mix",
 			"Text: Layered: lime",
 			"Text: Unlayered: teal",
-			"Text: 3 / 8 · default",
+			"Text: 3 / 14 · default",
 		]);
 	});
 
 	it("renders global-top layers with Slidev's navigation", async () => {
-		expect(await slide(5)).toContain("<a:t>5 / 8 · image-right</a:t>");
+		expect(await slide(5)).toContain("<a:t>5 / 14 · image-right</a:t>");
 	});
 
 	it("names fonts by the font file when the deck loads one", async () => {
@@ -227,6 +243,104 @@ describe(buildPptx, () => {
 		expect(await part("ppt/theme/theme1.xml")).toContain(
 			'<a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>',
 		);
+	});
+
+	it("nests a sub-list's items a level deeper when list items have them", async () => {
+		expect(await slide(12)).toMatch(
+			/<a:pPr algn="l" lvl="1"[^>]*>(?:(?!<\/a:p>).)*<a:t>Child<\/a:t>/s,
+		);
+	});
+
+	it("keeps a list item's text when it has inline formatting and a sub-list", async () => {
+		expect(await slide(12)).toMatch(
+			/<a:t>Term<\/a:t>.*<a:t>: description<\/a:t>.*lvl="1".*<a:t>Sub item<\/a:t>/s,
+		);
+	});
+
+	it("numbers an item after a nested list from its own number", async () => {
+		expect(await slide(12)).toMatch(
+			/<a:buAutoNum type="arabicPeriod" startAt="2"\/>(?:(?!<\/a:p>).)*<a:t>Second<\/a:t>/s,
+		);
+	});
+
+	it("marks each item when a list's items are paragraphs", async () => {
+		expect(await slide(12)).toMatch(
+			/<a:buChar char="&#x25CF;"\/>(?:(?!<\/a:p>).)*<a:t>Loose two<\/a:t>/s,
+		);
+	});
+
+	it("draws an item's own marker when its list has none", async () => {
+		expect(await slide(12)).toMatch(
+			/<a:buChar char="&#x25A0;"\/>(?:(?!<\/a:p>).)*<a:t>Own marker<\/a:t>/s,
+		);
+	});
+
+	it("renders an icon when it's inline in a heading", async () => {
+		expect(await shapeNames(13)).toContain("Rendered: icon");
+	});
+
+	it("keeps no-break spaces when text has them", async () => {
+		expect(await slide(13)).toContain("<a:t>x\u00A0\u00A0\u00A0y</a:t>");
+	});
+
+	it("lowers a subscript when text has one", async () => {
+		expect(await slide(13)).toMatch(
+			/baseline="-40000"(?:(?!<\/a:r>).)*<a:t>2<\/a:t>/s,
+		);
+	});
+
+	it("leaves out text when it's clipped away", async () => {
+		expect(await slide(13)).not.toContain("Clipped away");
+	});
+
+	it("colors text like its parent when its own color doesn't parse", async () => {
+		expect(await slide(13)).toMatch(
+			/<a:srgbClr val="123456"\/>(?:(?!<\/a:r>).)*<a:t>Parent color<\/a:t>/s,
+		);
+	});
+
+	it("shadows text when its shadow has unitless offsets", async () => {
+		expect(await slide(13)).toMatch(
+			/name="Text: Glow"(?:(?!<\/p:sp>).)*<a:effectLst>/s,
+		);
+	});
+
+	it("resolves padding percentages against the parent's width", async () => {
+		expect(await slide(13)).toMatch(
+			/name="Text: Percent padding"(?:(?!<\/p:sp>).)*<a:off x="457200"/s,
+		);
+	});
+
+	it("fades an SVG shape once when it has an opacity attribute", async () => {
+		expect(await slide(14)).toContain(
+			'<a:prstGeom prst="ellipse"><a:avLst></a:avLst></a:prstGeom><a:solidFill><a:srgbClr val="FF6347"><a:alpha val="50000"/>',
+		);
+	});
+
+	it("fills an SVG shape from its group when the group sets a fill", async () => {
+		expect(await slide(14)).toMatch(
+			/name="Shape: Shapes"(?:(?!<\/p:sp>).)*<a:srgbClr val="008080"\/>/s,
+		);
+	});
+
+	it("renders pictures when PowerPoint can't draw shapes or backgrounds natively", async () => {
+		expect(await shapeNames(14)).toEqual(
+			expect.arrayContaining([
+				"Rendered: Turned",
+				"Rendered: Radial",
+				"Rendered: Tiled",
+			]),
+		);
+	});
+
+	it("frames an image when it has a border and background", async () => {
+		expect(await shapeNames(14)).toEqual(
+			expect.arrayContaining(["Box: framed", "Image: Framed photo"]),
+		);
+	});
+
+	it("names a box by its first block when it holds several", async () => {
+		expect(await shapeNames(14)).toContain("Box: Card title");
 	});
 
 	it("titles the file by the deck", async () => {

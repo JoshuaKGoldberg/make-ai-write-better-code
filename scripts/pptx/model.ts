@@ -82,15 +82,21 @@ export interface ListItem extends ItemBase {
 	box: Box;
 	bulletColor?: string;
 	kind: "list";
-	/** The items' CSS list-style-type, like "disc", "decimal", or a quoted string. */
-	marker: string;
+	/** Each list item's paragraphs, then its nested lists' paragraphs. */
 	paragraphs: ListParagraph[];
 	style: TextStyle;
 }
 
 export interface ListParagraph extends Paragraph {
 	baselines: number[];
+	/** Whether the paragraph shows its item's marker; later paragraphs of an item don't. */
 	bullet: boolean;
+	/** px from the list's text to the paragraph's text. */
+	indent: number;
+	/** How deeply the paragraph's list nests, 0 for the outermost. */
+	level: number;
+	/** The item's CSS list-style-type, like "disc", "decimal", or a quoted string. */
+	marker: string;
 	/** The item's ordinal, for numbered markers. */
 	number: number;
 	visible: boolean;
@@ -119,19 +125,32 @@ export interface Run {
 	lineBreak?: boolean;
 	/** A spacer run standing in for padding, margins, or borders between runs. */
 	pad?: boolean;
+	/** Raised or lowered, as superscript or subscript. */
+	script?: "sub" | "super";
 	shadow?: Shadow;
 	/** px */
 	size: number;
 	/** Starts a new line within its paragraph, where the browser wrapped; only boxes that can't wrap break there. */
 	softBreak?: boolean;
 	stroke?: Pick<Stroke, "color" | "width">;
-	superscript: boolean;
 	text: string;
 	/** 0-100 */
 	transparency: number;
 	underline: boolean;
 	/** Shown capitalized (CSS text-transform: uppercase); the text keeps its source casing. */
 	upper: boolean;
+}
+
+export interface Shadow {
+	/** px */
+	blur: number;
+	color: string;
+	/** px */
+	offsetX: number;
+	/** px */
+	offsetY: number;
+	/** 0-100 */
+	transparency: number;
 }
 
 export interface Slide {
@@ -241,18 +260,6 @@ interface RasterItem extends ItemBase {
 interface RasterRequest extends Omit<RasterItem, "file"> {
 	/** Selects the element in its slide state's document. */
 	selector: string;
-}
-
-interface Shadow {
-	/** px */
-	blur: number;
-	color: string;
-	/** px */
-	offsetX: number;
-	/** px */
-	offsetY: number;
-	/** 0-100 */
-	transparency: number;
 }
 
 interface SlideState {

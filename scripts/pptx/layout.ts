@@ -7,8 +7,9 @@ import type { Font, MeasuredNode, MeasuredTextRun } from "@takumi-rs/core";
 import type { Node as TakumiNode } from "@takumi-rs/helpers";
 
 import { Renderer } from "@takumi-rs/core";
+import { image } from "@takumi-rs/helpers";
 import { fromHtml } from "@takumi-rs/helpers/html";
-import { parseHTML } from "linkedom";
+import { NodeFilter, parseHTML } from "linkedom";
 
 import type { Assets } from "./assets.ts";
 import type { CascadeRule, ComputedStyle, ComputedStyles } from "./cascade.ts";
@@ -28,6 +29,13 @@ const PSEUDO_TAG = "pptx-pseudo";
 
 /** Stops takumi from also generating the content that became real elements. */
 const PSEUDO_RESET = `[data-pptx-before]::before,[data-pptx-after]::after{content:none !important}`;
+
+/** Entities for the characters takumi's HTML parser needs escaped in attribute values: it ends a tag at the first `>`, even inside quotes. */
+const ATTRIBUTE_ENTITIES: Record<string, string> = {
+	"&": "&amp;",
+	"<": "&lt;",
+	">": "&gt;",
+};
 
 export interface Css {
 	rules: CascadeRule[];
@@ -85,19 +93,12 @@ export interface Prepared extends Omit<ComputedStyles, "pseudos"> {
 	pseudos: boolean;
 }
 
-/** Whether an element is decoration painted into the slide background instead of becoming shapes. */
-export function isBackgroundOnly(
-	el: Element,
-	styles: Map<Element, ComputedStyle>,
-) {
-	// Static global-bottom decoration with filters (like blurred glows), which PowerPoint can't draw.
-	return (
-		el.closest(`[${STATIC}]`) !== null &&
-		(styles.get(el)?.filter ?? "none") !== "none"
-	);
+interface MultiColumn {
+	count: number;
+	element: Element;
+	gap: string;
 }
 
-/** Lays out slide states with takumi, and renders the parts of slides PowerPoint can't draw. */
 export function createLayout({
 	assets,
 	canvas,
@@ -108,29 +109,17 @@ export function createLayout({
 	colorScheme: "dark" | "light";
 }) {
 	const renderer = new Renderer();
-	const viewport = { height: canvas.height, width: canvas.width };
 
-	const toTakumi = (document: Document) => {
-		const content = document.querySelector("#slide-content");
-		if (!content) {
-			throw new Error("Slide document has no #slide-content.");
-		}
-
-		// eslint-disable-next-line @typescript-eslint/no-deprecated -- The only takumi API that keeps each element's attributes, which tie layout back to the DOM. Replace before takumi v3 removes it.
-		return fromHtml(content.outerHTML).node;
-	};
-
-	/** Loads the images a document uses: its img and SVG image sources, and its CSS background images. */
 	const imagesOf = async (
 		document: Document,
 		styles: Map<Element, ComputedStyle>,
 	) => {
 		const urls = new Set<string>();
-		for (const el of document.querySelectorAll("img[src], image")) {
+		for (const element of document.querySelectorAll("img[src], image")) {
 			const src =
-				el.getAttribute("src") ??
-				el.getAttribute("href") ??
-				el.getAttribute("xlink:href");
+				element.getAttribute("src") ??
+				element.getAttribute("href") ??
+				element.getAttribute("xlink:href");
 			if (src) {
 				urls.add(src);
 			}
@@ -142,38 +131,66 @@ export function createLayout({
 			}
 		}
 
-		const images: { data: Buffer; src: string }[] = [];
-		for (const src of urls) {
-			const data = await assets.load(src);
-			if (data) {
-				images.push({ data, src });
-			}
-		}
-
-		return images;
+		const images = await Promise.all(
+			[...urls].map(async (src) => {
+				const data = await assets.load(src);
+				return data ? [{ data, src }] : [];
+			}),
+		);
+		return images.flat();
 	};
 
-	const measure = async (
-		node: TakumiNode,
+	const renderOptions = async (
 		{ document, pseudos, styles }: Prepared,
 		sheets: string[],
+	) => ({
+		css: pseudos ? [...sheets, PSEUDO_RESET] : sheets,
+		images: await imagesOf(document, styles),
+	});
+
+	const renderPng = async (
+		document: Document,
+		prepared: Prepared,
+		sheets: string[],
+		pixels: { height: number; width: number },
 	) =>
-		renderer.measure(node, {
-			css: pseudos ? [...sheets, PSEUDO_RESET] : sheets,
-			height: canvas.height,
-			images: await imagesOf(document, styles),
-			width: canvas.width,
+		renderer.render(toTakumi(slideContentOf(document)), {
+			...(await renderOptions(prepared, sheets)),
+			...pixels,
+			devicePixelRatio: 2,
+			format: "png",
 		});
 
-	/** Builds a slide state's document and computes its styles, turning generated content into elements. */
+	async function measureLayout(prepared: Prepared, sheets: string[]) {
+		const node = toTakumi(slideContentOf(prepared.document));
+		const measured = await renderer.measure(node, {
+			...(await renderOptions(prepared, sheets)),
+			height: canvas.height,
+			width: canvas.width,
+		});
+		const stylesById = new Map(
+			[...prepared.styles].map(([element, style]) => [
+				element.getAttribute(ID) ?? "",
+				style,
+			]),
+		);
+		return zipLayout(node, measured, (id) => stylesById.get(id));
+	}
+
 	function prepare(
-		no: number,
+		slideNumber: number,
 		html: string,
 		{ rules }: Pick<Css, "rules">,
-		options: LayoutOptions = {},
-	): Prepared {
-		const document = buildDocument(no, html, canvas, colorScheme, options);
-		let computed = computeStyles(document, rules, { viewport });
+		options: LayoutOptions,
+	) {
+		const document = buildDocument(
+			slideNumber,
+			html,
+			canvas,
+			colorScheme,
+			options,
+		);
+		let computed = computeStyles(document, rules, { viewport: canvas });
 		const pseudos = computed.pseudos.size > 0;
 		if (pseudos) {
 			let next = document.querySelectorAll(`[${ID}]`).length;
@@ -186,25 +203,25 @@ export function createLayout({
 						continue;
 					}
 
-					const el = document.createElement(PSEUDO_TAG);
-					el.setAttribute(ID, String(next++));
-					el.setAttribute("style", pseudo.css);
-					el.textContent = pseudo.text;
+					const element = document.createElement(PSEUDO_TAG);
+					element.setAttribute(ID, String(next++));
+					element.setAttribute("style", pseudo.css);
+					element.textContent = pseudo.text;
 					host.setAttribute(`data-pptx-${kind}`, "");
 					if (kind === "before") {
-						host.prepend(el);
+						host.prepend(element);
 					} else {
-						host.append(el);
+						host.append(element);
 					}
 				}
 			}
 
-			computed = computeStyles(document, rules, { viewport });
+			computed = computeStyles(document, rules, { viewport: canvas });
 		}
 
 		const fontStacks = new Set<string>();
-		for (const [el, style] of computed.styles) {
-			const hasText = [...el.childNodes].some(
+		for (const [element, style] of computed.styles) {
+			const hasText = [...element.childNodes].some(
 				(node) => node.nodeType === node.TEXT_NODE && node.textContent?.trim(),
 			);
 			if (hasText && style.display !== "none") {
@@ -221,7 +238,6 @@ export function createLayout({
 		};
 	}
 
-	/** Lays multi-column containers, which takumi doesn't support, out as balanced flex columns. */
 	async function applyColumnShims(prepared: Prepared, sheets: string[]) {
 		const columns = multiColumns(prepared.document, prepared.styles);
 		if (!columns.length) {
@@ -229,144 +245,98 @@ export function createLayout({
 		}
 
 		shimColumnsForMeasure(columns);
-		const measured = await measure(
-			toTakumi(prepared.document),
-			prepared,
-			sheets,
-		);
-		shimColumnsBalanced(
-			columns,
-			itemHeights(
-				toTakumi(prepared.document),
-				measured,
-				columns,
-				prepared.styles,
-			),
-		);
+		const { boxes } = await measureLayout(prepared, sheets);
+		shimColumnsBalanced(columns, (item) => {
+			const style = prepared.styles.get(item);
+			return (
+				(boxes.get(item.getAttribute(ID) ?? "")?.h ?? 0) +
+				(parseFloat(style?.["margin-top"] ?? "") || 0) +
+				(parseFloat(style?.["margin-bottom"] ?? "") || 0)
+			);
+		});
 	}
 
 	async function layoutState(
 		prepared: Prepared,
 		{ sheets }: Pick<Css, "sheets">,
-	): Promise<Layout> {
-		const { document, styles } = prepared;
+	) {
 		await applyColumnShims(prepared, sheets);
-		const byId = new Map(
-			[...document.querySelectorAll(`[${ID}]`)].map((el) => [
-				el.getAttribute(ID) ?? "",
-				el,
-			]),
-		);
-		const node = toTakumi(document);
-		const measured = await measure(node, prepared, sheets);
-		// takumi measures a ::marker box only for list items that draw one.
-		const withMarkers = new Set(
-			[...styles]
-				.filter(
-					([, style]) =>
-						style.display === "list-item" &&
-						style["list-style-type"] !== "none",
-				)
-				.map(([element]) => element.getAttribute(ID)),
-		);
-		const outOfFlow = new Set(
-			[...styles]
-				.filter(([, style]) =>
-					/^(?:absolute|fixed)$/.test(style.position ?? ""),
-				)
-				.map(([element]) => element.getAttribute(ID)),
-		);
 		return {
 			...prepared,
-			...zipLayout(
-				node,
-				measured,
-				(id) => withMarkers.has(id),
-				(id) => outOfFlow.has(id),
+			...(await measureLayout(prepared, sheets)),
+			byId: new Map(
+				[...prepared.document.querySelectorAll(`[${ID}]`)].map((element) => [
+					element.getAttribute(ID) ?? "",
+					element,
+				]),
 			),
-			byId,
 		};
 	}
 
-	/** Renders just the element `selector` matches (everything else hidden), cropped to `box` in slide px, as a transparent PNG at 2x. */
 	async function rasterize(
-		no: number,
-		html: string,
-		css: Css,
+		prepared: Prepared,
+		{ sheets }: Pick<Css, "sheets">,
 		{ box, selector }: { box: Box; selector: string },
-		options: LayoutOptions = {},
 	) {
-		const prepared = prepare(no, html, css, options);
-		const { document } = prepared;
-		await applyColumnShims(prepared, css.sheets);
+		const { document } = parseHTML(prepared.document.documentElement.outerHTML);
 		const target = document.querySelector(selector);
 		if (!target) {
 			return undefined;
 		}
 
-		for (const el of document.querySelectorAll("#slide-content *")) {
-			if (el === target || target.contains(el)) {
+		const content = slideContentOf(document);
+		for (const element of content.querySelectorAll("*")) {
+			if (element === target || target.contains(element)) {
 				continue;
 			}
 
-			// Hide everything but the target; clear its ancestors' paint so only it shows.
 			appendStyle(
-				el,
-				el.contains(target)
+				element,
+				element.contains(target)
 					? "background:transparent !important;box-shadow:none !important;border-color:transparent !important"
 					: "visibility:hidden",
 			);
 		}
 
-		const content = document.querySelector("#slide-content");
-		if (content) {
-			appendStyle(
-				content,
-				`background:transparent !important;transform:translate(${String(-box.x)}px,${String(-box.y)}px)`,
-			);
-		}
-
-		return renderer.render(toTakumi(document), {
-			css: prepared.pseudos ? [...css.sheets, PSEUDO_RESET] : css.sheets,
-			devicePixelRatio: 2,
-			format: "png",
+		appendStyle(
+			content,
+			`background:transparent !important;transform:translate(${String(-box.x)}px,${String(-box.y)}px)`,
+		);
+		return renderPng(document, prepared, sheets, {
 			height: box.h * 2,
-			images: await imagesOf(document, prepared.styles),
 			width: box.w * 2,
 		});
 	}
 
-	/** Renders the slide canvas background, and the global-bottom layer's background-only decoration, to a PNG at 2x. */
 	async function renderBackground(css: Css, options: LayoutOptions) {
 		const prepared = prepare(1, "", css, {
 			globalBottom: options.globalBottom,
 			staticLayers: options.staticLayers,
 		});
 		const { document, styles } = prepared;
-		// Everything else in the layer (like a progress bar) varies by slide and becomes shapes.
-		const keep = [
-			...document.querySelectorAll(".slidev-slide-content *"),
-		].filter((el) => isBackgroundOnly(el, styles));
-		for (const el of document.querySelectorAll(".slidev-slide-content *")) {
-			const related = keep.some(
-				(kept) => el === kept || el.contains(kept) || kept.contains(el),
-			);
-			if (!related) {
-				appendStyle(el, "visibility:hidden");
+		const elements = [...document.querySelectorAll(".slidev-slide-content *")];
+		const kept = elements.filter((element) =>
+			isBackgroundOnly(element, styles),
+		);
+		for (const element of elements) {
+			if (
+				!kept.some(
+					(keep) =>
+						element === keep ||
+						element.contains(keep) ||
+						keep.contains(element),
+				)
+			) {
+				appendStyle(element, "visibility:hidden");
 			}
 		}
 
-		return renderer.render(toTakumi(document), {
-			css: prepared.pseudos ? [...css.sheets, PSEUDO_RESET] : css.sheets,
-			devicePixelRatio: 2,
-			format: "png",
+		return renderPng(document, prepared, css.sheets, {
 			height: Math.round(canvas.height * 2),
-			images: await imagesOf(document, styles),
 			width: Math.round(canvas.width * 2),
 		});
 	}
 
-	/** Renders an image (like an SVG or WebP, which PowerPoint can't show) to a PNG at up to 2x its natural size. */
 	async function toPng(src: string) {
 		const data = await assets.load(src);
 		if (!data) {
@@ -375,21 +345,39 @@ export function createLayout({
 
 		const { h, w } = imageSize(data) ?? { h: canvas.height, w: canvas.width };
 		const scale = Math.min(2, 4096 / Math.max(w, h));
-		const escaped = src.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-		// eslint-disable-next-line @typescript-eslint/no-deprecated -- As in toTakumi.
-		const { node } = fromHtml(
-			`<img src="${escaped}" style="display:block;width:${String(w)}px;height:${String(h)}px">`,
+		return renderer.render(
+			image({ src: data, style: { display: "block", height: h, width: w } }),
+			{
+				devicePixelRatio: scale,
+				format: "png",
+				height: Math.round(h * scale),
+				width: Math.round(w * scale),
+			},
 		);
-		return renderer.render(node, {
-			devicePixelRatio: scale,
-			format: "png",
-			height: Math.round(h * scale),
-			images: [{ data, src }],
-			width: Math.round(w * scale),
-		});
 	}
 
-	/** Registers fonts for layout and rendering, in order. */
+	async function averageColor(png: Buffer) {
+		const size = 8;
+		const pixels = await renderer.render(
+			image({ src: png, style: { height: size, width: size } }),
+			{ format: "raw", height: size, width: size },
+		);
+		const count = pixels.length / 4;
+		return [0, 1, 2]
+			.map((channel) => {
+				let sum = 0;
+				for (let index = 0; index < pixels.length; index += 4) {
+					const alpha = pixels[index + 3] / 255;
+					sum += pixels[index + channel] * alpha + 255 * (1 - alpha);
+				}
+
+				return Math.round(sum / count)
+					.toString(16)
+					.padStart(2, "0");
+			})
+			.join("");
+	}
+
 	async function registerFonts(fonts: Font[]) {
 		for (const font of fonts) {
 			await renderer.registerFont(font);
@@ -397,6 +385,7 @@ export function createLayout({
 	}
 
 	return {
+		averageColor,
 		layoutState,
 		prepare,
 		rasterize,
@@ -406,13 +395,49 @@ export function createLayout({
 	};
 }
 
-const appendStyle = (el: Element, css: string) => {
-	el.setAttribute("style", `${el.getAttribute("style") ?? ""};${css}`);
+export function isBackgroundOnly(
+	element: Element,
+	styles: Map<Element, ComputedStyle>,
+) {
+	return (
+		element.closest(`[${STATIC}]`) !== null &&
+		(styles.get(element)?.filter ?? "none") !== "none"
+	);
+}
+
+const appendStyle = (element: Element, css: string) => {
+	element.setAttribute(
+		"style",
+		`${element.getAttribute("style") ?? ""};${css}`,
+	);
 };
 
-/** Builds the document a slide state renders in, mirroring Slidev's ancestors, with every element tagged. */
+const slideContentOf = (document: Document) => {
+	const content = document.querySelector("#slide-content");
+	if (!content) {
+		throw new Error("Slide document has no #slide-content.");
+	}
+
+	return content;
+};
+
+const toTakumi = (content: Element) => {
+	const copy = content.cloneNode(true) as Element;
+	for (const element of [copy, ...copy.querySelectorAll("*")]) {
+		for (const attribute of element.attributes) {
+			attribute.value = attribute.value.replace(
+				/[&<>]/g,
+				(character) => ATTRIBUTE_ENTITIES[character],
+			);
+		}
+	}
+
+	// eslint-disable-next-line @typescript-eslint/no-deprecated -- The only takumi API that keeps each element's attributes, which tie layout back to the DOM. Replace before takumi v3 removes it.
+	return fromHtml(copy.outerHTML).node;
+};
+
 function buildDocument(
-	no: number,
+	slideNumber: number,
 	html: string,
 	canvas: Canvas,
 	colorScheme: "dark" | "light",
@@ -421,120 +446,46 @@ function buildDocument(
 		globalTop = "",
 		staticLayers = [],
 		zoom = 1,
-	}: LayoutOptions = {},
-): Document {
-	// Slidev zooms a slide by scaling .slidev-page from the top left, at 100%/zoom size.
+	}: LayoutOptions,
+) {
 	const page = `position:absolute;left:0;top:0;width:${String(canvas.width / zoom)}px;height:${String(canvas.height / zoom)}px${zoom === 1 ? "" : `;transform:scale(${String(zoom)});transform-origin:0 0`}`;
 	const { document } = parseHTML(
-		`<html${colorScheme === "dark" ? ' class="dark"' : ""}><head></head><body><div id="app"><div id="page-root"><div id="slide-container"><div id="slide-content" class="slidev-slide-content" style="width:${String(canvas.width)}px;height:${String(canvas.height)}px;position:relative;overflow:hidden">${globalBottom}<div class="slidev-page slidev-page-${String(no)}" style="${page}">${html}</div>${globalTop}</div></div></div></div></body></html>`,
+		`<html${colorScheme === "dark" ? ' class="dark"' : ""}><head></head><body><div id="app"><div id="page-root"><div id="slide-container"><div id="slide-content" class="slidev-slide-content" style="width:${String(canvas.width)}px;height:${String(canvas.height)}px;position:relative;overflow:hidden">${globalBottom}<div class="slidev-page slidev-page-${String(slideNumber)}" style="${page}">${html}</div>${globalTop}</div></div></div></div></body></html>`,
 	);
-	// takumi has no <wbr>; a zero-width space is the same line-break opportunity.
-	for (const wbr of document.querySelectorAll("wbr")) {
-		wbr.replaceWith(document.createTextNode("\u200B"));
+	const comments = document.createTreeWalker(document, NodeFilter.SHOW_COMMENT);
+	for (let comment = comments.nextNode(); comment;) {
+		const next = comments.nextNode();
+		comment.parentNode?.removeChild(comment);
+		comment = next;
 	}
 
-	const content = document.querySelector("#slide-content");
-	const layers = [...(content?.children ?? [])];
-	layers
-		.slice(
-			0,
-			layers.findIndex((el) => el.classList.contains("slidev-page")),
-		)
-		.forEach((el, index) => {
-			if (staticLayers.includes(index)) {
-				el.setAttribute(STATIC, "");
-			}
-		});
+	// takumi has no <wbr>; a zero-width space is the same line-break opportunity.
+	for (const wbr of document.querySelectorAll("wbr")) {
+		wbr.replaceWith(document.createTextNode("​"));
+	}
+
+	const layers = slideContentOf(document).children;
+	for (const index of staticLayers) {
+		layers[index].setAttribute(STATIC, "");
+	}
 
 	let next = 0;
-	for (const el of document.querySelectorAll("*")) {
-		el.setAttribute(ID, String(next++));
+	for (const element of document.querySelectorAll("*")) {
+		element.setAttribute(ID, String(next++));
 	}
 
 	return document;
 }
 
-/** Indexes of a global-bottom layer's top-level elements that are the same in every slide's render. */
-export function staticLayerIndexes(renders: string[]) {
-	const tops = renders.map((html) =>
-		[
-			...parseHTML(`<html><body>${html}</body></html>`).document.body.children,
-		].map((el) => el.outerHTML),
-	);
-	const first = tops[0] ?? [];
-	return first.flatMap((html, index) =>
-		tops.every(
-			(other) => other.length === first.length && other[index] === html,
-		)
-			? [index]
-			: [],
-	);
-}
-
-/** A container laid out in CSS columns. */
-interface MultiColumn {
-	count: number;
-	el: Element;
-	gap: string;
-}
-
-/** Margin-box heights of multi-column items, from a measured tree. */
-function itemHeights(
-	node: TakumiNode,
-	measured: MeasuredNode,
-	columns: MultiColumn[],
-	styles: Map<Element, ComputedStyle>,
-) {
-	const wanted = new Set(
-		columns.flatMap(({ el }) =>
-			[...el.children].map((child) => child.getAttribute(ID)),
-		),
-	);
-	const found = new Map<string, number>();
-	const walk = (n: TakumiNode, m: MeasuredNode) => {
-		const id = idOf(n);
-		if (id && wanted.has(id)) {
-			found.set(id, m.height);
-		}
-
-		const children = childrenOf(n);
-		if (m.children.length === children.length) {
-			children.forEach((child, i) => {
-				walk(child, m.children[i]);
-			});
-		}
-	};
-
-	walk(node, measured);
-	const heights = new Map<Element, number>();
-	for (const { el } of columns) {
-		for (const child of el.children) {
-			const style = styles.get(child);
-			heights.set(
-				child,
-				(found.get(child.getAttribute(ID) ?? "") ?? 0) +
-					(parseFloat(style?.["margin-top"] ?? "") || 0) +
-					(parseFloat(style?.["margin-bottom"] ?? "") || 0),
-			);
-		}
-	}
-
-	return heights;
-}
-
-/** Finds containers laid out in CSS columns, which takumi doesn't support. */
-function multiColumns(
-	document: Document,
-	styles: Map<Element, ComputedStyle>,
-): MultiColumn[] {
-	const out: MultiColumn[] = [];
-	for (const el of document.querySelectorAll("*")) {
-		const style = styles.get(el);
+function multiColumns(document: Document, styles: Map<Element, ComputedStyle>) {
+	const columns: MultiColumn[] = [];
+	for (const element of document.querySelectorAll("*")) {
+		const style = styles.get(element);
 		const count = Number(style?.["column-count"]);
-		if (count > 1 && el.children.length) {
-			out.push({
+		if (count > 1 && element.children.length) {
+			columns.push({
 				count,
-				el,
+				element,
 				gap:
 					style?.["column-gap"] && style["column-gap"] !== "normal"
 						? style["column-gap"]
@@ -543,32 +494,15 @@ function multiColumns(
 		}
 	}
 
-	return out;
+	return columns;
 }
 
-/** Lays multi-column items out in one column of column width, to measure them. */
-function shimColumnsForMeasure(columns: MultiColumn[]) {
-	for (const { count, el, gap } of columns) {
-		appendStyle(el, "display:flex;flex-direction:column;flex-wrap:nowrap");
-		for (const child of el.children) {
-			appendStyle(
-				child,
-				`width:calc((100% - ${String(count - 1)} * ${gap}) / ${String(count)});flex-shrink:0`,
-			);
-		}
-	}
-}
-
-/**
- * Wraps multi-column items into columns at the smallest height that fits them into
- * N columns in order, which is how CSS balances columns of unbreakable items.
- */
 function shimColumnsBalanced(
 	columns: MultiColumn[],
-	heights: Map<Element, number>,
+	heightOf: (item: Element) => number,
 ) {
-	for (const { count, el, gap } of columns) {
-		const items = [...el.children].map((child) => heights.get(child) ?? 0);
+	for (const { count, element, gap } of columns) {
+		const items = [...element.children].map(heightOf);
 		const fits = (height: number) => {
 			let used = 0;
 			let columnsUsed = 1;
@@ -585,70 +519,87 @@ function shimColumnsBalanced(
 		};
 
 		let low = Math.max(...items);
-		let high = items.reduce((a, b) => a + b, 0);
-		for (let i = 0; i < 40; i++) {
-			const mid = (low + high) / 2;
-			if (fits(mid)) {
-				high = mid;
+		let high = items.reduce((total, item) => total + item, 0);
+		for (let iteration = 0; iteration < 40; iteration++) {
+			const middle = (low + high) / 2;
+			if (fits(middle)) {
+				high = middle;
 			} else {
-				low = mid;
+				low = middle;
 			}
 		}
 
 		appendStyle(
-			el,
+			element,
 			`flex-wrap:wrap;column-gap:${gap};height:${String(Math.ceil(high * 100) / 100)}px;align-content:flex-start`,
 		);
 	}
 }
 
-const childrenOf = (n: TakumiNode): TakumiNode[] =>
-	n.type === "container" ? (n.children ?? []) : [];
-const idOf = (n: TakumiNode): string | undefined => n.attributes?.[ID];
+function shimColumnsForMeasure(columns: MultiColumn[]) {
+	for (const { count, element, gap } of columns) {
+		appendStyle(element, "display:flex;flex-direction:column;flex-wrap:nowrap");
+		for (const child of element.children) {
+			appendStyle(
+				child,
+				`width:calc((100% - ${String(count - 1)} * ${gap}) / ${String(count)});flex-shrink:0`,
+			);
+		}
+	}
+}
 
-/**
- * Zips takumi's input tree with its measured tree. Containers with block-level
- * children measure 1:1 with their children; inline-only containers measure as one
- * node whose runs cover all their text, each run tied to the element styling it.
- */
+const idOf = (node: TakumiNode) => node.attributes?.[ID];
+
 function zipLayout(
 	node: TakumiNode,
 	measured: MeasuredNode,
-	hasMarker: (id: string) => boolean,
-	isOutOfFlow: (id: string) => boolean,
-): Pick<Layout, "boxes" | "mismatches" | "runs"> {
+	styleOf: (id: string) => ComputedStyle | undefined,
+) {
 	const boxes = new Map<string, LaidOutBox>();
 	const runs = new Map<string, LaidOutRuns>();
 	const mismatches: Layout["mismatches"] = [];
-
-	// A node's descendant text, in order, each with the element whose style it uses.
-	const textSegments = (
-		n: TakumiNode,
-		owner: string,
-		out: { owner: string; text: string }[] = [],
+	const hasStyle = (
+		node: TakumiNode,
+		test: (style: ComputedStyle) => boolean,
 	) => {
-		if (n.type === "text") {
-			out.push({ owner: idOf(n) ?? owner, text: n.text });
+		const id = idOf(node);
+		const style = id === undefined ? undefined : styleOf(id);
+		return style !== undefined && test(style);
+	};
+
+	const childrenOf = (node: TakumiNode) =>
+		node.type === "container"
+			? (node.children ?? []).filter(
+					(child) => !hasStyle(child, ({ display }) => display === "none"),
+				)
+			: [];
+
+	const textSegments = (
+		node: TakumiNode,
+		owner: string,
+		segments: { owner: string; text: string }[] = [],
+	) => {
+		if (node.type === "text") {
+			segments.push({ owner: idOf(node) ?? owner, text: node.text });
 		} else {
-			for (const child of childrenOf(n)) {
-				textSegments(child, idOf(n) ?? owner, out);
+			for (const child of childrenOf(node)) {
+				textSegments(child, idOf(node) ?? owner, segments);
 			}
 		}
 
-		return out;
+		return segments;
 	};
 
 	const assignRuns = (
-		n: TakumiNode,
-		m: MeasuredNode,
+		node: TakumiNode,
+		measured: MeasuredNode,
 		owner: string,
-	): LaidOutRun[] => {
-		const segments = textSegments(n, owner);
+	) => {
+		const segments = textSegments(node, owner);
 		const result: LaidOutRun[] = [];
 		let index = 0;
 		let offset = 0;
-		for (const run of m.runs) {
-			// Skip segment text the run doesn't start with (collapsed whitespace, newlines).
+		for (const run of measured.runs) {
 			while (
 				index < segments.length &&
 				!segments[index].text.slice(offset).trim()
@@ -658,7 +609,6 @@ function zipLayout(
 			}
 
 			result.push({ ...run, owner: segments[index]?.owner ?? owner });
-			// Consume the run's non-whitespace characters from the segments.
 			let remaining = run.text.replace(/\s/g, "").length;
 			while (remaining > 0 && index < segments.length) {
 				const text = segments[index].text;
@@ -680,72 +630,86 @@ function zipLayout(
 		return result;
 	};
 
-	const zip = (n: TakumiNode, m: MeasuredNode, owner: string) => {
-		const own = idOf(n);
+	const addRuns = (
+		node: TakumiNode,
+		measured: MeasuredNode,
+		owner: string,
+		box: LaidOutBox,
+	) => {
+		const own = idOf(node);
+		runs.set(own ?? `anon-${String(runs.size)}`, {
+			anonymous: own === undefined,
+			box,
+			parent: owner,
+			runs: assignRuns(node, measured, owner),
+		});
+	};
+
+	const zip = (node: TakumiNode, measured: MeasuredNode, owner: string) => {
+		const own = idOf(node);
 		const id = own ?? owner;
-		const [a, b, c, d, e, f] = m.transform;
+		const [a, b, c, d, e, f] = measured.transform;
 		const box: LaidOutBox = {
-			h: m.height,
+			h: measured.height,
 			matrix: [a, b, c, d],
-			w: m.width,
+			w: measured.width,
 			x: e,
 			y: f,
 		};
-		if (own !== undefined && !boxes.has(own)) {
+		if (own !== undefined) {
 			boxes.set(own, box);
 		}
 
-		if (m.runs.length) {
-			runs.set(own === undefined ? `anon-${String(runs.size)}` : id, {
-				anonymous: own === undefined,
-				box,
-				parent: owner,
-				runs: assignRuns(n, m, owner),
-			});
+		if (measured.runs.length) {
+			addRuns(node, measured, owner, box);
 		}
 
-		const children = childrenOf(n);
+		const children = childrenOf(node);
 		// A list item's ::marker box is measured as its first child.
-		const measuredChildren =
-			own !== undefined && hasMarker(own) ? m.children.slice(1) : m.children;
-		// Inline content is measured as the runs of its block, not as children.
+		const measuredChildren = hasStyle(
+			node,
+			(style) =>
+				style.display === "list-item" && style["list-style-type"] !== "none",
+		)
+			? measured.children.slice(1)
+			: measured.children;
 		if (!measuredChildren.length) {
 			return;
 		}
 
 		if (measuredChildren.length === children.length) {
-			children.forEach((child, i) => {
-				zip(child, measuredChildren[i], id);
+			children.forEach((child, index) => {
+				zip(child, measuredChildren[index], id);
 			});
 			return;
 		}
 
-		// Inline content beside absolutely positioned children measures as one anonymous
-		// line box: its runs, then a placeholder for each positioned child, then their boxes.
-		const positioned = children.filter((child) => {
-			const childId = idOf(child);
-			return childId !== undefined && isOutOfFlow(childId);
-		});
+		// takumi measures inline content beside positioned children as one line box:
+		// its runs, then a placeholder per positioned child, then their boxes.
+		const positioned = children.filter((child) =>
+			hasStyle(child, ({ position }) =>
+				/^(?:absolute|fixed)$/.test(position ?? ""),
+			),
+		);
 		const [lines] = measuredChildren;
 		if (
-			n.type === "container" &&
+			node.type === "container" &&
 			positioned.length &&
 			measuredChildren.length === 1 &&
 			lines.runs.length &&
 			lines.children.length === positioned.length * 2
 		) {
-			const inline: TakumiNode = {
-				...n,
-				children: children.filter((child) => !positioned.includes(child)),
-			};
-			runs.set(own === undefined ? `anon-${String(runs.size)}` : id, {
-				anonymous: own === undefined,
+			addRuns(
+				{
+					...node,
+					children: children.filter((child) => !positioned.includes(child)),
+				},
+				lines,
+				owner,
 				box,
-				parent: owner,
-				runs: assignRuns(inline, lines, owner),
-			});
-			positioned.forEach((child, i) => {
-				zip(child, lines.children[positioned.length + i], id);
+			);
+			positioned.forEach((child, index) => {
+				zip(child, lines.children[positioned.length + index], id);
 			});
 			return;
 		}
@@ -756,10 +720,10 @@ function zipLayout(
 			measured: measuredChildren.length,
 		});
 		children
-			.filter((child) => child.type !== "text")
-			.forEach((child, i) => {
-				if (i < measuredChildren.length) {
-					zip(child, measuredChildren[i], id);
+			.filter((child) => idOf(child) !== undefined)
+			.forEach((child, index) => {
+				if (index < measuredChildren.length) {
+					zip(child, measuredChildren[index], id);
 				}
 			});
 	};

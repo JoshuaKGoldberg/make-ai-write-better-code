@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { parseColor } from "./color.ts";
+import {
+	isGradient,
+	parseColor,
+	parseLinearGradient,
+	parseShadow,
+} from "./color.ts";
 
 describe(parseColor, () => {
 	it.each([
@@ -27,8 +32,8 @@ describe(parseColor, () => {
 		["color(xyz-d65 0.4124 0.2126 0.0193)", "ff0000", 1],
 		["color(xyz-d50 0.4360 0.2225 0.0139)", "ff0000", 1],
 		["color(display-p3 1 0 0)", "ff0000", 1],
-	])("parses %s", (value, hex, a) => {
-		expect(parseColor(value)).toEqual({ a: expect.closeTo(a), hex });
+	])("parses %s", (value, hex, alpha) => {
+		expect(parseColor(value)).toEqual({ alpha: expect.closeTo(alpha), hex });
 	});
 
 	it.each([
@@ -38,30 +43,30 @@ describe(parseColor, () => {
 		["color-mix(in hsl, hsl(350 100% 50%), hsl(30 100% 50%))", "ff2b00"],
 		["color-mix(in oklch, red, blue)", "ba00c2"],
 	])("mixes %s", (value, hex) => {
-		expect(parseColor(value)).toEqual({ a: 1, hex });
+		expect(parseColor(value)).toEqual({ alpha: 1, hex });
 	});
 
 	it("mixes with transparent as an opacity", () => {
 		expect(parseColor("color-mix(in oklab, #00a3ff 20%, transparent)")).toEqual(
-			{ a: expect.closeTo(0.2), hex: "00a3ff" },
+			{ alpha: expect.closeTo(0.2), hex: "00a3ff" },
 		);
 	});
 
 	it("mixes currentcolor as the current color", () => {
 		expect(
 			parseColor("color-mix(in srgb, currentcolor 50%, blue)", "red"),
-		).toEqual({ a: 1, hex: "800080" });
+		).toEqual({ alpha: 1, hex: "800080" });
 	});
 
 	it("resolves currentcolor to the current color", () => {
 		expect(parseColor("currentColor", "#123456")).toEqual({
-			a: 1,
+			alpha: 1,
 			hex: "123456",
 		});
 	});
 
 	it("keeps fully transparent colors' alpha", () => {
-		expect(parseColor("rgba(0, 0, 0, 0)")).toEqual({ a: 0, hex: "000000" });
+		expect(parseColor("rgba(0, 0, 0, 0)")).toEqual({ alpha: 0, hex: "000000" });
 	});
 
 	it.each([
@@ -77,4 +82,102 @@ describe(parseColor, () => {
 	])("returns undefined for %j", (value) => {
 		expect(parseColor(value)).toBeUndefined();
 	});
+});
+
+describe(isGradient, () => {
+	it.each([
+		["linear-gradient(red, blue)", true],
+		["repeating-radial-gradient(red, blue 10%)", true],
+		["conic-gradient(red, blue)", true],
+		['url("a.png")', false],
+		["none", false],
+	])("returns %s for %j", (image, expected) => {
+		expect(isGradient(image)).toBe(expected);
+	});
+});
+
+describe(parseLinearGradient, () => {
+	it("spreads stops evenly when they have no positions", () => {
+		expect(parseLinearGradient("linear-gradient(red, blue)", 1)).toEqual({
+			angle: 180,
+			stops: [
+				{ hex: "ff0000", position: 0, transparency: 0 },
+				{ hex: "0000ff", position: 100, transparency: 0 },
+			],
+		});
+	});
+
+	it("reads a side and positions when the gradient has them", () => {
+		expect(
+			parseLinearGradient("linear-gradient(to right, red 20%, blue 80%)", 1),
+		).toEqual({
+			angle: 90,
+			stops: [
+				{ hex: "ff0000", position: 20, transparency: 0 },
+				{ hex: "0000ff", position: 80, transparency: 0 },
+			],
+		});
+	});
+
+	it("converts an angle when it's in turns", () => {
+		expect(
+			parseLinearGradient("linear-gradient(0.25turn, red, blue)", 1)?.angle,
+		).toBe(90);
+	});
+
+	it("keeps a stop's color when it has two positions", () => {
+		expect(
+			parseLinearGradient("linear-gradient(red 0% 50%, blue)", 1)?.stops[0],
+		).toEqual({ hex: "ff0000", position: 0, transparency: 0 });
+	});
+
+	it("fades stops by an opacity", () => {
+		expect(
+			parseLinearGradient("linear-gradient(rgb(255 0 0 / 50%), blue)", 0.5)
+				?.stops,
+		).toEqual([
+			{ hex: "ff0000", position: 0, transparency: 75 },
+			{ hex: "0000ff", position: 100, transparency: 50 },
+		]);
+	});
+
+	it.each([
+		"repeating-linear-gradient(red, blue 10%)",
+		"radial-gradient(red, blue)",
+		"linear-gradient(red, blue), linear-gradient(green, blue)",
+	])("returns undefined for %j", (image) => {
+		expect(parseLinearGradient(image, 1)).toBeUndefined();
+	});
+});
+
+describe(parseShadow, () => {
+	const toPixels = (length: string) => parseFloat(length);
+
+	it.each([
+		[
+			"0 0 8px #fff",
+			{ blur: 8, color: "ffffff", offsetX: 0, offsetY: 0, transparency: 0 },
+		],
+		[
+			"red 1px 2px",
+			{ blur: 0, color: "ff0000", offsetX: 1, offsetY: 2, transparency: 0 },
+		],
+		[
+			"1px 1px 2px rgb(0 0 0 / 50%), 4px 4px blue",
+			{ blur: 2, color: "000000", offsetX: 1, offsetY: 1, transparency: 50 },
+		],
+		[
+			"2px 3px",
+			{ blur: 0, color: "123456", offsetX: 2, offsetY: 3, transparency: 0 },
+		],
+	])("parses %j", (value, expected) => {
+		expect(parseShadow(value, toPixels, "#123456")).toEqual(expected);
+	});
+
+	it.each(["none", "0 0 4px transparent", "1px red"])(
+		"returns undefined for %j",
+		(value) => {
+			expect(parseShadow(value, toPixels, "#123456")).toBeUndefined();
+		},
+	);
 });

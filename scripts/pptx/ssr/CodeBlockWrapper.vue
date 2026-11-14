@@ -1,7 +1,7 @@
-<!-- Server-render stand-in for Slidev's CodeBlockWrapper: registers the same clicks,
-and records the active highlight range for render.ts to apply to the lines. -->
 <script setup lang="ts">
 import { useSlideContext } from "@slidev/client";
+
+import { currentHighlightRange } from "./highlightRange.ts";
 
 const props = defineProps({
 	at: { default: "+1", type: [String, Number] },
@@ -14,21 +14,13 @@ const props = defineProps({
 });
 
 const { $clicksContext: clicks } = useSlideContext();
-let range = "";
-if (clicks && props.ranges.length) {
-	const info = clicks.calculateSince(props.at, props.ranges.length - 1);
-	clicks.register(Symbol("code-block"), info);
-	const index = info ? Math.max(0, clicks.current - info.start + 1) : Infinity;
-	const finallyRange =
-		props.finally === "last" ? props.ranges.at(-1) : String(props.finally);
-	range = props.ranges[index] ?? finallyRange;
-}
+const range = currentHighlightRange(clicks, props);
 </script>
 
 <template>
 	<div
 		class="slidev-code-wrapper relative group"
-		:data-highlight-range="range || undefined"
+		:data-highlight-range="range"
 		:data-start-line="startLine"
 		:style="{ '--start': startLine }"
 	>

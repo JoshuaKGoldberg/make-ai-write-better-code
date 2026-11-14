@@ -1,0 +1,93 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { beforeAll, describe, expect, it } from "vitest";
+
+import { createAssets, imageSize } from "./assets.ts";
+import { createCascade } from "./cascade.ts";
+import { createLayout } from "./layout.ts";
+
+const canvas = { height: 300, width: 400 };
+const sheets = [`p { font-family: "Fixture Sans"; margin: 0 }`];
+const rules = createCascade(sheets, { colorScheme: "light", viewport: canvas });
+const fixture = path.join(import.meta.dirname, "fixture");
+const red = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="30" height="20"><rect width="30" height="20" fill="red"/></svg>`;
+
+describe(createLayout, () => {
+	const layout = createLayout({
+		assets: createAssets({
+			publicDir: path.join(fixture, "public"),
+			root: fixture,
+			work: fixture,
+		}),
+		canvas,
+		colorScheme: "light",
+	});
+	const layOut = (html: string) =>
+		layout.layoutState(layout.prepare(1, html, { rules }, {}), { sheets });
+	beforeAll(async () => {
+		await layout.registerFonts([
+			{
+				data: await fs.readFile(
+					path.join(fixture, "fonts/league-spartan.woff2"),
+				),
+				name: "Fixture Sans",
+			},
+		]);
+	});
+
+	it("keeps text when Vue's comment markers surround it", async () => {
+		const { runs } = await layOut("<p><!--[-->Light<!--]--></p>");
+
+		expect([...runs.values()]).toEqual([
+			expect.objectContaining({
+				runs: [expect.objectContaining({ text: "Light" })],
+			}),
+		]);
+	});
+
+	it("lays out an element's siblings when it has display: none", async () => {
+		const { mismatches, runs } = await layOut(
+			`<p>before</p><p style="display: none">hidden</p><p>after</p>`,
+		);
+
+		expect({ mismatches, runs: [...runs.values()] }).toEqual({
+			mismatches: [],
+			runs: [
+				expect.objectContaining({
+					runs: [expect.objectContaining({ text: "before" })],
+				}),
+				expect.objectContaining({
+					runs: [expect.objectContaining({ text: "after" })],
+				}),
+			],
+		});
+	});
+
+	it("keeps an element's text when an attribute has a >", async () => {
+		const { runs } = await layOut(`<p title="a > b">titled</p>`);
+
+		expect([...runs.values()]).toEqual([
+			expect.objectContaining({
+				runs: [expect.objectContaining({ text: "titled" })],
+			}),
+		]);
+	});
+
+	it("lays out an image when its source has a <", async () => {
+		const { mismatches } = await layOut(`<img src='${red}' alt="a -> b">`);
+
+		expect(mismatches).toEqual([]);
+	});
+
+	it("renders an image to a PNG at twice its size", async () => {
+		const png = (await layout.toPng("/shape.svg")) ?? Buffer.alloc(0);
+
+		expect(imageSize(png)).toEqual({ h: 160, w: 240 });
+	});
+
+	it("averages a PNG's color", async () => {
+		const png = (await layout.toPng(red)) ?? Buffer.alloc(0);
+
+		expect(await layout.averageColor(png)).toBe("ff0000");
+	});
+});

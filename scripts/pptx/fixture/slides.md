@@ -108,3 +108,81 @@ A second paragraph.
 
 <iframe src="https://example.com/embed"></iframe>
 <video src="/clip.mp4"></video>
+
+---
+
+# Directives
+
+<span v-mark.underline="1">Marked</span>
+
+<div v-motion :initial="{ x: -80 }" :enter="{ x: 0 }">Moving</div>
+
+<div v-drag="[40, 300, 120, 30]">Dragged</div>
+
+---
+
+# Switch and Gap
+
+<v-switch>
+  <template #1>Switched one</template>
+  <template #2>Switched two</template>
+</v-switch>
+
+<v-click-gap size="2" />
+
+<div v-click>After the gap</div>
+
+---
+clicksStart: 1
+---
+
+# Highlighted Math
+
+$$ {1|2}
+\begin{array}{c}
+a \\
+b
+\end{array}
+$$
+
+---
+
+# Nested Lists
+
+- Parent
+  - Child
+- **Term**: description
+  - Sub item
+
+1. First
+   - Inner
+2. Second
+
+- Loose one
+
+- Loose two
+
+<ul class="unmarked"><li class="own-marker">Own marker</li></ul>
+
+---
+
+# Inline Content <svg class="icon" width="16" height="16" viewBox="0 0 16 16"><path d="M0 0h16v16H0z" fill="tomato" /></svg>
+
+<p>x&nbsp;&nbsp;&nbsp;y</p>
+<p>H<sub>2</sub>O</p>
+<p>Shown<span class="clipped">Clipped away</span></p>
+<div class="dark-text"><p class="unparsed-color">Parent color</p></div>
+<p class="glow">Glow</p>
+<div class="percent-parent"><p class="percent-padding">Percent padding</p></div>
+
+---
+
+# Shapes and Backgrounds
+
+<svg aria-label="Shapes" width="120" height="60" viewBox="0 0 120 60"><ellipse cx="30" cy="30" rx="30" ry="15" fill="tomato" opacity="0.5" /><g fill="teal"><polygon points="70,0 110,0 90,40" /></g></svg>
+<svg aria-label="Turned" width="60" height="60" viewBox="0 0 60 60"><polygon points="0,0 40,0 20,40" fill="teal" transform="rotate(10)" /></svg>
+
+<div class="radial">Radial</div>
+<div class="tiled">Tiled</div>
+<img class="framed" src="/photo.png" alt="Framed photo" />
+<div class="card"><h3>Card title</h3><p>Card body</p></div>

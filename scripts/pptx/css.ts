@@ -15,7 +15,7 @@ export function declarationsOf(children: csstree.List<csstree.CssNode>) {
 				important: Boolean(node.important),
 				property: node.property.toLowerCase(),
 				value: (node.value.type === "Raw"
-					? node.value.value
+					? withoutComments(node.value.value)
 					: csstree.generate(node.value)
 				).trim(),
 			});
@@ -89,4 +89,12 @@ export function splitTopLevel(value: string, separator: " " | "," | "/" | ";") {
 /** Removes a value's surrounding quotes, if it has them. */
 export function unquote(value: string) {
 	return value.trim().replace(/^(["'])(.*)\1$/s, "$2");
+}
+
+/** A raw CSS value without its comments, like the hex note UnoCSS writes after a color. */
+function withoutComments(value: string) {
+	return value.replace(
+		/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\/\*[\s\S]*?\*\//g,
+		(match, quoted?: string) => quoted ?? "",
+	);
 }

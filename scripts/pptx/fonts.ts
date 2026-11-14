@@ -30,8 +30,6 @@ export interface FontBook {
 	resolve(stack: string, weight: number, italic: boolean): ResolvedFont;
 	/** A monospaced font for spacer runs, and its no-break space's advance in em. */
 	spacer(): { advance: number; font: string };
-	/** The font family new text in PowerPoint starts in: the deck's sans-serif font. */
-	theme(): string | undefined;
 }
 
 interface FontMetrics {
@@ -332,15 +330,6 @@ export function createFontBook({
 			return face && glyph
 				? { advance: glyph.advanceWidth / face.font.unitsPerEm, font }
 				: { advance: 0.6, font: "Courier New" };
-		},
-		theme() {
-			const stack = options?.sans?.join(",");
-			if (!stack) {
-				return undefined;
-			}
-
-			const { face, font } = resolve(stack, 400, false);
-			return face ? familyName(face.font) : font || undefined;
 		},
 	};
 }

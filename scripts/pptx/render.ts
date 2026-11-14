@@ -3,14 +3,23 @@
  * Vite (with Slidev's own plugins) compiles each slide module for SSR, and Vue's
  * server renderer renders it inside a Slidev-like click context.
  */
-import type { ClicksContext, SlideInfo, SlidevConfig } from "@slidev/types";
-import type { App, Component, ObjectDirective } from "vue";
+import type {
+	ClicksContext,
+	RawAtValue,
+	ResolvedSlidevOptions,
+} from "@slidev/types";
+import type { Component, ObjectDirective, Ref } from "vue";
 
 import { createServer, resolveOptions } from "@slidev/cli";
 import { parseRangeString } from "@slidev/parser/core";
-import { renderToString } from "@vue/server-renderer";
+import { ImportType, init, parse } from "es-module-lexer";
 import { parseHTML } from "linkedom";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createSSRApp, h, reactive, ref } from "vue";
+import { renderToString } from "vue/server-renderer";
+
+import type * as NavStandIn from "./ssr/useNav.ts";
 
 export interface RenderedSlide {
 	frontmatter: Record<string, unknown>;
@@ -18,27 +27,32 @@ export interface RenderedSlide {
 	globalBottom: string;
 	/** The global-top layers for this slide. */
 	globalTop: string;
+	/** The slide's speaker notes, in Markdown. */
 	note: string;
-	/** HTML for each click state, from 0 to `total`, inside its slide-bottom and slide-top layers. */
+	/** HTML for each click state, from the slide's `clicksStart` to its last click, inside its slide-bottom and slide-top layers. */
 	states: string[];
-	total: number;
 }
 
-export interface SlideRenderer {
-	close(): Promise<void>;
-	/** Slidev's resolved deck configuration. */
-	config: SlidevConfig;
-	count: number;
-	/** CSS shared by every slide: Slidev's styles, the deck's styles, and UnoCSS utilities. */
-	globalCss(): Promise<string[]>;
-	/** The directory Vite serves at the root as-is. */
-	publicDir: string;
-	renderSlide(no: number): Promise<RenderedSlide>;
-	/** The deck's directory. */
-	root: string;
-	/** CSS a slide's module pulls in: its scoped &lt;style> blocks and its components' styles. */
-	slideCss(no: number): Promise<string[]>;
-	slides: SlideInfo[];
+type Constants = Record<
+	| "CLASS_VCLICK_CURRENT"
+	| "CLASS_VCLICK_HIDDEN"
+	| "CLASS_VCLICK_HIDDEN_EXP"
+	| "CLASS_VCLICK_PRIOR"
+	| "CLASS_VCLICK_TARGET"
+	| "injectionClicksContext"
+	| "injectionCurrentPage"
+	| "injectionFrontmatter"
+	| "injectionRenderContext"
+	| "injectionSlidevContext"
+	| "injectionSlideZoom",
+	string
+>;
+
+interface Frontmatter {
+	clicks?: number;
+	clicksStart?: number;
+	dragPos?: Record<string, string>;
+	zoom?: number;
 }
 
 type Layers = Record<
@@ -46,273 +60,96 @@ type Layers = Record<
 	Component
 >;
 
+type Server = Awaited<ReturnType<typeof createServer>>;
+
 /** Slidev's virtual module of the deck's, theme's, and addons' layer components. */
 const LAYERS = "/@slidev/global-layers";
 
-const CLASS = {
-	current: "slidev-vclick-current",
-	hidden: "slidev-vclick-hidden",
-	hiddenExplicitly: "slidev-vclick-hidden-explicitly",
-	prior: "slidev-vclick-prior",
-	target: "slidev-vclick-target",
+/** Stand-ins in ./ssr for Slidev client files that do their work in onMounted or need the router, neither of which exists on the server. */
+const STAND_INS = {
+	"builtin/CodeBlockWrapper.vue": "CodeBlockWrapper.vue",
+	"builtin/KaTexBlockWrapper.vue": "KaTexBlockWrapper.vue",
+	"builtin/ShikiMagicMove.vue": "ShikiMagicMove.vue",
+	"builtin/VClickGap.vue": "VClickGap.vue",
+	"builtin/VSwitch.ts": "VSwitch.vue",
+	"composables/useNav.ts": "useNav.ts",
 };
 
-// Components may construct browser-only observers in setup; on the server they observe nothing.
-if (!("ResizeObserver" in globalThis)) {
-	Object.assign(globalThis, {
-		ResizeObserver: class {
-			disconnect() {
-				/* Nothing to observe on the server. */
-			}
-			observe() {
-				/* Nothing to observe on the server. */
-			}
-			unobserve() {
-				/* Nothing to observe on the server. */
-			}
-		},
-	});
-}
+/** Modules whose imports can lead to CSS: sources, styles, and Slidev's and UnoCSS's virtual modules. */
+const STYLED =
+	/\.(?:css|vue|ts|js|mjs|md)(?:$|\?)|uno:|__uno|type=style|\/@slidev\//;
 
-const standIn = (name: string) =>
-	new URL(`./ssr/${name}`, import.meta.url).pathname;
+/** The compiled CSS in a CSS module as Vite's dev server serves it. */
+const VITE_CSS = /const __vite__css = ("(?:[^"\\]|\\.)*")/;
+
+const standIn = (file: string) =>
+	fileURLToPath(new URL(`./ssr/${file}`, import.meta.url));
 
 /** Starts a Slidev server for the deck at `entry` (an absolute path, or relative to the working directory). */
-export async function createSlideRenderer(
-	entry = "slides.md",
-): Promise<SlideRenderer> {
+export async function createSlideRenderer(entry: string) {
 	const options = await resolveOptions({ entry }, "dev");
+	const standIns = new Map(
+		Object.entries(STAND_INS).map(([client, file]) => [
+			path.join(options.clientRoot, client),
+			standIn(file),
+		]),
+	);
 	const server = await createServer(options, {
 		logLevel: "warn",
-		resolve: {
-			// Slidev's magic-move, code-highlight, and nav helpers do their work in onMounted
-			// or need the router, neither of which exists on the server.
-			alias: [
-				{
-					find: /^.*\/@slidev\/client\/builtin\/ShikiMagicMove\.vue$/,
-					replacement: standIn("ShikiMagicMove.vue"),
+		plugins: [
+			{
+				enforce: "pre",
+				name: "slidev-pptx-stand-ins",
+				async resolveId(source, importer, resolveOptions) {
+					const resolved = await this.resolve(source, importer, resolveOptions);
+					return resolved && standIns.get(resolved.id);
 				},
-				{
-					find: /^.*\/@slidev\/client\/builtin\/CodeBlockWrapper\.vue$/,
-					replacement: standIn("CodeBlockWrapper.vue"),
-				},
-				{
-					find: /^(?:.*\/@slidev\/client\/|\.\.?\/)(?:\.\.\/)*composables\/useNav(?:\.ts)?$/,
-					replacement: standIn("useNav.ts"),
-				},
-			],
-			dedupe: ["vue", "@vue/server-renderer"],
-		},
+			},
+		],
+		resolve: { dedupe: ["vue"] },
 		server: { hmr: false, middlewareMode: true, ws: false },
 		ssr: { noExternal: ["@slidev/client"] },
 	});
-	const root = options.userRoot;
-	const slides = options.data.slides;
-	const load = async <T>(path: string) =>
-		(await server.ssrLoadModule(path)) as T;
-	const { createClicksContextBase } = await load<{
-		createClicksContextBase: (
-			current: { value: number },
-			start?: number,
-			total?: number,
-		) => ClicksContext;
-	}>(`${options.clientRoot}/composables/useClicks.ts`);
-
-	const layers = await load<Layers>(LAYERS);
-	// The stand-in (see ssr/useNav.ts), which the alias swaps in for Slidev's.
-	const { useNav } = await load<{ useNav: () => Record<string, unknown> }>(
-		`${options.clientRoot}/composables/useNav.ts`,
-	);
-
-	function createApp(
-		no: number,
-		component: Component,
-		clicks: number,
-		totalOverride?: number,
-	) {
-		const slide = slides[no - 1];
-		const ctx = createClicksContextBase(
-			ref(clicks),
-			0,
-			totalOverride ?? (slide.frontmatter.clicks as number | undefined),
-		);
-		globalThis.__pptxNav = { clicksContext: ctx, no };
-		const ctxRef = ref(ctx);
-		const app: App = createSSRApp({ render: () => h(component) });
-		app.provide("$$slidev-clicks-context", ctxRef);
-		app.provide("$$slidev-page", ref(no));
-		app.provide("$$slidev-render-context", ref("slide"));
-		// Slidev's own injection key, spelled as Slidev spells it.
-		app.provide("$$slidev-fontmatter", slide.frontmatter);
-		app.provide("$$slidev-slide-zoom", ref(slide.frontmatter.zoom ?? 1));
-		app.provide(
-			"$$slidev-context",
-			reactive({
-				configs: options.data.config,
-				nav: useNav(),
-				themeConfigs: options.data.config.themeConfig,
-			}),
-		);
-		app.directive("click", clickDirective(ctx, "click"));
-		app.directive("after", clickDirective(ctx, "after"));
-		app.directive("click-hide", clickDirective(ctx, "hide"));
-		return { app, ctx, slide };
+	try {
+		return await createRenderer(server, options);
+	} catch (error) {
+		await server.close();
+		throw error;
 	}
-
-	async function renderState(
-		no: number,
-		clicks: number,
-		totalOverride?: number,
-	) {
-		const mod = await load<{ default: Component }>(
-			`${options.entry}__slidev_${String(no)}.md`,
-		);
-		const { app, ctx, slide } = createApp(
-			no,
-			mod.default,
-			clicks,
-			totalOverride,
-		);
-		const content = await renderToString(app);
-		// Slide layers render around each slide's content, in its click state.
-		const html = highlightCode(
-			(await renderLayer(no, layers.SlideBottom, clicks)) +
-				content +
-				(await renderLayer(no, layers.SlideTop, clicks)),
-		);
-		const total =
-			totalOverride ??
-			(slide.frontmatter.clicks as number | undefined) ??
-			Math.max(0, ...ctx.maxMap.values());
-		return { html, total };
-	}
-
-	const renderLayer = (no: number, component: Component, clicks = 0) =>
-		renderToString(createApp(no, component, clicks).app);
-
-	// Walks the client-side import graph from the given modules and returns their CSS,
-	// as Vite serves it (after PostCSS, UnoCSS directives, and Vue scoping).
-	const transforms = new Map<string, null | string>();
-	async function collectCss(entries: string[]) {
-		const seen = new Set<string>();
-		const sheets: string[] = [];
-		const visit = async (url: string) => {
-			if (seen.has(url)) {
-				return;
-			}
-
-			seen.add(url);
-			if (!transforms.has(url)) {
-				transforms.set(
-					url,
-					(await server.transformRequest(url).catch(() => null))?.code ?? null,
-				);
-			}
-
-			const code = transforms.get(url);
-			if (!code) {
-				return;
-			}
-
-			const css = /const __vite__css = ("(?:[^"\\]|\\.)*")/.exec(code);
-			if (css) {
-				sheets.push(JSON.parse(css[1]) as string);
-				return;
-			}
-
-			for (const match of code.matchAll(
-				/\bimport(?:[\w$*{},\s]+from)?\s*["']([^"']+)["']/g,
-			)) {
-				const dependency = match[1];
-				if (
-					!/^(?:vue|@vue\/|\/@vite\/|\/@id\/__x00__plugin-vue)/.test(
-						dependency,
-					) &&
-					/\.(?:css|vue|ts|js|mjs|md)(?:$|\?)|uno:|__uno|type=style|\/@slidev\//.test(
-						dependency,
-					)
-				) {
-					await visit(dependency);
-				}
-			}
-		};
-
-		for (const url of entries) {
-			await visit(url);
-		}
-
-		return sheets;
-	}
-
-	return {
-		close: () => server.close(),
-		config: options.data.config,
-		count: slides.length,
-		globalCss: () => collectCss([`${options.clientRoot}/styles/index.ts`]),
-		publicDir: server.config.publicDir,
-		async renderSlide(no) {
-			const first = await renderState(no, 0);
-			const states = [first.html];
-			for (let clicks = 1; clicks <= first.total; clicks++) {
-				states.push((await renderState(no, clicks, first.total)).html);
-			}
-
-			return {
-				frontmatter: slides[no - 1].frontmatter,
-				globalBottom: await renderLayer(no, layers.GlobalBottom),
-				globalTop: await renderLayer(no, layers.GlobalTop),
-				note: slides[no - 1].note ?? "",
-				states,
-				total: first.total,
-			};
-		},
-		root,
-		slideCss: (no) =>
-			collectCss([`${options.entry}__slidev_${String(no)}.md`, LAYERS]),
-		slides,
-	};
 }
 
-/**
- * A server-render stand-in for Slidev's v-click, v-after, and v-click-hide: each
- * resolves its click range against the slide's clicks context in render (document)
- * order, and outputs the classes Slidev's directives toggle in the browser.
- */
 function clickDirective(
-	ctx: ClicksContext,
+	constants: Constants,
+	clicksContext: ClicksContext,
 	kind: "after" | "click" | "hide",
-): ObjectDirective {
+): ObjectDirective<Element, RawAtValue> {
 	let registered = 0;
 	return {
-		getSSRProps(binding) {
-			const info = ctx.calculate(
-				kind === "after"
-					? "+0"
-					: (binding.value as Parameters<ClicksContext["calculate"]>[0]),
-			);
+		getSSRProps({ modifiers, value }) {
+			const info = clicksContext.calculate(kind === "after" ? "+0" : value);
 			if (!info) {
 				return {};
 			}
 
-			ctx.register(`v-${kind}-${String(registered++)}`, info);
-			const hide = kind === "hide" || Boolean(binding.modifiers.hide);
+			clicksContext.register(`v-${kind}-${String(registered++)}`, info);
+			const hide = kind === "hide" || Boolean(modifiers.hide);
 			const active = info.isActive.value;
 			const current = info.isCurrent.value;
-			const classes = [CLASS.target];
+			const classes = [constants.CLASS_VCLICK_TARGET];
 			if (hide ? active : !active) {
-				classes.push(CLASS.hidden);
+				classes.push(constants.CLASS_VCLICK_HIDDEN);
 			}
 
 			if (hide && active) {
-				classes.push(CLASS.hiddenExplicitly);
+				classes.push(constants.CLASS_VCLICK_HIDDEN_EXP);
 			}
 
 			if (current) {
-				classes.push(CLASS.current);
+				classes.push(constants.CLASS_VCLICK_CURRENT);
 			}
 
 			if (active && !current) {
-				classes.push(CLASS.prior);
+				classes.push(constants.CLASS_VCLICK_PRIOR);
 			}
 
 			return {
@@ -326,11 +163,209 @@ function clickDirective(
 	};
 }
 
-/**
- * Applies each code block's active line-highlight range, as Slidev's CodeBlockWrapper
- * does once mounted: lines outside the range get `slidev-code-dishonored`.
- */
-function highlightCode(html: string) {
+async function createRenderer(server: Server, options: ResolvedSlidevOptions) {
+	const load = async <T>(id: string) => (await server.ssrLoadModule(id)) as T;
+	const { createClicksContextBase } = await load<{
+		createClicksContextBase: (
+			current: Ref<number>,
+			clicksStart?: number,
+			clicksTotalOverrides?: number,
+		) => ClicksContext;
+	}>(`${options.clientRoot}/composables/useClicks.ts`);
+	const constants = await load<Constants>(`${options.clientRoot}/constants.ts`);
+	const { collectKatexEquationLines } = await load<{
+		collectKatexEquationLines: (element: Element) => Element[][];
+	}>(`${options.clientRoot}/builtin/katex-lines.ts`);
+	const { createNav, navKey } = await load<typeof NavStandIn>(
+		standIn("useNav.ts"),
+	);
+	const layers = await load<Layers>(LAYERS);
+	const { config, slides } = options.data;
+	const { client } = server.environments;
+	await init;
+	const slideModule = (slideNumber: number) =>
+		`${options.entry}__slidev_${String(slideNumber)}.md`;
+
+	function createApp(
+		slideNumber: number,
+		component: Component,
+		clicks: number,
+		totalClicks?: number,
+	) {
+		const frontmatter: Frontmatter = slides[slideNumber - 1].frontmatter;
+		const clicksContext = createClicksContextBase(
+			ref(clicks),
+			frontmatter.clicksStart,
+			totalClicks ?? frontmatter.clicks,
+		);
+		const nav = createNav(slideNumber, clicksContext);
+		const app = createSSRApp({ render: () => h(component) });
+		app.provide(constants.injectionClicksContext, ref(clicksContext));
+		app.provide(constants.injectionCurrentPage, ref(slideNumber));
+		app.provide(constants.injectionFrontmatter, frontmatter);
+		app.provide(constants.injectionRenderContext, ref("slide"));
+		app.provide(
+			constants.injectionSlidevContext,
+			reactive({ configs: config, nav, themeConfigs: config.themeConfig }),
+		);
+		app.provide(constants.injectionSlideZoom, ref(frontmatter.zoom ?? 1));
+		app.provide(navKey, nav);
+		app.directive("after", clickDirective(constants, clicksContext, "after"));
+		app.directive("click", clickDirective(constants, clicksContext, "click"));
+		app.directive(
+			"click-hide",
+			clickDirective(constants, clicksContext, "hide"),
+		);
+		app.directive("drag", {
+			getSSRProps: ({ value }) => ({
+				style: dragStyle(value, frontmatter.dragPos),
+			}),
+		});
+		app.directive("mark", markDirective(clicksContext));
+		app.directive("motion", {});
+		return { app, clicksContext };
+	}
+
+	const render = async (
+		slideNumber: number,
+		component: Component,
+		clicks: number,
+		totalClicks?: number,
+	) =>
+		renderToString(createApp(slideNumber, component, clicks, totalClicks).app);
+
+	const renderGlobalBottom = (slideNumber: number) =>
+		render(slideNumber, layers.GlobalBottom, 0);
+
+	async function staticGlobalBottomLayers() {
+		const renders = await Promise.all(
+			slides.map((_, index) => renderGlobalBottom(index + 1)),
+		);
+		const [first, ...others] = renders.map((html) =>
+			[
+				...parseHTML(`<html><body>${html}</body></html>`).document.body
+					.children,
+			].map((element) => element.outerHTML),
+		);
+		return first.flatMap((html, index) =>
+			others.every(
+				(other) => other.length === first.length && other[index] === html,
+			)
+				? [index]
+				: [],
+		);
+	}
+
+	async function renderSlide(slideNumber: number): Promise<RenderedSlide> {
+		const { frontmatter, note = "" } = slides[slideNumber - 1];
+		const { clicks, clicksStart = 0 }: Frontmatter = frontmatter;
+		const { default: content } = await load<{ default: Component }>(
+			slideModule(slideNumber),
+		);
+		const counted = createApp(slideNumber, content, clicksStart);
+		await renderToString(counted.app);
+		const totalClicks =
+			clicks ?? Math.max(0, ...counted.clicksContext.maxMap.values());
+		const states = [];
+		for (let click = clicksStart; click <= totalClicks; click++) {
+			const html = await Promise.all(
+				[layers.SlideBottom, content, layers.SlideTop].map((component) =>
+					render(slideNumber, component, click, totalClicks),
+				),
+			);
+			states.push(
+				highlightLines(html.join(""), constants, collectKatexEquationLines),
+			);
+		}
+
+		return {
+			frontmatter,
+			globalBottom: await renderGlobalBottom(slideNumber),
+			globalTop: await render(slideNumber, layers.GlobalTop, 0),
+			note,
+			states,
+		};
+	}
+
+	async function collectCss(urls: string[]) {
+		const visited = new Set<string>();
+		const sheets: string[] = [];
+		const visit = async (url: string) => {
+			if (visited.has(url) || !STYLED.test(url)) {
+				return;
+			}
+
+			visited.add(url);
+			const transformed = await client.transformRequest(url);
+			if (!transformed) {
+				return;
+			}
+
+			const css = VITE_CSS.exec(transformed.code);
+			if (css) {
+				sheets.push(JSON.parse(css[1]) as string);
+				return;
+			}
+
+			for (const { n: specifier, t: type } of parse(transformed.code)[0]) {
+				if (specifier && type === ImportType.Static) {
+					await visit(specifier);
+				}
+			}
+		};
+
+		for (const url of urls) {
+			await visit(url);
+		}
+
+		return sheets;
+	}
+
+	return {
+		close: () => server.close(),
+		/** Slidev's resolved deck configuration. */
+		config,
+		/** CSS shared by every slide: Slidev's styles, the deck's styles, and UnoCSS utilities. */
+		globalCss: () => collectCss([`${options.clientRoot}/styles/index.ts`]),
+		/** The directory Vite serves at the root as-is. */
+		publicDir: server.config.publicDir,
+		renderSlide,
+		/** The deck's directory. */
+		root: options.userRoot,
+		/** CSS a slide's module pulls in: its scoped &lt;style> blocks and its components' styles. */
+		slideCss: (slideNumber: number) =>
+			collectCss([slideModule(slideNumber), LAYERS]),
+		slides,
+		/** Indexes of the global-bottom layers' top-level elements that are the same on every slide. */
+		staticGlobalBottomLayers,
+	};
+}
+
+function dragStyle(value: unknown, dragPos: Record<string, string> = {}) {
+	const position =
+		typeof value === "string" && !value.includes(",") ? dragPos[value] : value;
+	const [left, top, width, height, rotation = 0] = (
+		Array.isArray(position) ? position : String(position).split(",")
+	).map(Number);
+	return Number.isFinite(left)
+		? {
+				height: Number.isFinite(height) ? `${String(height)}px` : undefined,
+				left: `${String(left)}px`,
+				position: "absolute",
+				top: `${String(top)}px`,
+				transform: `rotate(${String(rotation)}deg)`,
+				transformOrigin: "center center",
+				width: `${String(width)}px`,
+				zIndex: 100,
+			}
+		: { position: "absolute", zIndex: 100 };
+}
+
+function highlightLines(
+	html: string,
+	constants: Constants,
+	collectKatexEquationLines: (element: Element) => Element[][],
+) {
 	if (!html.includes("data-highlight-range")) {
 		return html;
 	}
@@ -338,26 +373,59 @@ function highlightCode(html: string) {
 	const { document } = parseHTML(
 		`<!doctype html><html><body>${html}</body></html>`,
 	);
-	for (const wrapper of document.querySelectorAll("[data-highlight-range]")) {
-		const range = wrapper.getAttribute("data-highlight-range") ?? "all";
-		const startLine = Number(wrapper.getAttribute("data-start-line") ?? 1);
-		const lines = [...wrapper.querySelectorAll(".shiki code > .line")];
-		if (range === "hide") {
-			wrapper.classList.add(CLASS.hidden);
+	for (const wrapper of document.querySelectorAll(
+		".slidev-code-wrapper, .slidev-katex-wrapper",
+	)) {
+		const range = wrapper.getAttribute("data-highlight-range");
+		if (!range) {
 			continue;
 		}
 
+		if (range === "hide") {
+			wrapper.classList.add(constants.CLASS_VCLICK_HIDDEN);
+			continue;
+		}
+
+		const katex = wrapper.classList.contains("slidev-katex-wrapper");
+		const lines = katex
+			? collectKatexEquationLines(wrapper)
+			: [...wrapper.querySelectorAll(".shiki code > .line")].map((line) => [
+					line,
+				]);
+		const startLine = Number(wrapper.getAttribute("data-start-line"));
 		const highlighted = new Set(
 			parseRangeString(lines.length + startLine - 1, range),
 		);
-		lines.forEach((line, index) => {
+		for (const [index, line] of lines.entries()) {
 			const on = highlighted.has(index + startLine);
-			line.classList.toggle("slidev-code-highlighted", on);
-			line.classList.toggle("slidev-code-dishonored", !on);
-			line.classList.toggle("highlighted", on);
-			line.classList.toggle("dishonored", !on);
-		});
+			for (const element of line) {
+				if (!katex) {
+					element.classList.toggle("slidev-code-highlighted", on);
+					element.classList.toggle("slidev-code-dishonored", !on);
+				}
+
+				element.classList.toggle("highlighted", on);
+				element.classList.toggle("dishonored", !on);
+			}
+		}
 	}
 
 	return document.body.innerHTML;
+}
+
+function markDirective(
+	clicksContext: ClicksContext,
+): ObjectDirective<Element, RawAtValue | { at?: RawAtValue }> {
+	let registered = 0;
+	return {
+		getSSRProps({ value }) {
+			const at =
+				typeof value === "object" && !Array.isArray(value) ? value?.at : value;
+			clicksContext.register(
+				`v-mark-${String(registered++)}`,
+				clicksContext.calculate(at),
+			);
+			return {};
+		},
+	};
 }

@@ -119,11 +119,6 @@ describe(createFontBook, () => {
 		]).toEqual([true, false, false, undefined]);
 	});
 
-	it("uses the deck's sans font for the theme", async () => {
-		const { book } = await createBook();
-		expect(book.theme()).toBe("League Spartan");
-	});
-
 	it("names a font as written when it's unavailable", async () => {
 		const { book } = await createBook();
 		expect(book.resolve(`"Nowhere Sans", "Nowhere Serif"`, 700, false)).toEqual(

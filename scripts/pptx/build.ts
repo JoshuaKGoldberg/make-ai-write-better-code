@@ -2,7 +2,6 @@
  * Builds a native PowerPoint deck from a Slidev deck, with no browser:
  * render (Vite SSR) → lay out (takumi + a static cascade) → extract items → write .pptx.
  */
-import { Renderer } from "@takumi-rs/core";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -10,7 +9,7 @@ import path from "node:path";
 
 import type { Assets } from "./assets.ts";
 import type { FontBook } from "./fonts.ts";
-import type { Css, LayoutOptions, Prepared } from "./layout.ts";
+import type { Css, Prepared } from "./layout.ts";
 import type { Canvas, Deck, ImageItem, Item } from "./model.ts";
 import type { RenderedSlide } from "./render.ts";
 import type {
@@ -23,7 +22,7 @@ import { createAssets } from "./assets.ts";
 import { createCascade } from "./cascade.ts";
 import { extractState, isNativeImage } from "./extract.ts";
 import { createFontBook } from "./fonts.ts";
-import { createLayout, staticLayerIndexes } from "./layout.ts";
+import { createLayout } from "./layout.ts";
 import { createSlideRenderer } from "./render.ts";
 import { transitionInto } from "./transitions.ts";
 import { writePptx } from "./write.ts";
@@ -34,7 +33,6 @@ type Layout = ReturnType<typeof createLayout>;
 interface PreparedSlide {
 	css: Css;
 	number: number;
-	options: LayoutOptions;
 	rendered: RenderedSlide;
 	states: Prepared[];
 }
@@ -71,7 +69,7 @@ async function build(
 	const renderer = await createSlideRenderer(path.resolve(root, entry));
 	try {
 		const { config } = renderer;
-		const numbers = slideNumbersOf(selected, renderer.count);
+		const numbers = slideNumbersOf(selected, renderer.slides.length);
 		const canvas: Canvas = {
 			height: Math.ceil(config.canvasWidth / config.aspectRatio),
 			width: config.canvasWidth,
@@ -113,9 +111,7 @@ async function build(
 			sheets: styled.flatMap(({ css }) => css.sheets),
 		});
 		const layout = createLayout({ assets, canvas, colorScheme: scheme });
-		const staticLayers = staticLayerIndexes(
-			rendered.map(({ globalBottom }) => globalBottom),
-		);
+		const staticLayers = await renderer.staticGlobalBottomLayers();
 
 		// Style every state first, so the fonts their text uses load before any layout.
 		const slides: PreparedSlide[] = styled.map((slide) => {
@@ -127,7 +123,6 @@ async function build(
 			};
 			return {
 				...slide,
-				options,
 				states: slide.rendered.states.map((html) =>
 					layout.prepare(slide.number, html, slide.css, options),
 				),
@@ -282,13 +277,7 @@ function createStateExporter({
 		for (const item of extracted.items) {
 			if (item.kind === "raster") {
 				const { selector, ...raster } = item;
-				const png = await layout.rasterize(
-					slide.number,
-					slide.rendered.states[click],
-					slide.css,
-					item,
-					slide.options,
-				);
+				const png = await layout.rasterize(state, slide.css, item);
 				if (png) {
 					items.push({ ...raster, file: await writePng(work, png) });
 				} else {
@@ -332,35 +321,7 @@ async function writeBackground(
 	});
 	const file = path.join(work, "background.png");
 	await fs.writeFile(file, png);
-	return { color: await averageColor(png), file };
-}
-
-/** The average color of a PNG, over white where it's transparent. */
-async function averageColor(png: Buffer) {
-	const size = 8;
-	const pixels = await new Renderer().render(
-		`<img src="png" style="width:${String(size)}px;height:${String(size)}px">`,
-		{
-			format: "raw",
-			height: size,
-			images: [{ data: png, src: "png" }],
-			width: size,
-		},
-	);
-	const count = pixels.length / 4;
-	return [0, 1, 2]
-		.map((channel) => {
-			let sum = 0;
-			for (let index = 0; index < pixels.length; index += 4) {
-				const alpha = pixels[index + 3] / 255;
-				sum += pixels[index + channel] * alpha + 255 * (1 - alpha);
-			}
-
-			return Math.round(sum / count)
-				.toString(16)
-				.padStart(2, "0");
-		})
-		.join("");
+	return { color: await layout.averageColor(png), file };
 }
 
 /** Writes a rendered PNG, named by content so identical renders share one file (and one shape). */

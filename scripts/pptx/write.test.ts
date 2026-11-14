@@ -6,7 +6,15 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { FontBook } from "./fonts.ts";
-import type { Deck, Item, ListItem, Run, Slide, TextItem } from "./model.ts";
+import type {
+	Deck,
+	Item,
+	ListItem,
+	ListParagraph,
+	Run,
+	Slide,
+	TextItem,
+} from "./model.ts";
 
 import { writePptx } from "./write.ts";
 
@@ -16,7 +24,6 @@ const fonts: FontBook = {
 	metrics: () => ({ ascent: 0.8, baseline: 0.75, descent: 0.2 }),
 	resolve: () => ({ bold: false, font: "Body" }),
 	spacer: () => ({ advance: 0.6, font: "Mono" }),
-	theme: () => "Body",
 };
 
 const run = (text: string, overrides: Partial<Run> = {}): Run => ({
@@ -26,7 +33,6 @@ const run = (text: string, overrides: Partial<Run> = {}): Run => ({
 	italic: false,
 	letterSpacing: 0,
 	size: 24,
-	superscript: false,
 	text,
 	transparency: 0,
 	underline: false,
@@ -53,15 +59,41 @@ const listItem = (numbers: number[], marker: string): ListItem => ({
 	box: { h: 80, w: 400, x: 40, y: 20 },
 	key: "list",
 	kind: "list",
-	marker,
 	order: 0,
 	paragraphs: numbers.map((number) => ({
 		baselines: [],
 		bullet: true,
+		indent: 0,
+		level: 0,
+		marker,
 		number,
 		runs: [run(`Item ${String(number)}`)],
 		visible: true,
 	})),
+	style: { align: "left", lineHeight: 36, nowrap: false },
+});
+
+const listParagraph = (
+	text: string,
+	overrides: Partial<ListParagraph> = {},
+): ListParagraph => ({
+	baselines: [],
+	bullet: true,
+	indent: 0,
+	level: 0,
+	marker: "disc",
+	number: 1,
+	runs: [run(text)],
+	visible: true,
+	...overrides,
+});
+
+const nestedList = (paragraphs: ListParagraph[]): ListItem => ({
+	box: { h: 80, w: 400, x: 40, y: 20 },
+	key: "list",
+	kind: "list",
+	order: 0,
+	paragraphs,
 	style: { align: "left", lineHeight: 36, nowrap: false },
 });
 
@@ -245,6 +277,68 @@ describe(writePptx, () => {
 		expect(await slideXml([listItem([1], '""')])).toContain(
 			'<a:buSzPct val="100000"/><a:buChar char="&#x00A0;"/>',
 		);
+	});
+
+	it("nests a paragraph a level deeper when its list is nested", async () => {
+		expect(
+			await slideXml([
+				nestedList([
+					listParagraph("Parent"),
+					listParagraph("Child", { indent: 24, level: 1 }),
+				]),
+			]),
+		).toContain('<a:pPr algn="l" lvl="1" marL="533400" indent="-266700">');
+	});
+
+	it("numbers an item from its own number when a nested list comes before it", async () => {
+		expect(
+			await slideXml([
+				nestedList([
+					listParagraph("First", { marker: "decimal" }),
+					listParagraph("Inner", { indent: 24, level: 1 }),
+					listParagraph("Second", { marker: "decimal", number: 2 }),
+				]),
+			]),
+		).toContain('<a:buAutoNum type="arabicPeriod" startAt="2"/>');
+	});
+
+	it("indents a paragraph without a marker when it continues an item", async () => {
+		expect(
+			await slideXml([
+				nestedList([
+					listParagraph("First"),
+					listParagraph("More", { bullet: false }),
+				]),
+			]),
+		).toContain(
+			'<a:pPr algn="l" marL="228600" indent="-228600"><a:lnSpc><a:spcPct val="125000"/></a:lnSpc><a:buSzPct val="100000"/><a:buChar char="&#x00A0;"/></a:pPr><a:r><a:rPr lang="en-US" kern="100" sz="2400" dirty="0"><a:solidFill><a:srgbClr val="DAE7F3"/></a:solidFill><a:latin typeface="Body" pitchFamily="34" charset="0"/><a:ea typeface="Body" pitchFamily="34" charset="-122"/><a:cs typeface="Body" pitchFamily="34" charset="-120"/></a:rPr><a:t>More</a:t>',
+		);
+	});
+
+	it("lowers a run when it's a subscript", async () => {
+		expect(
+			await slideXml([textItem([[run("H"), run("2", { script: "sub" })]])]),
+		).toContain('baseline="-40000"');
+	});
+
+	it("keeps a shadow's zero offset when text glows", async () => {
+		expect(
+			await slideXml([
+				textItem([
+					[
+						run("Glow", {
+							shadow: {
+								blur: 8,
+								color: "ffffff",
+								offsetX: 0,
+								offsetY: 0,
+								transparency: 0,
+							},
+						}),
+					],
+				]),
+			]),
+		).toContain('blurRad="101600" dist="127"');
 	});
 
 	it("makes a slide's first heading its title", async () => {

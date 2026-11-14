@@ -1,12 +1,15 @@
 /**
  * CSS color parsing: hex, named colors, rgb(), hsl(), hwb(), lab(), lch(), oklab(),
- * oklch(), color(), and color-mix(), each resolved to sRGB hex and an alpha.
+ * oklch(), color(), and color-mix(), each resolved to sRGB hex and an alpha; and
+ * the linear gradients and shadows built from them.
  */
+import type { Gradient, Shadow } from "./model.ts";
+
 import { splitTopLevel } from "./css.ts";
 
-interface Color {
-	/** Alpha, 0-1. */
-	a: number;
+export interface Color {
+	/** 0-1 */
+	alpha: number;
 	/** Six lowercase hex digits, clipped to sRGB. */
 	hex: string;
 }
@@ -97,6 +100,18 @@ const HUE_UNITS: Partial<Record<string, number>> = {
 	rad: 180 / Math.PI,
 	turn: 360,
 };
+
+const ANGLE = /^-?[\d.]+(?:deg|grad|rad|turn)$/;
+const GRADIENT = /^(?:repeating-)?(?:conic|linear|radial)-gradient\(/;
+const SIDE_ANGLES: Partial<Record<string, number>> = {
+	"to bottom": 180,
+	"to left": 270,
+	"to right": 90,
+	"to top": 0,
+};
+
+/** Below this alpha, paint can't be seen. */
+export const MIN_VISIBLE_ALPHA = 0.004;
 
 const PREDEFINED_SPACES = new Set([
 	"srgb",
@@ -302,9 +317,81 @@ export function parseColor(value: string | undefined, current?: string) {
 			.toString(16)
 			.padStart(2, "0");
 	return {
-		a: Math.min(1, Math.max(0, rgba.alpha)),
+		alpha: Math.min(1, Math.max(0, rgba.alpha)),
 		hex: channel(rgba.r) + channel(rgba.g) + channel(rgba.b),
 	} satisfies Color;
+}
+
+/** A model transparency (0-100) for an alpha, faded by an opacity. */
+export const transparencyOf = (alpha: number, opacity = 1) =>
+	(1 - alpha * opacity) * 100;
+
+/** Whether a CSS image is a gradient function. */
+export const isGradient = (image: string) => GRADIENT.test(image);
+
+/** Whether any of a gradient's stops can be seen. */
+export const hasVisibleStop = ({ stops }: Gradient) =>
+	stops.some((stop) => stop.transparency < transparencyOf(MIN_VISIBLE_ALPHA));
+
+/** Parses one `linear-gradient()`, faded by an opacity, or undefined for any other image or more than one. */
+export function parseLinearGradient(
+	image: string,
+	opacity: number,
+): Gradient | undefined {
+	const body = /^linear-gradient\((.*)\)$/s.exec(image.trim())?.[1];
+	if (body === undefined || splitTopLevel(image, ",").length > 1) {
+		return undefined;
+	}
+
+	const [direction = "", ...rest] = splitTopLevel(body, ",");
+	const sideAngle = direction.startsWith("to ")
+		? (SIDE_ANGLES[direction] ?? 180)
+		: undefined;
+	const angle = ANGLE.test(direction) ? hueOf(direction) : sideAngle;
+	const stops = angle === undefined ? [direction, ...rest] : rest;
+	return {
+		angle: angle ?? 180,
+		stops: stops.map((stop, index) => {
+			const [color = "", ...positions] = splitTopLevel(stop, " ");
+			const position = positions.find((part) => part.endsWith("%"));
+			const { alpha, hex } = parseColor(color) ?? { alpha: 0, hex: "000000" };
+			return {
+				hex,
+				position:
+					position === undefined
+						? (index / Math.max(1, stops.length - 1)) * 100
+						: parseFloat(position),
+				transparency: transparencyOf(alpha, opacity),
+			};
+		}),
+	};
+}
+
+/** Parses the first layer of a `text-shadow`, resolving its lengths with `toPixels`. */
+export function parseShadow(
+	value: string,
+	toPixels: (length: string) => number,
+	current: string,
+): Shadow | undefined {
+	const [layer = ""] = splitTopLevel(value, ",");
+	const parts = splitTopLevel(layer, " ");
+	const lengths = parts.filter((part) => /^(?:[-+.\d]|calc\()/.test(part));
+	const color = parseColor(
+		parts.find((part) => !lengths.includes(part)) ?? "currentcolor",
+		current,
+	);
+	if (!color || color.alpha < MIN_VISIBLE_ALPHA || lengths.length < 2) {
+		return undefined;
+	}
+
+	const [offsetX, offsetY, blur = 0] = lengths.map(toPixels);
+	return {
+		blur,
+		color: color.hex,
+		offsetX,
+		offsetY,
+		transparency: transparencyOf(color.alpha),
+	};
 }
 
 function hueOf(part: string) {
