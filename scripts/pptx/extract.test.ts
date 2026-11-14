@@ -110,7 +110,7 @@ describe(extractState, () => {
 		expect(items).toContainEqual(
 			expect.objectContaining({
 				box: expect.objectContaining({ height: 20, width: 20 }),
-				fill: { color: "ff0000", transparency: 0 },
+				fill: { color: "FF0000", transparency: 0 },
 				kind: "box",
 			}),
 		);
@@ -149,10 +149,24 @@ describe(extractState, () => {
 
 		expect(items).toEqual([
 			expect.objectContaining({
-				fill: expect.objectContaining({ color: "0000ff" }),
+				fill: {
+					gradient: expect.objectContaining({
+						stops: [
+							{ color: "0000FF", position: 0, transparency: 0 },
+							{ color: "0000FF", position: 100, transparency: 0 },
+						],
+					}),
+				},
 			}),
 			expect.objectContaining({
-				fill: expect.objectContaining({ color: "ff0000" }),
+				fill: {
+					gradient: expect.objectContaining({
+						stops: [
+							{ color: "FF0000", position: 0, transparency: 0 },
+							{ color: "FF0000", position: 100, transparency: 0 },
+						],
+					}),
+				},
 			}),
 		]);
 	});
@@ -268,7 +282,7 @@ describe(extractState, () => {
 		expect(items).toContainEqual(
 			expect.objectContaining({
 				box: expect.objectContaining({ height: 2 }),
-				fill: { color: "ff0000", transparency: 0 },
+				fill: { color: "FF0000", transparency: 0 },
 				kind: "box",
 			}),
 		);
@@ -293,7 +307,7 @@ describe(extractState, () => {
 					gradient: {
 						angle: expect.closeTo(165.96, 2),
 						stops: [
-							{ color: "ff0000", position: 0, transparency: 0 },
+							{ color: "FF0000", position: 0, transparency: 0 },
 							{ color: "000000", position: 100, transparency: 100 },
 						],
 					},
@@ -410,7 +424,7 @@ describe(extractState, () => {
 						runs: [
 							expect.objectContaining({
 								text: "wavy",
-								underline: { color: "ff0000", style: "wavy" },
+								underline: { color: "FF0000", style: "wavy" },
 							}),
 						],
 					},
@@ -430,9 +444,9 @@ describe(extractState, () => {
 					{
 						runs: [
 							expect.objectContaining({
-								color: "ff0000",
+								color: "FF0000",
 								text: "red",
-								underline: { color: "0000ff", style: "single" },
+								underline: { color: "0000FF", style: "single" },
 							}),
 						],
 					},
@@ -561,7 +575,7 @@ describe(extractState, () => {
 				fill: expect.objectContaining({ gradient: expect.anything() }),
 			}),
 			expect.objectContaining({
-				border: { color: "ff0000", transparency: 0, width: 4 },
+				border: { color: "FF0000", transparency: 0, width: 4 },
 			}),
 		]);
 	});
@@ -688,7 +702,7 @@ describe(extractState, () => {
 
 		expect(items).toContainEqual(
 			expect.objectContaining({
-				border: expect.objectContaining({ color: "ff0000" }),
+				border: expect.objectContaining({ color: "FF0000" }),
 				box: {
 					height: expect.closeTo(24.72, 2),
 					width: expect.closeTo(22.07, 2),
@@ -778,6 +792,226 @@ describe(extractState, () => {
 		expect(items).toEqual([
 			expect.objectContaining({
 				style: expect.objectContaining({ available: { left: 40, right: 360 } }),
+			}),
+		]);
+	});
+
+	it("draws a pill behind inline code when it sits in a list item", async () => {
+		const { items } = await extract(
+			`<ul><li>Run <code style="background: red">npm</code> first</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				fill: { color: "FF0000", transparency: 0 },
+				kind: "box",
+			}),
+			expect.objectContaining({ kind: "list" }),
+		]);
+	});
+
+	it("keeps a list native when an item holds a block without text of its own", async () => {
+		const { items } = await extract(
+			`<ul><li>Install<div><pre>npm i</pre></div></li><li>Run</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "list",
+				paragraphs: [
+					expect.objectContaining({
+						bullet: true,
+						runs: [expect.objectContaining({ text: "Install" })],
+					}),
+					expect.objectContaining({
+						bullet: true,
+						runs: [expect.objectContaining({ text: "Run" })],
+					}),
+				],
+			}),
+			expect.objectContaining({
+				kind: "code",
+				paragraphs: [{ runs: [expect.objectContaining({ text: "npm i" })] }],
+			}),
+		]);
+	});
+
+	it("leaves out a list's bullet color when it's the text's", async () => {
+		const { items } = await extract(`<ul style="color: red"><li>red</li></ul>`);
+
+		expect(items).toEqual([
+			expect.objectContaining({ bulletColor: undefined, kind: "list" }),
+		]);
+	});
+
+	it("colors a list's bullets when the marker's color isn't the text's", async () => {
+		const { items } = await extract(
+			`<ul><li>black</li></ul>`,
+			`li::marker { color: blue }`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ bulletColor: "0000FF", kind: "list" }),
+		]);
+	});
+
+	it("places an item's bullet a line above its nested list when the nested list starts it", async () => {
+		const { items } = await extract(
+			`<ul style="line-height: 20px"><li><ul><li>nested</li></ul></li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					expect.objectContaining({ baselines: [expect.closeTo(9.54)] }),
+					expect.objectContaining({ baselines: [expect.closeTo(29.54)] }),
+				],
+			}),
+		]);
+	});
+
+	it("places a code block's first baseline on its first line when that line is blank", async () => {
+		const { items } = await extract(
+			`<pre style="line-height: 20px"><span class="line"></span>\n<span class="line">second</span></pre>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				baselines: [expect.closeTo(13.54), expect.closeTo(33.54)],
+				kind: "code",
+			}),
+		]);
+	});
+
+	it("leaves out text when its ancestor's overflow clips it away", async () => {
+		const { items } = await extract(
+			`<div style="height: 30px; overflow: hidden"><p>one</p><p>two</p><p>three</p></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "one" })] }],
+			}),
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "two" })] }],
+			}),
+		]);
+	});
+
+	it("leaves out a code block's lines when its wrapper's overflow clips them", async () => {
+		const { items } = await extract(
+			`<div style="max-height: 30px; overflow-y: auto"><pre style="line-height: 15px"><span class="line">a</span>\n<span class="line">b</span>\n<span class="line">c</span></pre></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				box: { height: 30, width: 400, x: 0, y: 0 },
+				kind: "code",
+				paragraphs: [
+					{ runs: [expect.objectContaining({ text: "a" })] },
+					{ runs: [expect.objectContaining({ text: "b" })] },
+				],
+			}),
+		]);
+	});
+
+	it("crops an image and rounds it when a rounded ancestor's overflow clips it", async () => {
+		const { items } = await extract(
+			`<div style="width: 40px; height: 20px; overflow: hidden; border-radius: 6px"><img src="/photo.png" style="width: 40px; height: 40px"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				box: { height: 20, width: 40, x: 0, y: 0 },
+				crop: { height: 40, width: 40, x: 0, y: 0 },
+				kind: "image",
+				radius: 6,
+			}),
+		]);
+	});
+
+	it("doesn't clip an absolutely positioned box when the clipping ancestor isn't its containing block", async () => {
+		const { items } = await extract(
+			`<div style="position: relative"><div style="width: 50px; height: 20px; overflow: hidden"><div style="position: absolute; width: 100px; height: 100px; background: red"></div></div></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				box: { height: 100, width: 100, x: 0, y: 0 },
+				kind: "box",
+			}),
+		]);
+	});
+
+	it("keeps rotated text when only its turned corner shows inside a clip", async () => {
+		const { items } = await extract(
+			`<div style="width: 300px; height: 100px; overflow: hidden"><p style="margin-top: 102px; transform: rotate(-8deg)">rotated</p></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "rotated" })] }],
+			}),
+		]);
+	});
+
+	it("gives a box its shadow when it has a box-shadow", async () => {
+		const { items } = await extract(
+			`<div style="width: 10px; height: 10px; background: red; box-shadow: 0 2px 4px blue"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "box",
+				shadow: {
+					blur: 4,
+					color: "0000FF",
+					offsetX: 0,
+					offsetY: 2,
+					transparency: 0,
+				},
+			}),
+		]);
+	});
+
+	it("gives an image its shadow when it has a box-shadow", async () => {
+		const { items } = await extract(
+			`<img src="/photo.png" style="width: 10px; box-shadow: 0 0 8px rgb(0 0 0 / 50%)">`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "image",
+				shadow: {
+					blur: 8,
+					color: "000000",
+					offsetX: 0,
+					offsetY: 0,
+					transparency: 50,
+				},
+			}),
+		]);
+	});
+
+	it("splits a list into one list per column when it lays out in columns", async () => {
+		const { items } = await extract(
+			`<div style="column-count: 2"><ol><li>one</li><li>two</li><li>three</li><li>four</li></ol></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				box: expect.objectContaining({ x: 0 }),
+				paragraphs: [
+					expect.objectContaining({ number: 1 }),
+					expect.objectContaining({ number: 2 }),
+				],
+			}),
+			expect.objectContaining({
+				box: expect.objectContaining({ x: 188 }),
+				paragraphs: [
+					expect.objectContaining({ number: 3 }),
+					expect.objectContaining({ number: 4 }),
+				],
 			}),
 		]);
 	});

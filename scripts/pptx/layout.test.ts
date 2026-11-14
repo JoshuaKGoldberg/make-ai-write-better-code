@@ -1,6 +1,9 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import type { LaidOutRuns } from "./layout.ts";
 
 import { createAssets, imageSize } from "./assets.ts";
 import { createCascade } from "./cascade.ts";
@@ -13,18 +16,22 @@ const fixture = path.join(import.meta.dirname, "fixture");
 const red = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="30" height="20"><rect width="30" height="20" fill="red"/></svg>`;
 
 describe(createLayout, () => {
-	const layout = createLayout({
-		assets: createAssets({
-			publicDir: path.join(fixture, "public"),
-			root: fixture,
-			work: fixture,
-		}),
-		canvas,
-		colorScheme: "light",
-	});
+	let work = "";
+	let layout: ReturnType<typeof createLayout>;
 	const layOut = (html: string) =>
 		layout.layoutState(layout.prepare(1, html, { rules }, {}), { sheets });
+
 	beforeAll(async () => {
+		work = await fs.mkdtemp(path.join(os.tmpdir(), "layout-test-"));
+		layout = createLayout({
+			assets: createAssets({
+				publicDir: path.join(fixture, "public"),
+				root: fixture,
+				work,
+			}),
+			canvas,
+			colorScheme: "light",
+		});
 		await layout.registerFonts([
 			{
 				data: await fs.readFile(
@@ -33,6 +40,10 @@ describe(createLayout, () => {
 				name: "Fixture Sans",
 			},
 		]);
+	});
+
+	afterAll(async () => {
+		await fs.rm(work, { force: true, recursive: true });
 	});
 
 	it("keeps text when Vue's comment markers surround it", async () => {
@@ -147,6 +158,14 @@ describe(createLayout, () => {
 		});
 	});
 
+	it("sizes an image by its width attribute when the attribute has a px unit", async () => {
+		const { boxes, document } = await layOut(`<img src='${red}' width="60px">`);
+
+		expect(
+			boxes.get(document.querySelector("img")?.getAttribute(ID) ?? ""),
+		).toEqual(expect.objectContaining({ height: 40, width: 60 }));
+	});
+
 	it("gives white space to the text it's in when takumi lays it out as a run of its own", async () => {
 		const { document, runs } = await layOut(
 			`<p><b>bold</b> <a href="https://sli.dev">link</a></p><p style="white-space: pre"><i>{</i>\n<u>\tcount</u></p>`,
@@ -170,6 +189,70 @@ describe(createLayout, () => {
 				],
 			}),
 		]);
+	});
+
+	it("gives a paragraph its text when it starts a list item with an inside marker", async () => {
+		const { mismatches, runs } = await layOut(
+			`<ul style="list-style-position: inside"><li><p>a <b>b</b></p></li></ul>`,
+		);
+
+		expect({ mismatches, runs: [...runs.values()] }).toEqual({
+			mismatches: [],
+			runs: [
+				expect.objectContaining({
+					runs: [
+						expect.objectContaining({ text: "a " }),
+						expect.objectContaining({ text: "b" }),
+					],
+				}),
+			],
+		});
+	});
+
+	it("gives a nested list its own text when its item has an inside marker", async () => {
+		const { byId, looseRuns, mismatches, runs } = await layOut(
+			`<ul style="list-style-position: inside"><li>a <b>b</b><ul><li>c <i>d</i></li></ul></li></ul>`,
+		);
+		const ownersOf = (entries: LaidOutRuns[]) =>
+			entries.flatMap((entry) =>
+				entry.runs.map(({ owner, text }) => [byId.get(owner)?.localName, text]),
+			);
+
+		expect({
+			looseRuns: ownersOf([...looseRuns.values()].flat()),
+			mismatches,
+			runs: ownersOf([...runs.values()]),
+		}).toEqual({
+			looseRuns: [
+				["li", "a "],
+				["b", "b"],
+			],
+			mismatches: [],
+			runs: [
+				["li", "c "],
+				["i", "d"],
+			],
+		});
+	});
+
+	it("gives a display: contents element's text to its own children when it sits in text", async () => {
+		const { byId, mismatches, runs } = await layOut(
+			`<p>lead <span style="display: contents"><b>x</b></span> tail</p>`,
+		);
+
+		expect({
+			mismatches,
+			owners: [...runs.values()].flatMap((entry) =>
+				entry.runs.map(({ owner, text }) => [byId.get(owner)?.localName, text]),
+			),
+		}).toEqual({
+			mismatches: [],
+			owners: [
+				["p", "lead "],
+				["b", "x"],
+				["p", " tail"],
+			],
+		});
 	});
 
 	it("lays out a table's rows when they aren't in a row group", async () => {
@@ -203,6 +286,6 @@ describe(createLayout, () => {
 	it("averages a PNG's color", async () => {
 		const png = (await layout.toPng(red)) ?? Buffer.alloc(0);
 
-		expect(await layout.averageColor(png)).toBe("ff0000");
+		expect(await layout.averageColor(png)).toBe("FF0000");
 	});
 });

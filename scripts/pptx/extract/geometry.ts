@@ -1,7 +1,16 @@
 import type { LaidOutBox } from "../layout.ts";
-import type { Box } from "../model.ts";
+import type { Box, Canvas } from "../model.ts";
 
 import { splitTopLevel } from "../css.ts";
+
+/** The area overflow clips content to, in slide px (infinite along an axis that doesn't clip), and the clipping box's corner radius. */
+export interface Clip {
+	bottom: number;
+	left: number;
+	radius: number;
+	right: number;
+	top: number;
+}
 
 export interface Geometry {
 	box: Box;
@@ -18,8 +27,6 @@ export interface Insets {
 }
 
 export type Side = keyof Insets;
-
-export type Size = Pick<Box, "height" | "width">;
 
 export const SIDES: Side[] = ["top", "right", "bottom", "left"];
 
@@ -82,7 +89,7 @@ export function edgeBox(
 }
 
 /** The size an image of `ratio` (width over height) draws at to contain or cover `area`. */
-export function fitSize(fit: "contain" | "cover", area: Size, ratio: number) {
+export function fitSize(fit: "contain" | "cover", area: Canvas, ratio: number) {
 	return area.width / area.height > ratio === (fit === "contain")
 		? { height: area.height, width: area.height * ratio }
 		: { height: area.width / ratio, width: area.width };
@@ -111,6 +118,35 @@ export function geometryOf(laidOut: LaidOutBox) {
 		box: { height, width, x: centerX - width / 2, y: centerY - height / 2 },
 		rotation,
 		scale,
+	};
+}
+
+/** The upright bounds of a box turned by a rotation (degrees) about its center. */
+export function rotatedBounds(box: Box, rotation: number) {
+	const angle = (rotation * Math.PI) / 180;
+	const width =
+		Math.abs(box.width * Math.cos(angle)) +
+		Math.abs(box.height * Math.sin(angle));
+	const height =
+		Math.abs(box.width * Math.sin(angle)) +
+		Math.abs(box.height * Math.cos(angle));
+	return {
+		height,
+		width,
+		x: box.x + (box.width - width) / 2,
+		y: box.y + (box.height - height) / 2,
+	};
+}
+
+/** The part of a box inside a clip, empty (zero-sized) when none of it is. */
+export function clipBox(box: Box, clip: Clip) {
+	const x = Math.max(box.x, clip.left);
+	const y = Math.max(box.y, clip.top);
+	return {
+		height: Math.max(0, Math.min(box.y + box.height, clip.bottom) - y),
+		width: Math.max(0, Math.min(box.x + box.width, clip.right) - x),
+		x,
+		y,
 	};
 }
 
@@ -146,7 +182,7 @@ export function intersect(first: Box, second: Box) {
  */
 export function positionIn(
 	area: Box,
-	size: Size,
+	size: Canvas,
 	position: string,
 	resolve: (length: string, free: number) => number,
 ) {
@@ -167,6 +203,17 @@ export function positionIn(
 		x: area.x + offset(horizontal, area.width - size.width),
 		y: area.y + offset(vertical, area.height - size.height),
 	};
+}
+
+/** Whether text shows inside a clip: its middle is within the clip's height, and some of it within its width. */
+export function showsIn(box: Box, clip: Clip) {
+	const middle = box.y + box.height / 2;
+	return (
+		middle >= clip.top &&
+		middle <= clip.bottom &&
+		box.x < clip.right &&
+		box.x + box.width > clip.left
+	);
 }
 
 export const sameBox = (first: Box, second: Box) =>

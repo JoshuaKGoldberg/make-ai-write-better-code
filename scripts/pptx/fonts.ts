@@ -246,9 +246,13 @@ export function createFontBook({
 	): ResolvedFont & { face?: LoadedFace } => {
 		const family = familyOf(stack);
 		const face = family && pickFace(family, weight, italic, loadedFaces.get);
+		const [first = ""] = splitStack(stack);
 		return face
 			? { ...powerPointName(face.font, weight), face }
-			: { bold: weight >= 600, font: splitStack(stack)[0] ?? "" };
+			: {
+					bold: weight >= 600,
+					font: (isGeneric(first) ? GENERICS[first]?.[0] : undefined) ?? first,
+				};
 	};
 
 	return {

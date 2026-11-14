@@ -22,8 +22,11 @@ import { parseDeclarations } from "./css.ts";
 /** The attribute that ties takumi's nodes back to DOM elements. */
 export const ID = "data-pptx-id";
 
-/** Marks global-bottom layer elements that are the same on every slide. */
-const STATIC = "data-pptx-static";
+const STATIC_LAYER = "data-pptx-static";
+
+const RASTER_SCALE = 2;
+
+const MAX_PNG_SIDE = 4096;
 
 export const ZERO_WIDTH_SPACE = "\u200B";
 
@@ -33,7 +36,6 @@ export const GENERATED_ELEMENTS = {
 	before: "pptx-before",
 } as const;
 
-/** Stops takumi from also generating the content that became real elements. */
 const PSEUDO_RESET = `[data-pptx-before]::before,[data-pptx-after]::after{content:none !important}`;
 
 const SCROLLING_OVERFLOWS = {
@@ -116,8 +118,9 @@ export interface Prepared extends Omit<ComputedStyles, "pseudos"> {
 	fontStacks: Set<string>;
 }
 
-/** An element whose children takumi measured a different number of. */
+/** An element whose children takumi measured a different number of boxes for. */
 interface Mismatch {
+	/** How many boxes its children lay out as. */
 	children: number;
 	element: Element;
 	id: string;
@@ -163,7 +166,6 @@ export function createLayout({
 		return result;
 	};
 
-	/** An inline style with the values takumi rejects mapped to static equivalents, or else dropped, as browsers drop invalid ones. */
 	const supportedStyle = async (style: string) => {
 		const declarations = await Promise.all(
 			parseDeclarations(style).map(async ({ important, property, value }) => {
@@ -178,6 +180,17 @@ export function createLayout({
 		const copy = content.cloneNode(true) as Element;
 		for (const image of copy.querySelectorAll("img:not([src]), img[src='']")) {
 			image.remove();
+		}
+
+		for (const image of copy.querySelectorAll("img")) {
+			for (const dimension of ["height", "width"]) {
+				const pixels = /^\s*([\d.]+)px\s*$/i.exec(
+					image.getAttribute(dimension) ?? "",
+				)?.[1];
+				if (pixels) {
+					image.setAttribute(dimension, pixels);
+				}
+			}
 		}
 
 		for (const element of [copy, ...copy.querySelectorAll("[style]")]) {
@@ -238,13 +251,14 @@ export function createLayout({
 		document: Document,
 		prepared: Prepared,
 		sheets: string[],
-		pixels: { height: number; width: number },
+		size: Canvas,
 	) =>
 		renderer.render(await takumiNodeOf(slideContentOf(document)), {
 			...(await renderOptions(prepared, sheets)),
-			...pixels,
-			devicePixelRatio: 2,
+			devicePixelRatio: RASTER_SCALE,
 			format: "png",
+			height: Math.round(size.height * RASTER_SCALE),
+			width: Math.round(size.width * RASTER_SCALE),
 		});
 
 	async function measureLayout(prepared: Prepared, sheets: string[]) {
@@ -392,10 +406,7 @@ export function createLayout({
 			content,
 			`background:transparent !important;transform:translate(${String(-box.x)}px,${String(-box.y)}px)`,
 		);
-		return renderPng(document, prepared, sheets, {
-			height: box.height * 2,
-			width: box.width * 2,
-		});
+		return renderPng(document, prepared, sheets, box);
 	}
 
 	async function renderBackground(css: Css, options: LayoutOptions) {
@@ -421,10 +432,7 @@ export function createLayout({
 			}
 		}
 
-		return renderPng(document, prepared, css.sheets, {
-			height: Math.round(canvas.height * 2),
-			width: Math.round(canvas.width * 2),
-		});
+		return renderPng(document, prepared, css.sheets, canvas);
 	}
 
 	async function toPng(src: string) {
@@ -434,7 +442,10 @@ export function createLayout({
 		}
 
 		const { height, width } = imageSize(data) ?? canvas;
-		const scale = Math.min(2, 4096 / Math.max(width, height));
+		const scale = Math.min(
+			RASTER_SCALE,
+			MAX_PNG_SIDE / Math.max(width, height),
+		);
 		return renderer.render(
 			image({ src: data, style: { display: "block", height, width } }),
 			{
@@ -463,6 +474,7 @@ export function createLayout({
 
 				return Math.round(sum / count)
 					.toString(16)
+					.toUpperCase()
 					.padStart(2, "0");
 			})
 			.join("");
@@ -490,7 +502,7 @@ export function isBackgroundOnly(
 	styles: Map<Element, ComputedStyle>,
 ) {
 	return (
-		element.closest(`[${STATIC}]`) !== null &&
+		element.closest(`[${STATIC_LAYER}]`) !== null &&
 		(styles.get(element)?.filter ?? "none") !== "none"
 	);
 }
@@ -554,7 +566,7 @@ function buildDocument(
 
 	const layers = slideContentOf(document).children;
 	for (const index of staticLayers) {
-		layers[index].setAttribute(STATIC, "");
+		layers[index].setAttribute(STATIC_LAYER, "");
 	}
 
 	let next = 0;
@@ -570,10 +582,14 @@ function multiColumns(document: Document, styles: Map<Element, ComputedStyle>) {
 	for (const element of document.querySelectorAll("*")) {
 		const style = styles.get(element);
 		const count = Number(style?.["column-count"]);
+		const [first] = element.children;
 		if (count > 1 && element.children.length) {
 			columns.push({
 				count,
-				element,
+				element:
+					element.children.length === 1 && /^[ou]l$/.test(first.localName)
+						? first
+						: element,
 				gap:
 					style?.["column-gap"] && style["column-gap"] !== "normal"
 						? style["column-gap"]
@@ -838,7 +854,7 @@ function zipLayout(
 
 		const children = childrenOf(node);
 		if (!zipInline(children, lines.children, id)) {
-			mismatch(id, children.length, lines.children.length);
+			mismatch(id, apartOf(children).length, lines.children.length);
 		}
 	};
 
@@ -850,15 +866,14 @@ function zipLayout(
 			boxes.set(own, box);
 		}
 
-		// A list item's ::marker is measured as its first child, or inside its text as its first run.
-		const inside = hasStyle(
-			node,
-			(style) => style["list-style-position"] === "inside",
-		);
+		// A list item's ::marker is measured as its first child, or as its first run when it's inside the item's own text.
+		const markerInRuns =
+			measured.runs.length > 0 &&
+			hasStyle(node, (style) => style["list-style-position"] === "inside");
 		const marker = hasStyle(node, hasMarker) ? 1 : 0;
 		const lines = {
-			children: measured.children.slice(inside ? 0 : marker),
-			runs: measured.runs.slice(inside ? marker : 0),
+			children: measured.children.slice(markerInRuns ? 0 : marker),
+			runs: measured.runs.slice(markerInRuns ? marker : 0),
 		};
 		if (lines.runs.length) {
 			zipLines(node, lines, parentId, box);
@@ -899,7 +914,7 @@ function zipLayout(
 		}
 
 		if (segments.length !== lines.children.length) {
-			mismatch(id, children.length, lines.children.length);
+			mismatch(id, segments.length, lines.children.length);
 		}
 
 		const ownsLine =

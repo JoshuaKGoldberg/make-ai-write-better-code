@@ -36,7 +36,7 @@ describe(createSlideRenderer, () => {
 			createSlideRenderer({ ...deck, clientRoot: import.meta.dirname }),
 		).rejects.toThrow(
 			new BuildPptxError(
-				"This version of Slidev isn't supported: its client has no builtin/CodeBlockWrapper.vue, builtin/CodeGroup.vue, builtin/KaTexBlockWrapper.vue, builtin/Monaco.vue, builtin/ShikiMagicMove.vue, builtin/VClickGap.vue, builtin/VSwitch.ts, composables/useNav.ts to stand in for.",
+				"This version of Slidev isn't supported: its client has no builtin/CodeBlockWrapper.vue, builtin/CodeGroup.vue, builtin/KaTexBlockWrapper.vue, builtin/Mermaid.vue, builtin/Monaco.vue, builtin/ShikiMagicMove.vue, builtin/VClickGap.vue, builtin/VSwitch.ts, composables/useNav.ts to stand in for.",
 			),
 		);
 	});
@@ -176,6 +176,31 @@ describe(createSlideRenderer, () => {
 		});
 	});
 
+	it("reports a v-mark when only a later click shows it", async () => {
+		expect((await renderSlideTitled("Switch and Gap")).problems).toEqual([
+			{ message: "Couldn't draw a v-mark: Marked later", severity: "warning" },
+		]);
+	});
+
+	it("renders a Mermaid diagram's container without running Mermaid when a slide has one", async () => {
+		expect((await renderSlideTitled("Embeds")).states[0]).toContain(
+			'<div class="mermaid"></div>',
+		);
+	});
+
+	it("renders Toc and Link entries as links without problems when a slide has them", async () => {
+		expect(await renderSlideTitled("Navigation")).toEqual(
+			expect.objectContaining({
+				problems: [],
+				states: [
+					expect.stringMatching(
+						/<a href="#\/22"><!--\[--><div><p>Navigation<\/p><\/div><!--\]--><\/a>.*<a href="#2"><!--\[-->Go to Lists<!--\]--><\/a>/s,
+					),
+				],
+			}),
+		);
+	});
+
 	it("counts a code block's clicks after its wrapping v-click when a v-click wraps it", async () => {
 		const { states } = await renderSlideTitled("Wrapped Code");
 
@@ -248,7 +273,7 @@ describe(createSlideRenderer, () => {
 			}
 
 			await fs.symlink(
-				path.join(import.meta.dirname, "../../node_modules"),
+				path.resolve("node_modules"),
 				path.join(directory, "node_modules"),
 			);
 			const copy = (await import(

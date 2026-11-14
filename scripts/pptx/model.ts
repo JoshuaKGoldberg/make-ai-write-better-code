@@ -1,7 +1,7 @@
 /**
  * The intermediate model between layout and PowerPoint writing: every slide's
  * click states, each a flat list of positioned, styled items in slide pixels
- * (CSS px on the deck's canvas).
+ * (CSS px on the deck's canvas). Colors are uppercase hex, like "FF0000".
  */
 
 export interface Box {
@@ -39,12 +39,13 @@ export interface Deck {
 /** What extraction produces: model items, with elements still to be rendered as pictures. */
 export type ExtractedItem = Exclude<Item, RasterItem> | RasterRequest;
 
-export interface Fill {
-	color: string;
-	gradient?: Gradient;
-	/** 0-100 */
-	transparency: number;
-}
+export type Fill =
+	| {
+			color: string;
+			/** 0-100 */
+			transparency: number;
+	  }
+	| { gradient: Gradient };
 
 export interface Gradient {
 	/** CSS angle in degrees: 180 runs top to bottom. */
@@ -62,6 +63,7 @@ export interface ImageItem extends ItemBase {
 	file: string;
 	kind: "image";
 	radius: number;
+	shadow?: Shadow;
 	src: string;
 	/** 0-100 */
 	transparency: number;
@@ -79,6 +81,7 @@ export type Item =
 
 export interface ListItem extends ItemBase {
 	box: Box;
+	/** The markers' color, when ::marker gives them one other than the text's. */
 	bulletColor?: string;
 	kind: "list";
 	/** Each list item's paragraphs, then its nested lists' paragraphs. */
@@ -223,6 +226,7 @@ interface BoxItem extends ItemBase {
 	kind: "box";
 	radius: number;
 	rotation: number;
+	shadow?: Shadow;
 }
 
 interface EllipseItem extends ItemBase {

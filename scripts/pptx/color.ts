@@ -1,11 +1,11 @@
-import type { Gradient, Shadow } from "./model.ts";
+import type { Canvas, Gradient, Shadow } from "./model.ts";
 
 import { splitTopLevel } from "./css.ts";
 
 export interface Color {
 	/** 0-1 */
 	alpha: number;
-	/** Six lowercase hex digits, clipped to sRGB. */
+	/** Six uppercase hex digits, clipped to sRGB. */
 	hex: string;
 }
 
@@ -307,6 +307,7 @@ export function parseColor(value: string | undefined, current?: string) {
 	const channel = (level: number) =>
 		Math.round(Math.min(1, Math.max(0, level)) * 255)
 			.toString(16)
+			.toUpperCase()
 			.padStart(2, "0");
 	return {
 		alpha: Math.min(1, Math.max(0, rgba.alpha)),
@@ -329,7 +330,8 @@ export const hasVisibleStop = ({ stops }: Gradient) =>
 export function parseLinearGradient(
 	image: string,
 	opacity: number,
-	size: { height: number; width: number },
+	size: Canvas,
+	current?: string,
 ) {
 	const body = /^linear-gradient\((.*)\)$/s.exec(image.trim())?.[1];
 	if (body === undefined || splitTopLevel(image, ",").length > 1) {
@@ -361,51 +363,61 @@ export function parseLinearGradient(
 						: [],
 			);
 			return (percentages.length ? percentages : [undefined]).map(
-				(position) => ({ color: parseColor(color), position }),
+				(position) => ({ color: parseColor(color, current), position }),
 			);
 		});
 	const positions = spreadPositions(stops.map(({ position }) => position));
 	const parsed = stops.flatMap(({ color }, index) =>
-		color
-			? [
-					{
-						color: color.hex,
-						position: positions[index],
-						transparency: transparencyOf(color.alpha, opacity),
-					},
-				]
-			: [],
+		color ? [{ color, position: positions[index] }] : [],
 	);
 	return parsed.length === stops.length
-		? ({ angle, stops: parsed } satisfies Gradient)
+		? ({
+				angle,
+				stops: withVisibleColors(parsed).map(({ color, position }) => ({
+					color: color.hex,
+					position,
+					transparency: transparencyOf(color.alpha, opacity),
+				})),
+			} satisfies Gradient)
 		: undefined;
 }
 
-/** Parses the first layer of a `text-shadow`, resolving its lengths with `toPixels`. */
-export function parseShadow(
+/** Parses the layers of a `text-shadow` or `box-shadow` that show outside their box, top first, resolving their lengths with `toPixels`; a spread is left out. */
+export function parseShadows(
 	value: string,
 	toPixels: (length: string) => number,
 	current: string,
 ) {
-	const [layer = ""] = splitTopLevel(value, ",");
-	const parts = splitTopLevel(layer, " ");
-	const lengths = parts.filter((part) => LENGTH_START.test(part));
-	const color = parseColor(
-		parts.find((part) => !lengths.includes(part)) ?? "currentcolor",
-		current,
-	);
-	if (!color || color.alpha < MIN_VISIBLE_ALPHA || lengths.length < 2) {
-		return undefined;
-	}
+	return splitTopLevel(value, ",").flatMap((layer) => {
+		const parts = splitTopLevel(layer, " ");
+		const lengths = parts.filter((part) => LENGTH_START.test(part));
+		const color = parseColor(
+			parts.find((part) => !lengths.includes(part) && part !== "inset") ??
+				"currentcolor",
+			current,
+		);
+		if (
+			parts.includes("inset") ||
+			!color ||
+			color.alpha < MIN_VISIBLE_ALPHA ||
+			lengths.length < 2
+		) {
+			return [];
+		}
 
-	const [offsetX, offsetY, blur = 0] = lengths.map(toPixels);
-	return {
-		blur,
-		color: color.hex,
-		offsetX,
-		offsetY,
-		transparency: transparencyOf(color.alpha),
-	} satisfies Shadow;
+		const [offsetX, offsetY, blur = 0] = lengths.map(toPixels);
+		return blur || offsetX || offsetY
+			? [
+					{
+						blur,
+						color: color.hex,
+						offsetX,
+						offsetY,
+						transparency: transparencyOf(color.alpha),
+					} satisfies Shadow,
+				]
+			: [];
+	});
 }
 
 function degreesOf(part: string) {
@@ -414,10 +426,7 @@ function degreesOf(part: string) {
 		: parseFloat(part) * (HUE_UNITS[/[a-z]*$/.exec(part)?.[0] ?? ""] ?? NaN);
 }
 
-function directionAngle(
-	direction: string,
-	{ height, width }: { height: number; width: number },
-) {
+function directionAngle(direction: string, { height, width }: Canvas) {
 	if (ANGLE.test(direction)) {
 		return degreesOf(direction);
 	}
@@ -643,10 +652,35 @@ function spreadPositions(positions: (number | undefined)[]) {
 	});
 }
 
+/**
+ * Gives each fully transparent stop its visible neighbors' colors (a stop between two becomes
+ * one of each): CSS fades through transparency toward them, but PowerPoint interpolates color
+ * and alpha apart, which would fade through the transparent stop's own color, like black.
+ */
 function withoutInterpolation(part: string) {
 	const words = splitTopLevel(part, " ");
 	const start = words.indexOf("in");
 	return start < 0
 		? part
 		: words.toSpliced(start, words[start + 3] === "hue" ? 4 : 2).join(" ");
+}
+
+function withVisibleColors(stops: { color: Color; position: number }[]) {
+	const visible = (stop: { color: Color }) => stop.color.alpha > 0;
+	return stops.flatMap((stop, index) => {
+		if (visible(stop)) {
+			return [stop];
+		}
+
+		const neighbors = [
+			stops.findLast(
+				(other, otherIndex) => otherIndex < index && visible(other),
+			),
+			stops.find((other, otherIndex) => otherIndex > index && visible(other)),
+		];
+		const colored = neighbors.flatMap((neighbor) =>
+			neighbor ? [{ ...stop, color: { ...neighbor.color, alpha: 0 } }] : [],
+		);
+		return colored.length ? colored : [stop];
+	});
 }

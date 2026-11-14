@@ -1,7 +1,6 @@
 import type { Color } from "../color.ts";
-import type { Fill, Gradient, Point, TextStyle } from "../model.ts";
+import type { Canvas, Fill, Gradient, Point, TextStyle } from "../model.ts";
 import type { ExtractContext } from "./context.ts";
-import type { Size } from "./geometry.ts";
 
 import { MIN_VISIBLE_ALPHA, parseColor, transparencyOf } from "../color.ts";
 import { availableSpanOf } from "./boxes.ts";
@@ -11,7 +10,7 @@ import { rasterItem } from "./images.ts";
 import { isRightToLeft, runStyle } from "./runs.ts";
 
 interface DrawnShape {
-	box: Size;
+	box: Canvas;
 	scale: number;
 	shape: Element;
 	svg: Element;
@@ -267,17 +266,20 @@ function shapePaint(
 				: undefined,
 		fill:
 			fill &&
-			({
-				color: fill.hex,
-				gradient: fill.gradient && {
-					...fill.gradient,
-					stops: fill.gradient.stops.map((stop) => ({
-						...stop,
-						transparency: 100 - (100 - stop.transparency) * opacity,
-					})),
-				},
-				transparency: transparencyOf(fill.alpha, opacity),
-			} satisfies Fill),
+			((fill.gradient
+				? {
+						gradient: {
+							...fill.gradient,
+							stops: fill.gradient.stops.map((stop) => ({
+								...stop,
+								transparency: 100 - (100 - stop.transparency) * opacity,
+							})),
+						},
+					}
+				: {
+						color: fill.hex,
+						transparency: transparencyOf(fill.alpha, opacity),
+					}) satisfies Fill),
 	};
 }
 
@@ -286,7 +288,7 @@ function svgGradient(
 	context: ExtractContext,
 	svg: Element,
 	id: string,
-	{ height, width }: Size,
+	{ height, width }: Canvas,
 ) {
 	const gradient = svg.querySelector(`[id="${id}"]`);
 	if (!gradient) {
@@ -349,7 +351,9 @@ function svgGradient(
 				100,
 		gradient: { angle, stops },
 		hex: [0, 2, 4]
-			.map((index) => average(index).toString(16).padStart(2, "0"))
+			.map((index) =>
+				average(index).toString(16).toUpperCase().padStart(2, "0"),
+			)
 			.join(""),
 	};
 }

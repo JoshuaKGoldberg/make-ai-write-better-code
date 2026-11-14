@@ -56,6 +56,7 @@ describe(resolveLength, () => {
 		["clamp(50px, 20vw, 400px)", 160],
 		["clamp(1rem, 1vw, 3rem)", 20],
 		["calc(2 * (1rem + 4px))", 48],
+		["calc(-1 * 1rem)", -20],
 	])("resolves %s against its context", (value, expected) => {
 		expect(
 			resolveLength(value, {
@@ -91,6 +92,14 @@ describe(createCascade, () => {
 			`<p id="x" class="a">a</p>`,
 			`@layer one { #x { color: red } } @layer two { p { color: lime } }`,
 		);
+		expect(of("p")?.color).toBe("lime");
+	});
+
+	it.each([
+		["@layer a { @layer b { p { color: red } } p { color: lime } }"],
+		["@layer a { p { color: lime } } @layer a.b { p { color: red } }"],
+	])("ranks a layer's own rules above its nested layers' in %s", (css) => {
+		const { of } = stylesOf(`<p>a</p>`, css);
 		expect(of("p")?.color).toBe("lime");
 	});
 
@@ -401,7 +410,7 @@ describe(computeStyles, () => {
 		["small", { "font-size": "13.328px" }],
 		["aside", { display: "block" }],
 	])("applies user-agent defaults to %s", (tag, expected) => {
-		const { of } = stylesOf(`<table><tr><${tag}>a</${tag}></tr></table>`, "");
+		const { of } = stylesOf(`<${tag}>a</${tag}>`, "");
 		expect(of(tag)).toMatchObject(expected);
 	});
 
@@ -530,6 +539,30 @@ describe(computeStyles, () => {
 		expect(of("p")?.["background-clip"]).toBe(clip);
 	});
 
+	it("inherits every font property when the font shorthand is inherit", () => {
+		const { of } = stylesOf(
+			`<div><p>a</p></div>`,
+			`div { font: italic 700 12px/2 serif } p { font-size: 30px; font: inherit }`,
+		);
+		expect(of("p")).toEqual(
+			expect.objectContaining({
+				"font-family": "serif",
+				"font-size": "12px",
+				"font-style": "italic",
+				"font-weight": "700",
+				"line-height": "2",
+			}),
+		);
+	});
+
+	it("resolves letter-spacing in em against the font size", () => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`p { font-size: 20px; letter-spacing: 0.025em }`,
+		);
+		expect(of("p")?.["letter-spacing"]).toBe("0.5px");
+	});
+
 	it("expands the font shorthand, resetting what it leaves out", () => {
 		const { of } = stylesOf(
 			`<p class="a">a</p><p class="b">b</p>`,
@@ -647,7 +680,6 @@ describe(computeStyles, () => {
 		[`"icon" / "alt text"`, "icon"],
 		[`""`, ""],
 		[`"\\FFFFFF"`, "\uFFFD"],
-		[`counter(item) "."`, "."],
 	])("generates %s as content", (content, text) => {
 		const { pseudosOf } = stylesOf(
 			`<p title="hi">a</p>`,
@@ -656,7 +688,7 @@ describe(computeStyles, () => {
 		expect(pseudosOf("p")?.after?.text).toBe(text);
 	});
 
-	it.each(["none", "normal"])(
+	it.each(["none", "normal", `counter(item) "."`])(
 		"generates nothing when content is %s",
 		(content) => {
 			const { pseudosOf } = stylesOf(

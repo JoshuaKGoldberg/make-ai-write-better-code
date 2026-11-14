@@ -4,34 +4,34 @@ import {
 	isGradient,
 	parseColor,
 	parseLinearGradient,
-	parseShadow,
+	parseShadows,
 } from "./color.ts";
 
 describe(parseColor, () => {
 	it.each([
-		["red", "ff0000", 1],
+		["red", "FF0000", 1],
 		["RebeccaPurple", "663399", 1],
-		["#0af", "00aaff", 1],
-		["#00aaff80", "00aaff", 128 / 255],
-		["rgb(0 163 255 / 3.25%)", "00a3ff", 0.0325],
-		["rgba(255, 0, 0, 0.5)", "ff0000", 0.5],
-		["hsl(120 100% 50%)", "00ff00", 1],
+		["#0af", "00AAFF", 1],
+		["#00aaff80", "00AAFF", 128 / 255],
+		["rgb(0 163 255 / 3.25%)", "00A3FF", 0.0325],
+		["rgba(255, 0, 0, 0.5)", "FF0000", 0.5],
+		["hsl(120 100% 50%)", "00FF00", 1],
 		["hsl(210deg, 50%, 40%, .5)", "336699", 0.5],
-		["hsl(0.5turn 100% 50%)", "00ffff", 1],
-		["hsl(200grad 100% 50%)", "00ffff", 1],
-		["hsl(3.14159rad 100% 50%)", "00ffff", 1],
-		["hsl(none 50% 50%)", "bf4040", 1],
-		["hwb(0 0% 0%)", "ff0000", 1],
+		["hsl(0.5turn 100% 50%)", "00FFFF", 1],
+		["hsl(200grad 100% 50%)", "00FFFF", 1],
+		["hsl(3.14159rad 100% 50%)", "00FFFF", 1],
+		["hsl(none 50% 50%)", "BF4040", 1],
+		["hwb(0 0% 0%)", "FF0000", 1],
 		["hwb(0 60% 60%)", "808080", 1],
-		["oklch(62.8% 0.2577 29.23)", "ff0000", 1],
-		["oklab(0.628 0.2249 0.1258)", "ff0000", 1],
-		["lab(54.29 80.82 69.89)", "ff0000", 1],
-		["lch(54.29 106.84 40.85)", "ff0000", 1],
+		["oklch(62.8% 0.2577 29.23)", "FF0000", 1],
+		["oklab(0.628 0.2249 0.1258)", "FF0000", 1],
+		["lab(54.29 80.82 69.89)", "FF0000", 1],
+		["lch(54.29 106.84 40.85)", "FF0000", 1],
 		["color(srgb 0.5 0.5 0.5)", "808080", 1],
 		["color(srgb-linear 0.2159 0.2159 0.2159)", "808080", 1],
-		["color(xyz-d65 0.4124 0.2126 0.0193)", "ff0000", 1],
-		["color(xyz-d50 0.4360 0.2225 0.0139)", "ff0000", 1],
-		["color(display-p3 1 0 0)", "ff0000", 1],
+		["color(xyz-d65 0.4124 0.2126 0.0193)", "FF0000", 1],
+		["color(xyz-d50 0.4360 0.2225 0.0139)", "FF0000", 1],
+		["color(display-p3 1 0 0)", "FF0000", 1],
 	])("parses %s", (value, hex, alpha) => {
 		expect(parseColor(value)).toEqual({ alpha: expect.closeTo(alpha), hex });
 	});
@@ -39,17 +39,20 @@ describe(parseColor, () => {
 	it.each([
 		["color-mix(in srgb, red 50%, blue)", "800080"],
 		["color-mix(in srgb, 50% red, blue)", "800080"],
-		["color-mix(in srgb, red, blue 25%)", "bf0040"],
-		["color-mix(in hsl, hsl(350 100% 50%), hsl(30 100% 50%))", "ff2b00"],
-		["color-mix(in oklch, red, blue)", "ba00c2"],
-		["color-mix(in display-p3, red, blue)", "800a91"],
+		["color-mix(in srgb, red, blue 25%)", "BF0040"],
+		["color-mix(in hsl, hsl(350 100% 50%), hsl(30 100% 50%))", "FF2B00"],
+		["color-mix(in oklch, red, blue)", "BA00C2"],
+		["color-mix(in display-p3, red, blue)", "800A91"],
+		["color-mix(in lab, red, blue)", "C10088"],
+		["color-mix(in lch, red, blue)", "F50086"],
+		["color-mix(in hwb, red, blue)", "FF00FF"],
 	])("mixes %s", (value, hex) => {
 		expect(parseColor(value)).toEqual({ alpha: 1, hex });
 	});
 
 	it("mixes with transparent as an opacity", () => {
 		expect(parseColor("color-mix(in oklab, #00a3ff 20%, transparent)")).toEqual(
-			{ alpha: expect.closeTo(0.2), hex: "00a3ff" },
+			{ alpha: expect.closeTo(0.2), hex: "00A3FF" },
 		);
 	});
 
@@ -109,8 +112,8 @@ describe(parseLinearGradient, () => {
 		).toEqual({
 			angle: 180,
 			stops: [
-				{ color: "ff0000", position: 0, transparency: 0 },
-				{ color: "0000ff", position: 100, transparency: 0 },
+				{ color: "FF0000", position: 0, transparency: 0 },
+				{ color: "0000FF", position: 100, transparency: 0 },
 			],
 		});
 	});
@@ -125,8 +128,8 @@ describe(parseLinearGradient, () => {
 		).toEqual({
 			angle: 90,
 			stops: [
-				{ color: "ff0000", position: 20, transparency: 0 },
-				{ color: "0000ff", position: 80, transparency: 0 },
+				{ color: "FF0000", position: 20, transparency: 0 },
+				{ color: "0000FF", position: 80, transparency: 0 },
 			],
 		});
 	});
@@ -167,8 +170,8 @@ describe(parseLinearGradient, () => {
 			).toEqual({
 				angle,
 				stops: [
-					{ color: "ff0000", position: 0, transparency: 0 },
-					{ color: "0000ff", position: 100, transparency: 0 },
+					{ color: "FF0000", position: 0, transparency: 0 },
+					{ color: "0000FF", position: 100, transparency: 0 },
 				],
 			});
 		},
@@ -180,8 +183,8 @@ describe(parseLinearGradient, () => {
 		).toEqual({
 			angle: 0,
 			stops: [
-				{ color: "ff0000", position: 0, transparency: 0 },
-				{ color: "0000ff", position: 100, transparency: 0 },
+				{ color: "FF0000", position: 0, transparency: 0 },
+				{ color: "0000FF", position: 100, transparency: 0 },
 			],
 		});
 	});
@@ -193,8 +196,8 @@ describe(parseLinearGradient, () => {
 				width: 100,
 			})?.stops,
 		).toEqual([
-			{ color: "ff0000", position: expect.closeTo(25), transparency: 0 },
-			{ color: "0000ff", position: expect.closeTo(75), transparency: 0 },
+			{ color: "FF0000", position: expect.closeTo(25), transparency: 0 },
+			{ color: "0000FF", position: expect.closeTo(75), transparency: 0 },
 		]);
 	});
 
@@ -203,9 +206,9 @@ describe(parseLinearGradient, () => {
 			parseLinearGradient("linear-gradient(red 0%, lime, blue 20%)", 1, square)
 				?.stops,
 		).toEqual([
-			{ color: "ff0000", position: 0, transparency: 0 },
-			{ color: "00ff00", position: 10, transparency: 0 },
-			{ color: "0000ff", position: 20, transparency: 0 },
+			{ color: "FF0000", position: 0, transparency: 0 },
+			{ color: "00FF00", position: 10, transparency: 0 },
+			{ color: "0000FF", position: 20, transparency: 0 },
 		]);
 	});
 
@@ -214,8 +217,8 @@ describe(parseLinearGradient, () => {
 			parseLinearGradient("linear-gradient(red 50%, blue 20%)", 1, square)
 				?.stops,
 		).toEqual([
-			{ color: "ff0000", position: 50, transparency: 0 },
-			{ color: "0000ff", position: 50, transparency: 0 },
+			{ color: "FF0000", position: 50, transparency: 0 },
+			{ color: "0000FF", position: 50, transparency: 0 },
 		]);
 	});
 
@@ -223,16 +226,55 @@ describe(parseLinearGradient, () => {
 		expect(
 			parseLinearGradient("linear-gradient(red, 30%, blue)", 1, square)?.stops,
 		).toEqual([
-			{ color: "ff0000", position: 0, transparency: 0 },
-			{ color: "0000ff", position: 100, transparency: 0 },
+			{ color: "FF0000", position: 0, transparency: 0 },
+			{ color: "0000FF", position: 100, transparency: 0 },
 		]);
 	});
 
-	it("fades a transparent stop", () => {
+	it("colors a transparent stop as its visible neighbor when it's at an end", () => {
 		expect(
 			parseLinearGradient("linear-gradient(transparent, red)", 1, square)
-				?.stops[0],
-		).toEqual({ color: "000000", position: 0, transparency: 100 });
+				?.stops,
+		).toEqual([
+			{ color: "FF0000", position: 0, transparency: 100 },
+			{ color: "FF0000", position: 100, transparency: 0 },
+		]);
+	});
+
+	it("splits a transparent stop into its neighbors' colors when it's between them", () => {
+		expect(
+			parseLinearGradient("linear-gradient(red, transparent, blue)", 1, square)
+				?.stops,
+		).toEqual([
+			{ color: "FF0000", position: 0, transparency: 0 },
+			{ color: "FF0000", position: 50, transparency: 100 },
+			{ color: "0000FF", position: 50, transparency: 100 },
+			{ color: "0000FF", position: 100, transparency: 0 },
+		]);
+	});
+
+	it("keeps a transparent stop's color when no stop is visible", () => {
+		expect(
+			parseLinearGradient(
+				"linear-gradient(transparent, transparent)",
+				1,
+				square,
+			)?.stops,
+		).toEqual([
+			{ color: "000000", position: 0, transparency: 100 },
+			{ color: "000000", position: 100, transparency: 100 },
+		]);
+	});
+
+	it("colors a currentColor stop as the current color", () => {
+		expect(
+			parseLinearGradient(
+				"linear-gradient(currentColor, blue)",
+				1,
+				square,
+				"red",
+			)?.stops[0],
+		).toEqual({ color: "FF0000", position: 0, transparency: 0 });
 	});
 
 	it("converts an angle when it's in turns", () => {
@@ -247,9 +289,9 @@ describe(parseLinearGradient, () => {
 			parseLinearGradient("linear-gradient(red 0% 50%, blue)", 1, square)
 				?.stops,
 		).toEqual([
-			{ color: "ff0000", position: 0, transparency: 0 },
-			{ color: "ff0000", position: 50, transparency: 0 },
-			{ color: "0000ff", position: 100, transparency: 0 },
+			{ color: "FF0000", position: 0, transparency: 0 },
+			{ color: "FF0000", position: 50, transparency: 0 },
+			{ color: "0000FF", position: 100, transparency: 0 },
 		]);
 	});
 
@@ -261,8 +303,8 @@ describe(parseLinearGradient, () => {
 				square,
 			)?.stops,
 		).toEqual([
-			{ color: "ff0000", position: 0, transparency: 75 },
-			{ color: "0000ff", position: 100, transparency: 50 },
+			{ color: "FF0000", position: 0, transparency: 75 },
+			{ color: "0000FF", position: 100, transparency: 50 },
 		]);
 	});
 
@@ -279,34 +321,41 @@ describe(parseLinearGradient, () => {
 	});
 });
 
-describe(parseShadow, () => {
+describe(parseShadows, () => {
 	const toPixels = (length: string) => parseFloat(length);
 
 	it.each([
 		[
 			"0 0 8px #fff",
-			{ blur: 8, color: "ffffff", offsetX: 0, offsetY: 0, transparency: 0 },
+			[{ blur: 8, color: "FFFFFF", offsetX: 0, offsetY: 0, transparency: 0 }],
 		],
 		[
 			"red 1px 2px",
-			{ blur: 0, color: "ff0000", offsetX: 1, offsetY: 2, transparency: 0 },
+			[{ blur: 0, color: "FF0000", offsetX: 1, offsetY: 2, transparency: 0 }],
 		],
 		[
 			"1px 1px 2px rgb(0 0 0 / 50%), 4px 4px blue",
-			{ blur: 2, color: "000000", offsetX: 1, offsetY: 1, transparency: 50 },
+			[
+				{ blur: 2, color: "000000", offsetX: 1, offsetY: 1, transparency: 50 },
+				{ blur: 0, color: "0000FF", offsetX: 4, offsetY: 4, transparency: 0 },
+			],
 		],
 		[
 			"2px 3px",
-			{ blur: 0, color: "123456", offsetX: 2, offsetY: 3, transparency: 0 },
+			[{ blur: 0, color: "123456", offsetX: 2, offsetY: 3, transparency: 0 }],
+		],
+		[
+			"0 0 #0000, 0 1px 3px 0 rgb(0 0 0 / 0.1), inset 0 2px 4px red",
+			[{ blur: 3, color: "000000", offsetX: 0, offsetY: 1, transparency: 90 }],
 		],
 	])("parses %j", (value, expected) => {
-		expect(parseShadow(value, toPixels, "#123456")).toEqual(expected);
+		expect(parseShadows(value, toPixels, "#123456")).toEqual(expected);
 	});
 
-	it.each(["none", "0 0 4px transparent", "1px red"])(
-		"returns undefined for %j",
+	it.each(["none", "0 0 4px transparent", "1px red", "0 0 0 2px red"])(
+		"parses no layers from %j",
 		(value) => {
-			expect(parseShadow(value, toPixels, "#123456")).toBeUndefined();
+			expect(parseShadows(value, toPixels, "#123456")).toEqual([]);
 		},
 	);
 });

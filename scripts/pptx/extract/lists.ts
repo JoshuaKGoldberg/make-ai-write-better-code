@@ -12,6 +12,7 @@ import {
 	isRightToLeft,
 	runsToParagraph,
 } from "./runs.ts";
+import { inlinePills } from "./text.ts";
 
 /** A piece of a list item: some of its text, or a nested list. */
 type ItemBlock =
@@ -21,19 +22,12 @@ type ItemBlock =
 export const isListElement = (element: Element) =>
 	element.localName === "ul" || element.localName === "ol";
 
-/** Whether a list exports as native paragraphs: its items hold only text, paragraphs, and lists that do too. */
-export function isNativeList(context: ExtractContext, list: Element): boolean {
-	return [...list.children].every(
-		(item) =>
-			item.localName !== "li" ||
-			context.ownRunsOf(item) !== undefined ||
-			[...item.children].every((child) =>
-				isListElement(child)
-					? isNativeList(context, child)
-					: context.isInline(child) || context.ownRunsOf(child) !== undefined,
-			),
-	);
-}
+/** Whether a list item's child draws apart from its list's text: a block with no text of its own, like a code block, an image's paragraph, or a component. */
+export const isListAside = (context: ExtractContext, child: Element) =>
+	child.parentElement?.localName === "li" &&
+	!isListElement(child) &&
+	!context.isInline(child) &&
+	context.ownRunsOf(child) === undefined;
 
 export function listItem(
 	context: ExtractContext,
@@ -46,33 +40,48 @@ export function listItem(
 	}
 
 	const { box: listBox, scale } = geometryOf(laidOut);
-	const box = insetBox(listBox, context.contentInsets(list), scale);
-	const converted = listParagraphs(context, list, 0, box.x, opacity);
-	const paragraphs = converted.map(({ paragraph }) => paragraph);
-	if (isInvisible(paragraphs)) {
-		return;
-	}
-
+	const content = insetBox(listBox, context.contentInsets(list), scale);
 	const first = [...list.children].find((child) => child.localName === "li");
 	const marker = first && context.markers.get(first);
+	const markerColor = marker && parseColor(marker.color)?.hex;
 	const styled = first ?? list;
-	context.push(list, {
-		box,
-		bulletColor: marker && parseColor(marker.color)?.hex,
-		key: `${pathOf(list)}#list`,
-		kind: "list",
-		paragraphs,
-		style: {
-			align: alignOf(context, styled),
-			available: availableSpanOf(context, list),
-			lineHeight: lineHeightOf(context.styleOf(styled)) * scale,
-			nowrap: false,
-			rtl: isRightToLeft(context, styled),
-			wrapWidth: converted.some(({ wrapped }) => wrapped)
-				? Math.max(...converted.map(({ right }) => right)) - box.x
+	const columns = columnsOf(context, list);
+	for (const [index, { items, left, right }] of columns.entries()) {
+		const x = content.x + left - columns[0].left;
+		const box =
+			columns.length > 1 ? { ...content, width: right - x, x } : content;
+		const converted = listParagraphs(context, list, 0, box.x, opacity, items);
+		const paragraphs = converted.map(({ paragraph }) => paragraph);
+		if (isInvisible(paragraphs)) {
+			continue;
+		}
+
+		context.push(list, {
+			box,
+			bulletColor: paragraphs.some(({ bullet, runs }) => {
+				const color = runs.find((run) => !run.pad)?.color;
+				return bullet && color !== undefined && color !== markerColor;
+			})
+				? markerColor
 				: undefined,
-		},
-	});
+			key: `${pathOf(list)}#list${index ? `-${String(index)}` : ""}`,
+			kind: "list",
+			paragraphs,
+			style: {
+				align: alignOf(context, styled),
+				available:
+					columns.length > 1
+						? { left: x, right }
+						: availableSpanOf(context, list),
+				lineHeight: lineHeightOf(context.styleOf(styled)) * scale,
+				nowrap: false,
+				rtl: isRightToLeft(context, styled),
+				wrapWidth: converted.some(({ wrapped }) => wrapped)
+					? Math.max(...converted.map(({ right }) => right)) - box.x
+					: undefined,
+			},
+		});
+	}
 }
 
 export function ordinalsOf(list: Element, items: Element[]) {
@@ -86,6 +95,26 @@ export function ordinalsOf(list: Element, items: Element[]) {
 		return current;
 	});
 }
+
+/** A list's items in the columns they lay out in (CSS columns), each column's items with its left and right edges. */
+function columnsOf(context: ExtractContext, list: Element) {
+	const columns: { items: Element[]; left: number; right: number }[] = [];
+	for (const item of itemsOf(list)) {
+		const laidOut = context.boxOf(item);
+		const box = laidOut && geometryOf(laidOut).box;
+		const column = columns.at(-1);
+		if (column && (!box || Math.abs(box.x - column.left) < 1)) {
+			column.items.push(item);
+		} else if (box) {
+			columns.push({ items: [item], left: box.x, right: box.x + box.width });
+		}
+	}
+
+	return columns;
+}
+
+const itemsOf = (list: Element) =>
+	[...list.children].filter((child) => child.localName === "li");
 
 function itemBlocks(context: ExtractContext, item: Element): ItemBlock[] {
 	const own = context.ownRunsOf(item);
@@ -115,10 +144,15 @@ function listParagraphs(
 	level: number,
 	textLeft: number,
 	opacity: number,
+	shown = itemsOf(list),
 ): { paragraph: ListParagraph; right: number; wrapped: boolean }[] {
-	const items = [...list.children].filter((child) => child.localName === "li");
+	const items = itemsOf(list);
 	const numbers = ordinalsOf(list, items);
 	return items.flatMap((item, index) => {
+		if (!shown.includes(item)) {
+			return [];
+		}
+
 		const style = context.styleOf(item);
 		const shared = {
 			level,
@@ -127,45 +161,89 @@ function listParagraphs(
 			visible: context.opacityOf(item) >= MIN_OPACITY,
 		};
 		const blocks = itemBlocks(context, item);
-		let bullet = hasMarker(style);
-		const converted = [];
-		if (blocks[0]?.kind !== "text") {
-			converted.push({
-				paragraph: { ...shared, baselines: [], bullet, indent: 0, runs: [] },
-				right: -Infinity,
-				wrapped: false,
-			});
-			bullet = false;
-		}
-
-		for (const block of blocks) {
+		const startsApart = blocks[0]?.kind !== "text";
+		const converted = blocks.flatMap((block, blockIndex) => {
 			if (block.kind === "list") {
-				converted.push(
-					...listParagraphs(context, block.list, level + 1, textLeft, opacity),
+				return listParagraphs(
+					context,
+					block.list,
+					level + 1,
+					textLeft,
+					opacity,
 				);
-				continue;
 			}
 
+			inlinePills(context, block.entry.element ?? item, block.entry);
 			const { baselines, left, right, runs, wrapRight } = runsToParagraph(
 				context,
 				block.entry,
 				item,
 				shared.visible ? context.opacityOf : () => opacity,
 			);
-			converted.push({
-				paragraph: {
-					...shared,
-					baselines,
-					bullet,
-					indent: left - textLeft,
-					runs,
+			return [
+				{
+					paragraph: {
+						...shared,
+						baselines,
+						bullet: blockIndex === 0 && hasMarker(style),
+						indent: left - textLeft,
+						runs,
+					},
+					right,
+					wrapped: wrapRight !== undefined,
 				},
-				right,
-				wrapped: wrapRight !== undefined,
-			});
-			bullet = false;
+			];
+		});
+		if (!startsApart) {
+			return converted;
 		}
 
-		return converted;
+		const lineHeight = lineHeightOf(style) * context.scaleAt(item);
+		const baseline = Math.min(
+			strutBaselineOf(context, item, lineHeight),
+			(converted.at(0)?.paragraph.baselines.at(0) ?? Infinity) - lineHeight,
+		);
+		return [
+			{
+				paragraph: {
+					...shared,
+					baselines: Number.isFinite(baseline) ? [baseline] : [],
+					bullet: hasMarker(style),
+					indent: 0,
+					runs: [],
+				},
+				right: -Infinity,
+				wrapped: false,
+			},
+			...converted,
+		];
 	});
+}
+
+/** Where a list item's first line's baseline sits when no text starts it: on a line of its own font at the top of its content box. */
+function strutBaselineOf(
+	context: ExtractContext,
+	item: Element,
+	lineHeight: number,
+) {
+	const laidOut = context.boxOf(item);
+	if (!laidOut) {
+		return Infinity;
+	}
+
+	const { box, scale } = geometryOf(laidOut);
+	const style = context.styleOf(item);
+	const { font } = context.fonts.resolve(
+		style["font-family"],
+		Number(style["font-weight"]),
+		style["font-style"] === "italic",
+	);
+	const { ascent, descent } = context.fonts.metrics(font);
+	const size = parseFloat(style["font-size"]) * scale;
+	return (
+		box.y +
+		context.contentInsets(item).top * scale +
+		(lineHeight - (ascent + descent) * size) / 2 +
+		ascent * size
+	);
 }

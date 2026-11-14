@@ -118,6 +118,11 @@ const side = "modified";
 console.log("ran");
 ```
 
+```mermaid
+graph LR
+A --> B
+```
+
 ---
 dragPos:
   named: 200,300,120,30
@@ -145,6 +150,8 @@ dragPos:
 <v-click-gap size="2" />
 
 <div v-click>After the gap</div>
+
+<span v-if="$clicks > 4" v-mark="{ at: 1 }">Marked later</span>
 
 ---
 clicksStart: 1
@@ -331,3 +338,11 @@ clicksStart: 2
 <FailsOnClick :clicks="$clicks" />
 
 <div v-click>Clicked</div>
+
+---
+
+# Navigation
+
+<Toc mode="onlyCurrentTree" />
+
+<Link to="2">Go to Lists</Link>

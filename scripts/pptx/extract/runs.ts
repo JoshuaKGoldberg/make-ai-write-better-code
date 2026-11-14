@@ -9,12 +9,12 @@ import { isAtomicInline, isOutOfFlow } from "../cascade.ts";
 import {
 	parseColor,
 	parseLinearGradient,
-	parseShadow,
+	parseShadows,
 	transparencyOf,
 } from "../color.ts";
 import { ZERO_WIDTH_SPACE } from "../layout.ts";
 import { clipsToText, paintedSizeOf } from "./boxes.ts";
-import { scaleOf } from "./geometry.ts";
+import { geometryOf, scaleOf, showsIn } from "./geometry.ts";
 
 /** Where a text entry's runs sit: takumi reports them in local px from the content box's corner. */
 interface RunFrame {
@@ -35,7 +35,7 @@ const COLLAPSIBLE_SPACE = /[ \t\n\r\f]+/g;
 /** Gaps between runs narrower than this, in px, are kerning rather than spacing. */
 const MIN_SPACER_GAP = 0.75;
 
-const NO_BREAK_SPACE = " ";
+const NO_BREAK_SPACE = "\u00A0";
 
 const PRESERVED_NEWLINES = /^(?:pre|pre-wrap|pre-line|break-spaces)$/;
 
@@ -105,7 +105,7 @@ export function runFrame(context: ExtractContext, entry: TextRuns) {
 	};
 }
 
-const runRect = ({ origin, scale }: RunFrame, run: LaidOutRun) => ({
+export const runRect = ({ origin, scale }: RunFrame, run: LaidOutRun) => ({
 	height: run.height * scale,
 	width: run.width * scale,
 	x: origin.x + run.x * scale,
@@ -121,6 +121,9 @@ export function runsToParagraph(
 ) {
 	const frame = runFrame(context, entry);
 	const source = entry.element ?? container;
+	const clip = geometryOf(entry.box).rotation
+		? undefined
+		: context.clipOf(source, true);
 	const runs: Run[] = [];
 	const baselines: number[] = [];
 	const spacer = context.fonts.spacer();
@@ -141,8 +144,12 @@ export function runsToParagraph(
 			context.styleOf(owner)["white-space"],
 		);
 		const match = matchSource(run.text, preserved);
-		const style = runStyle(context, owner, opacityOf(owner));
 		const rect = runRect(frame, run);
+		if (clip && !showsIn(rect, clip)) {
+			continue;
+		}
+
+		const style = runStyle(context, owner, opacityOf(owner));
 		right = Math.max(right, rect.x + rect.width);
 		const newLine = startsLine(previous, run);
 		const offset =
@@ -250,15 +257,15 @@ export function runStyle(
 	);
 	const stroke = context.lengthOf(element, "-webkit-text-stroke-width");
 	const href = element.closest("a[href]")?.getAttribute("href") ?? "";
-	const shadow = parseShadow(
+	const shadow = parseShadows(
 		style["text-shadow"],
 		(length) => context.resolve(element, length),
 		style.color,
-	);
+	).at(0);
 	const decorating = decoratingStylesOf(context, element);
 	return {
 		bold,
-		color: visible?.hex ?? "ffffff",
+		color: visible?.hex ?? "FFFFFF",
 		font,
 		gradient: gradient && {
 			angle: gradient.angle,
@@ -351,6 +358,7 @@ function gradientTextOf(context: ExtractContext, element: Element) {
 				style["background-image"],
 				1,
 				paintedSizeOf(context, current),
+				style.color,
 			);
 			if (gradient) {
 				return gradient;

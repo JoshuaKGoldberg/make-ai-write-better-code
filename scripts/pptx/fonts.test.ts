@@ -72,6 +72,7 @@ const files: Partial<Record<string, Buffer>> = {
 	"/fira-code.woff2": firaCode,
 	"/heavy.ttf": staticFont("Heavy Test Black", "Regular", 900),
 	"/league-spartan.woff2": leagueSpartan,
+	"/plain.ttf": staticFont("Plain Test", "Regular", 400),
 	"https://api.fonts.coollabs.io/fonts?family=Web+Test:ital,wght@0,400;1,400&display=swap":
 		Buffer.from(
 			`@font-face { font-family: "Web Test"; src: url(/fira-code.woff2) }`,
@@ -110,7 +111,8 @@ async function createBook(stacks = [stack]) {
 			@font-face { font-family: Ranged; src: url(/fira-code.woff2); unicode-range: U+2000-206F }
 			@font-face { font-family: Ranged; src: url(/league-spartan.woff2) }
 			@font-face { font-family: Static; font-weight: 700; src: url(/bold.ttf) }
-			@font-face { font-family: Static; font-weight: 900; src: url(/heavy.ttf) }`,
+			@font-face { font-family: Static; font-weight: 900; src: url(/heavy.ttf) }
+			@font-face { font-family: Plain; font-weight: 400; src: url(/plain.ttf) }`,
 		],
 	});
 	const fonts = await book.load(stacks);
@@ -243,6 +245,22 @@ describe(createFontBook, () => {
 			expect(book.resolve("Static", weight, false)).toEqual(expected);
 		},
 	);
+
+	it("emboldens a static face when it's lighter than a bold weight", async () => {
+		const { book } = await createBook(["Plain"]);
+		expect(book.resolve("Plain", 700, false)).toEqual({
+			bold: true,
+			font: "Plain Test",
+		});
+	});
+
+	it("names a generic family's first font when no font in the stack is available", async () => {
+		const { book } = await createBook();
+		expect(book.resolve("ui-sans-serif, sans-serif", 400, false)).toEqual({
+			bold: false,
+			font: "Helvetica",
+		});
+	});
 
 	it("names a font as written when it's unavailable", async () => {
 		const { book } = await createBook();

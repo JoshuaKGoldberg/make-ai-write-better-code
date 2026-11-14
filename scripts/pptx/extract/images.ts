@@ -1,12 +1,13 @@
 import path from "node:path";
 
-import type { Box } from "../model.ts";
+import type { Box, Canvas } from "../model.ts";
 import type { ExtractContext } from "./context.ts";
-import type { Geometry, Size } from "./geometry.ts";
+import type { Geometry } from "./geometry.ts";
 
 import { imageSize, withoutQuery } from "../assets.ts";
 import { transparencyOf } from "../color.ts";
 import { ID } from "../layout.ts";
+import { boxShadowOf, scaledShadow } from "./boxes.ts";
 import { pathOf } from "./context.ts";
 import {
 	fitSize,
@@ -63,6 +64,7 @@ export function imageItem(
 		: box;
 	const content = intersect(box, drawn);
 	const radius = context.radiusOf(image) * scale;
+	const shadow = boxShadowOf(context, image, opacity);
 	context.push(image, {
 		alt: image.getAttribute("alt") ?? "",
 		box: content,
@@ -72,6 +74,7 @@ export function imageItem(
 		kind: "image",
 		label: src.startsWith("data:") ? context.labelOf(image) : fileNameOf(src),
 		radius,
+		shadow: shadow && scaledShadow(shadow, scale),
 		src,
 		transparency: transparencyOf(1, opacity),
 	});
@@ -97,10 +100,10 @@ export function rasterItem(
 	});
 }
 
-function objectSize(fit: string, box: Box, natural: Size, scale: number) {
+function objectSize(fit: string, box: Box, natural: Canvas, scale: number) {
 	const contain = fitSize("contain", box, natural.width / natural.height);
 	const own = { height: natural.height * scale, width: natural.width * scale };
-	const sizes: Partial<Record<string, Size>> = {
+	const sizes: Partial<Record<string, Canvas>> = {
 		contain,
 		cover: fitSize("cover", box, natural.width / natural.height),
 		none: own,

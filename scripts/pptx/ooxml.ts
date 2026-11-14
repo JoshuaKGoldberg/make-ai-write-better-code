@@ -12,8 +12,10 @@ import { transitionXml } from "./transitions.ts";
 
 export type Gradients = ReturnType<typeof createGradients>;
 
-/** How post-processing styles a list paragraph's marker: no marker, Arial's disc, circle, or square, a number, or another character. */
-export type ListMarker = "keyword" | "none" | "number" | "string";
+/** A list's marker in PowerPoint: Arial's disc, circle, or square, another character, or automatic numbering. */
+export type Marker =
+	| { code: string; kind: "keyword" | "string" }
+	| { kind: "number"; style: string };
 
 export interface SlidePatch {
 	/** Names of shapes screen readers should skip. */
@@ -22,8 +24,8 @@ export interface SlidePatch {
 	lists: {
 		/** The markers' color as uppercase hex, when it isn't the text's. */
 		color?: string;
-		/** Each paragraph's marker, in order. */
-		markers: ListMarker[];
+		/** Each paragraph's marker, in order; undefined where it shows none. */
+		markers: (Marker["kind"] | undefined)[];
 		name: string;
 	}[];
 	/** The speaker notes, as Markdown. */
@@ -172,6 +174,38 @@ const NOTES_HTML_FORMATS: Partial<Record<string, "bold" | "italic">> = {
 	strong: "bold",
 };
 
+/** The HTML elements that start their own paragraph in speaker notes. */
+const NOTES_HTML_BLOCKS = new Set([
+	"address",
+	"article",
+	"aside",
+	"blockquote",
+	"dd",
+	"div",
+	"dl",
+	"dt",
+	"figcaption",
+	"figure",
+	"footer",
+	"h1",
+	"h2",
+	"h3",
+	"h4",
+	"h5",
+	"h6",
+	"header",
+	"li",
+	"main",
+	"nav",
+	"ol",
+	"p",
+	"pre",
+	"section",
+	"table",
+	"tr",
+	"ul",
+]);
+
 const PLAIN_NOTES: NotesFormat = {
 	bold: false,
 	code: false,
@@ -250,10 +284,9 @@ export function createNumbering() {
 	};
 }
 
-const hex = (value: number) =>
-	value.toString(16).toUpperCase().padStart(6, "0");
+const hex = (value: number, digits = 6) =>
+	Math.round(value).toString(16).toUpperCase().padStart(digits, "0");
 
-/** Applies a slide's animations, transition, and styling patches to its XML. */
 export function patchSlide(
 	xml: string,
 	patch: SlidePatch,
@@ -414,7 +447,6 @@ function patchOnce(
 	);
 }
 
-/** Replaces the shape or picture with this name. */
 function replaceShape(
 	xml: string,
 	name: string,
@@ -434,10 +466,9 @@ function replaceShape(
 	return xml.slice(0, start) + replace(xml.slice(start, end)) + xml.slice(end);
 }
 
-/** Styles each list paragraph's marker. */
 function styleMarkers(
 	shape: string,
-	markers: ListMarker[],
+	markers: SlidePatch["lists"][number]["markers"],
 	color: string | undefined,
 ) {
 	const bulletColor = color
@@ -517,7 +548,7 @@ function schemeColor(
 ) {
 	return color
 		? properties.replace(
-				new RegExp(`<a:srgbClr val="${color}"(/>|>(.*?)</a:srgbClr>)`, "s"),
+				new RegExp(`<a:srgbClr val="${color}"(/>|>(.*?)</a:srgbClr>)`, "gs"),
 				(_, end: string, children: string | undefined) =>
 					children === undefined
 						? `<a:schemeClr val="${scheme}"${end}`
@@ -590,7 +621,6 @@ export async function finishPackage(
 	return output.generateAsync({ compression: "DEFLATE", type: "nodebuffer" });
 }
 
-/** Points every hyperlink to the same target at one relationship. */
 async function mergeHyperlinks(zip: JSZip, part: string) {
 	const relsFile = relationshipsOf(part);
 	const kept = new Map<string, string>();
@@ -671,6 +701,10 @@ export function themeXml(original: string, theme: Theme) {
 			dark ? "lt2" : "dk2",
 			titleColorScheme(theme) === "tx2" ? theme.title.color : undefined,
 		],
+		[
+			dark ? "dk2" : "lt2",
+			theme.shape && paintOver(theme.shape.fill, theme.background),
+		],
 		["hlink", theme.link],
 		["folHlink", theme.link],
 		...theme.accents.map((color, index): [string, string] => [
@@ -728,12 +762,24 @@ const alphaXml = (transparency: number) =>
 const darkBackground = ({ background, text }: Theme) =>
 	luminance(background) < luminance(text);
 
+const channelsOf = (color: string) =>
+	[0, 2, 4].map((index) => parseInt(color.slice(index, index + 2), 16));
+
 const luminance = (color: string) =>
-	[0.299, 0.587, 0.114].reduce(
-		(sum, weight, index) =>
-			sum + weight * parseInt(color.slice(index * 2, index * 2 + 2), 16),
+	channelsOf(color).reduce(
+		(sum, channel, index) => sum + [0.299, 0.587, 0.114][index] * channel,
 		0,
 	);
+
+/** The color a paint shows over a background color. */
+const paintOver = ({ color, transparency }: Paint, background: string) => {
+	const below = channelsOf(background);
+	return channelsOf(color)
+		.map((channel, index) =>
+			hex(channel + ((below[index] - channel) * transparency) / 100, 2),
+		)
+		.join("");
+};
 
 /** The theme color titles take: the text's, or a second text color of their own. */
 const titleColorScheme = ({ text, title }: Theme) =>
@@ -862,6 +908,44 @@ function bodyDefaults(xml: string, style: string, theme: Theme) {
 			);
 }
 
+async function deduplicateMedia(zip: JSZip) {
+	const canonical = new Map<string, string>();
+	const replacements = new Map<string, string>();
+	const media = zip
+		.file(/^ppt\/media\//)
+		.sort((a, b) => a.name.localeCompare(b.name));
+	for (const file of media) {
+		const hash = createHash("sha256")
+			.update(await file.async("nodebuffer"))
+			.digest("hex");
+		const kept = canonical.get(hash);
+		if (kept) {
+			replacements.set(file.name, kept);
+		} else {
+			canonical.set(hash, file.name);
+		}
+	}
+
+	for (const file of zip.file(/\.rels$/)) {
+		const xml = await file.async("string");
+		let patched = xml;
+		for (const [duplicate, kept] of replacements) {
+			patched = patched.replaceAll(
+				`../media/${path.posix.basename(duplicate)}"`,
+				`../media/${path.posix.basename(kept)}"`,
+			);
+		}
+
+		if (patched !== xml) {
+			zip.file(file.name, patched);
+		}
+	}
+
+	for (const duplicate of replacements.keys()) {
+		zip.remove(duplicate);
+	}
+}
+
 /** Makes pptxgenjs's default layout a Title Only layout that shows the master's background. */
 async function writeLayout(zip: JSZip) {
 	const layoutFile = "ppt/slideLayouts/slideLayout1.xml";
@@ -886,14 +970,18 @@ async function writeLayout(zip: JSZip) {
 	);
 }
 
-/** Gives new text the deck's body defaults, and notes pages PowerPoint's own size rather than pptxgenjs's sideways slide size. */
+/** Gives new text the deck's body defaults, notes pages PowerPoint's own size rather than pptxgenjs's sideways slide size, and the notes master its place in the schema's order. */
 async function writePresentation(zip: JSZip, theme: Theme) {
 	const presentationFile = "ppt/presentation.xml";
 	zip.file(
 		presentationFile,
 		bodyDefaults(
 			patchOnce(
-				await read(zip, presentationFile),
+				patchOnce(
+					await read(zip, presentationFile),
+					/(<\/p:sldMasterIdLst>)(.*?)(<p:notesMasterIdLst>.*?<\/p:notesMasterIdLst>)/s,
+					(_, masters, slides, notesMaster) => masters + notesMaster + slides,
+				),
 				/<p:notesSz [^>]*\/>/,
 				NOTES_SIZE,
 			),
@@ -940,46 +1028,6 @@ async function writeDocumentProperties(
 	);
 }
 
-/** Points every relationship to identical media at one file. */
-async function deduplicateMedia(zip: JSZip) {
-	const canonical = new Map<string, string>();
-	const replacements = new Map<string, string>();
-	const media = zip
-		.file(/^ppt\/media\//)
-		.sort((a, b) => a.name.localeCompare(b.name));
-	for (const file of media) {
-		const hash = createHash("sha256")
-			.update(await file.async("nodebuffer"))
-			.digest("hex");
-		const kept = canonical.get(hash);
-		if (kept) {
-			replacements.set(file.name, kept);
-		} else {
-			canonical.set(hash, file.name);
-		}
-	}
-
-	for (const file of zip.file(/\.rels$/)) {
-		const xml = await file.async("string");
-		let patched = xml;
-		for (const [duplicate, kept] of replacements) {
-			patched = patched.replaceAll(
-				`../media/${path.posix.basename(duplicate)}"`,
-				`../media/${path.posix.basename(kept)}"`,
-			);
-		}
-
-		if (patched !== xml) {
-			zip.file(file.name, patched);
-		}
-	}
-
-	for (const duplicate of replacements.keys()) {
-		zip.remove(duplicate);
-	}
-}
-
-/** Writes a slide's speaker notes, formatting their Markdown. */
 async function writeNotes(
 	zip: JSZip,
 	part: string,
@@ -1011,7 +1059,7 @@ async function writeNotes(
 			patchOnce(
 				shape,
 				/<a:p>.*<\/a:p>/s,
-				paragraphs.join("") || '<a:p><a:endParaRPr lang="en-US"/></a:p>',
+				paragraphs.join("") || NOTES_BLANK_PARAGRAPH,
 			),
 		),
 	);
@@ -1040,45 +1088,71 @@ export function notesParagraphs(
 		return `<a:r><a:rPr lang="en-US"${attributes} dirty="0"${children ? `>${children}</a:rPr>` : "/>"}<a:t>${escapeXml(text)}</a:t></a:r>`;
 	};
 
-	const inlineRuns = (children: Token[], bold: boolean) => {
-		const pieces: { format: NotesFormat; text: string }[] = [];
+	/** Runs whose bold and italic nest as tags and emphasis open and close, broken into lines without whitespace at their ends. */
+	const createRuns = (bold: boolean) => {
 		const initial = { ...PLAIN_NOTES, bold };
 		const format: NotesFormat = { ...initial };
-		const add = (text: string, pieceFormat: NotesFormat) => {
+		const depths = { bold: 0, italic: 0 };
+		const pieces: { format: NotesFormat; text: string }[] = [];
+		let lines = "";
+		const line = () => {
 			const last = pieces.at(-1);
-			if (last && JSON.stringify(last.format) === JSON.stringify(pieceFormat)) {
-				last.text += text;
-			} else {
-				pieces.push({ format: { ...pieceFormat }, text });
+			if (last && !last.format.code) {
+				last.text = last.text.trimEnd();
 			}
-		};
 
-		let runs = "";
-		const written = () =>
-			pieces
+			return pieces
 				.splice(0)
+				.filter(({ text }) => text)
 				.map((piece) => run(piece.text, piece.format))
 				.join("");
-		const lineBreak = () => {
-			runs += written() + NOTES_BREAK;
 		};
 
-		const toggle = (property: "bold" | "italic", opening: boolean) => {
-			format[property] = opening || initial[property];
+		return {
+			add(text: string, code = false) {
+				const pieceFormat = { ...format, code };
+				const last = pieces.at(-1);
+				const added =
+					code || /\S$/.test(last?.text ?? "") ? text : text.trimStart();
+				if (
+					last &&
+					JSON.stringify(last.format) === JSON.stringify(pieceFormat)
+				) {
+					last.text += added;
+				} else if (added) {
+					pieces.push({ format: pieceFormat, text: added });
+				}
+			},
+			format,
+			lineBreak() {
+				lines += line() + NOTES_BREAK;
+			},
+			toggle(property: keyof typeof depths, opening: boolean) {
+				depths[property] = Math.max(0, depths[property] + (opening ? 1 : -1));
+				format[property] = initial[property] || depths[property] > 0;
+			},
+			written() {
+				const written = lines + line();
+				lines = "";
+				return written;
+			},
 		};
+	};
 
+	const inlineRuns = (children: Token[], bold: boolean) => {
+		const runs = createRuns(bold);
 		for (const child of children) {
 			switch (child.type) {
 				case "code_inline":
-					add(child.content, { ...format, code: true });
+					runs.add(child.content, true);
 					break;
 				case "em_close":
 				case "em_open":
-					toggle("italic", child.nesting === 1);
+					runs.toggle("italic", child.nesting === 1);
 					break;
 				case "hardbreak":
 				case "softbreak":
-					lineBreak();
+					runs.lineBreak();
 					break;
 				case "html_inline": {
 					const [, closing, name = ""] =
@@ -1086,36 +1160,82 @@ export function notesParagraphs(
 					const tag = name.toLowerCase();
 					const property = NOTES_HTML_FORMATS[tag];
 					if (tag === "br") {
-						lineBreak();
+						runs.lineBreak();
 					} else if (property) {
-						toggle(property, !closing);
+						runs.toggle(property, !closing);
 					}
 
 					break;
 				}
 				case "image":
 				case "text":
-					add(child.content, format);
+					runs.add(child.content);
 					break;
 				case "link_close":
 				case "link_open":
-					format.href =
+					runs.format.href =
 						child.nesting === 1
 							? (child.attrGet("href") ?? undefined)
 							: undefined;
 					break;
 				case "s_close":
 				case "s_open":
-					format.strike = child.nesting === 1;
+					runs.format.strike = child.nesting === 1;
 					break;
 				case "strong_close":
 				case "strong_open":
-					toggle("bold", child.nesting === 1);
+					runs.toggle("bold", child.nesting === 1);
 					break;
 			}
 		}
 
-		return runs + written();
+		return runs.written();
+	};
+
+	/** An HTML block's paragraphs: one per block element, with its line breaks and bold and italic text. */
+	const htmlParagraphs = (html: string) => {
+		const paragraphs: string[] = [];
+		const runs = createRuns(false);
+		const endParagraph = () => {
+			const written = runs.written();
+			if (written) {
+				paragraphs.push(`<a:p>${written}</a:p>`);
+			}
+		};
+
+		const walk = (node: ChildNode) => {
+			const tag = node.nodeName.toLowerCase();
+			if (tag === "#text") {
+				runs.add((node.textContent ?? "").replace(/\s+/g, " "));
+			} else if (tag === "br") {
+				runs.lineBreak();
+			} else if (node.nodeType === node.ELEMENT_NODE) {
+				const block = NOTES_HTML_BLOCKS.has(tag);
+				const property = NOTES_HTML_FORMATS[tag];
+				if (block) {
+					endParagraph();
+				}
+
+				if (property) {
+					runs.toggle(property, true);
+				}
+
+				node.childNodes.forEach(walk);
+				if (property) {
+					runs.toggle(property, false);
+				}
+
+				if (block) {
+					endParagraph();
+				}
+			}
+		};
+
+		parseHTML(
+			`<html><body>${html}</body></html>`,
+		).document.body.childNodes.forEach(walk);
+		endParagraph();
+		return paragraphs;
 	};
 
 	const paragraphs: string[] = [];
@@ -1162,16 +1282,7 @@ export function notesParagraphs(
 				heading = token.nesting === 1;
 				break;
 			case "html_block":
-				paragraphs.push(
-					...[
-						...parseHTML(`<html><body>${token.content}</body></html>`).document
-							.body.childNodes,
-					]
-						.filter((node) => node.nodeType !== node.COMMENT_NODE)
-						.map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim())
-						.filter(Boolean)
-						.map((text) => `<a:p>${run(text, PLAIN_NOTES)}</a:p>`),
-				);
+				paragraphs.push(...htmlParagraphs(token.content));
 				break;
 			case "inline": {
 				const list = lists.at(-1);
@@ -1263,7 +1374,7 @@ function gradientFillXml({ angle, stops }: Gradient) {
 	const stopXml = stops
 		.map((stop) => {
 			const alpha = stop.transparency > 0 ? alphaXml(stop.transparency) : "";
-			return `<a:gs pos="${String(Math.round(stop.position * 1000))}"><a:srgbClr val="${stop.color.toUpperCase()}">${alpha}</a:srgbClr></a:gs>`;
+			return `<a:gs pos="${String(Math.round(stop.position * 1000))}"><a:srgbClr val="${stop.color}">${alpha}</a:srgbClr></a:gs>`;
 		})
 		.join("");
 	return `<a:gradFill flip="none" rotWithShape="1"><a:gsLst>${stopXml}</a:gsLst><a:lin ang="${String(Math.round(normalizeDegrees(angle - 90) * 60000))}" scaled="0"/></a:gradFill>`;

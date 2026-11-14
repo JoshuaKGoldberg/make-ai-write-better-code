@@ -9,7 +9,7 @@ import {
 } from "./extract/context.ts";
 import { geometryOf } from "./extract/geometry.ts";
 import { imageItem, rasterItem } from "./extract/images.ts";
-import { isListElement, isNativeList, listItem } from "./extract/lists.ts";
+import { isListAside, isListElement, listItem } from "./extract/lists.ts";
 import { svgItems } from "./extract/svg.ts";
 import { codeItem, inlinePills, textItem } from "./extract/text.ts";
 import { isBackgroundOnly } from "./layout.ts";
@@ -46,12 +46,12 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 		);
 	};
 
-	const walkApart = (element: Element) => {
+	const walkApart = (element: Element, drawsApart = context.drawsApart) => {
 		for (const child of element.children) {
-			if (context.drawsApart(child)) {
+			if (drawsApart(child)) {
 				walk(child);
 			} else {
-				walkApart(child);
+				walkApart(child, drawsApart);
 			}
 		}
 	};
@@ -125,9 +125,12 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 			[...element.children].filter(isDense).length !== 1
 		) {
 			rasterItem(context, element);
-		} else if (isListElement(element) && isNativeList(context, element)) {
+		} else if (isListElement(element)) {
 			listItem(context, element, opacity);
-			walkApart(element);
+			walkApart(
+				element,
+				(child) => context.drawsApart(child) || isListAside(context, child),
+			);
 		} else {
 			const entry = context.ownRunsOf(element);
 			if (entry) {

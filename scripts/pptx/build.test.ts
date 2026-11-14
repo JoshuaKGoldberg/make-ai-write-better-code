@@ -1,7 +1,9 @@
 import JSZip from "jszip";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
 	afterAll,
 	afterEach,
@@ -67,8 +69,73 @@ describe(buildPptx, () => {
 					slide: 7,
 				},
 			]),
-			slides: 21,
+			slides: 22,
 		});
+	});
+
+	it("lists problems by slide, then click", () => {
+		expect(result.problems).toEqual([
+			{
+				message:
+					"Couldn't find the font Nowhere Sans, so its text uses a fallback font.",
+				severity: "warning",
+			},
+			{
+				message:
+					"Couldn't render the component Unregistered: Vue couldn't resolve it.",
+				severity: "error",
+				slide: 7,
+			},
+			{
+				message: "Couldn't export the modified side of a monaco-diff block.",
+				severity: "error",
+				slide: 7,
+			},
+			{
+				message: "Couldn't export the output of a monaco-run block.",
+				severity: "error",
+				slide: 7,
+			},
+			{
+				message:
+					"Couldn't export an embedded page (https://example.com/embed).",
+				severity: "error",
+				slide: 7,
+			},
+			{
+				message: "Couldn't export a video (/clip.mp4).",
+				severity: "error",
+				slide: 7,
+			},
+			{
+				message: "Couldn't export a Mermaid diagram.",
+				severity: "error",
+				slide: 7,
+			},
+			{
+				message: "Couldn't draw a v-mark: Marked",
+				severity: "warning",
+				slide: 8,
+			},
+			{
+				message: "Couldn't draw a v-mark: Marked later",
+				severity: "warning",
+				slide: 9,
+			},
+			{
+				message: expect.stringMatching(
+					/^Couldn't build the slide: Failed to resolve import "\/missing\.png"/,
+				),
+				severity: "error",
+				slide: 17,
+			},
+			{
+				click: 1,
+				message: "Couldn't render the click: It failed on a click.",
+				severity: "error",
+				slide: 21,
+			},
+		]);
 	});
 
 	it("reports an error and keeps the states that rendered when a click fails", async () => {
@@ -160,6 +227,20 @@ describe(buildPptx, () => {
 			vi.restoreAllMocks();
 		});
 
+		it("names the file by the entry when the deck has no exportFilename", async () => {
+			vi.spyOn(process, "cwd").mockReturnValue(directory);
+
+			expect(
+				await buildPptx({
+					entry: path.join(import.meta.dirname, "fixture/untitled.md"),
+				}),
+			).toEqual(
+				expect.objectContaining({
+					output: path.join(directory, "untitled-export.pptx"),
+				}),
+			);
+		}, 120_000);
+
 		it("names the file by the deck's exportFilename", async () => {
 			vi.spyOn(process, "cwd").mockReturnValue(directory);
 
@@ -170,6 +251,29 @@ describe(buildPptx, () => {
 			);
 		}, 120_000);
 	});
+
+	it("reports a failing click and that it can't check for unresolved components when NODE_ENV is production", async () => {
+		await expect(
+			promisify(execFile)(
+				process.execPath,
+				[
+					path.join(import.meta.dirname, "bin.ts"),
+					entry,
+					"--output",
+					path.join(directory, "production.pptx"),
+					"--range",
+					"21",
+				],
+				{ env: { ...process.env, NODE_ENV: "production" } },
+			),
+		).rejects.toMatchObject({
+			code: 1,
+			stderr: `Warning: Couldn't check for components Vue can't resolve, because NODE_ENV is production.
+Warning: Couldn't find the font Nowhere Sans, so its text uses a fallback font.
+Error on slide 21, click 1: Couldn't render the click: It failed on a click.
+`,
+		});
+	}, 120_000);
 
 	it("writes one slide per click state when withClicks is set", async () => {
 		const clicks = path.join(directory, "clicks.pptx");
@@ -268,10 +372,10 @@ describe(buildPptx, () => {
 			buildPptx({
 				entry,
 				output: path.join(directory, "invalid.pptx"),
-				range: "22",
+				range: "23",
 			}),
 		).rejects.toThrow(
-			new BuildPptxError('Range "22" must select slides from 1 to 21.'),
+			new BuildPptxError('Range "23" must select slides from 1 to 22.'),
 		);
 	});
 
@@ -283,7 +387,7 @@ describe(buildPptx, () => {
 				range: "two",
 			}),
 		).rejects.toThrow(
-			new BuildPptxError('Range "two" must select slides from 1 to 21.'),
+			new BuildPptxError('Range "two" must select slides from 1 to 22.'),
 		);
 	});
 
@@ -304,12 +408,12 @@ describe(buildPptx, () => {
 			"Box: mix",
 			"Text: Layered: lime",
 			"Text: Unlayered: teal",
-			"Text: 3 / 21 · default",
+			"Text: 3 / 22 · default",
 		]);
 	});
 
 	it("renders global-top layers with Slidev's navigation", async () => {
-		expect(await slide(5)).toContain("<a:t>5 / 21 · image-right</a:t>");
+		expect(await slide(5)).toContain("<a:t>5 / 22 · image-right</a:t>");
 	});
 
 	it("names fonts by the font file when the deck loads one", async () => {

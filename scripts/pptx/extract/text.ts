@@ -5,7 +5,7 @@ import type { ExtractContext, TextRuns } from "./context.ts";
 import { lineHeightOf } from "../cascade.ts";
 import { availableSpanOf, boxItems, boxStyle } from "./boxes.ts";
 import { pathOf } from "./context.ts";
-import { geometryOf, insetBox, SIDES } from "./geometry.ts";
+import { geometryOf, insetBox, showsIn, SIDES } from "./geometry.ts";
 import {
 	alignOf,
 	baselineOf,
@@ -13,6 +13,7 @@ import {
 	isLineFeed,
 	isRightToLeft,
 	runFrame,
+	runRect,
 	runsToParagraph,
 	runStyle,
 	signatureOf,
@@ -31,6 +32,7 @@ export function codeItem(context: ExtractContext, pre: Element) {
 	const { box, scale } = geometryOf(laidOut);
 	const lineHeight = lineHeightOf(context.styleOf(pre));
 	const lines = [...pre.querySelectorAll(CODE_LINES)];
+
 	const lineOf = (run: LaidOutRun, owner: Element) =>
 		lines.length
 			? lines.findLastIndex((line) => line.contains(owner))
@@ -42,10 +44,15 @@ export function codeItem(context: ExtractContext, pre: Element) {
 		})
 		.flatMap((laidOutRuns) => {
 			const frame = runFrame(context, laidOutRuns);
+			const rotated = geometryOf(laidOutRuns.box).rotation !== 0;
 			return laidOutRuns.runs.flatMap((run) => {
 				const owner = context.byId.get(run.owner);
 				const index = owner ? lineOf(run, owner) : -1;
-				return owner && index >= 0 && !isLineFeed(run)
+				const clip = owner && !rotated && context.clipOf(owner, true);
+				return owner &&
+					index >= 0 &&
+					!isLineFeed(run) &&
+					(!clip || showsIn(runRect(frame, run), clip))
 					? [{ frame, index, owner, run }]
 					: [];
 			});
@@ -73,8 +80,15 @@ export function codeItem(context: ExtractContext, pre: Element) {
 	}
 
 	const content = insetBox(box, context.contentInsets(pre), scale);
+	const measured = baselines.filter((baseline) => baseline !== undefined);
+	const leadingBlankLines = baselines.findIndex(
+		(baseline) => baseline !== undefined,
+	);
 	context.push(pre, {
-		baselines: baselines.filter((baseline) => baseline !== undefined),
+		baselines:
+			leadingBlankLines > 0
+				? [measured[0] - leadingBlankLines * lineHeight * scale, ...measured]
+				: measured,
 		box: content,
 		key: `${pathOf(pre)}#code:${signatureOf(paragraphs)}`,
 		kind: "code",

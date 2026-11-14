@@ -47,7 +47,7 @@ const style = {
 
 const run = (text: string, overrides: Partial<Run> = {}): Run => ({
 	bold: false,
-	color: "dae7f3",
+	color: "DAE7F3",
 	font: "Body",
 	italic: false,
 	letterSpacing: 0,
@@ -261,7 +261,7 @@ describe(writePptx, () => {
 					key: "code",
 					kind: "code",
 					paragraphs: [
-						{ runs: [run("one", { color: "ab5959", font: "Mono" })] },
+						{ runs: [run("one", { color: "AB5959", font: "Mono" })] },
 						{ runs: [] },
 						{ runs: [run("two", { font: "Mono" })] },
 					],
@@ -283,7 +283,7 @@ describe(writePptx, () => {
 		expect(
 			await slideXml([
 				{
-					border: { color: "ff6347", transparency: 0, width: 4 },
+					border: { color: "FF6347", transparency: 0, width: 4 },
 					box: { height: 40, width: 40, x: 10, y: 10 },
 					decorative: false,
 					key: "ring",
@@ -297,7 +297,7 @@ describe(writePptx, () => {
 
 	it("draws no line when a box has no border", async () => {
 		expect(
-			await slideXml([boxItem({ fill: { color: "ff0000", transparency: 0 } })]),
+			await slideXml([boxItem({ fill: { color: "FF0000", transparency: 0 } })]),
 		).toContain(
 			'<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:ln><a:noFill/></a:ln>',
 		);
@@ -321,7 +321,7 @@ describe(writePptx, () => {
 		expect(
 			await slideXml([
 				textItem([
-					[run("Wavy", { underline: { color: "ff0000", style: "wavy" } })],
+					[run("Wavy", { underline: { color: "FF0000", style: "wavy" } })],
 				]),
 			]),
 		).toContain(
@@ -371,19 +371,17 @@ describe(writePptx, () => {
 
 	it("keeps a real color when it's one a gradient placeholder would use", async () => {
 		const xml = await slideXml([
-			boxItem({ fill: { color: "fea000", transparency: 0 }, key: "solid" }),
+			boxItem({ fill: { color: "FEA000", transparency: 0 }, key: "solid" }),
 			boxItem({
 				box: { height: 10, width: 10, x: 20, y: 0 },
 				fill: {
-					color: "0000ff",
 					gradient: {
 						angle: 90,
 						stops: [
-							{ color: "ff0000", position: 0, transparency: 0 },
-							{ color: "0000ff", position: 100, transparency: 50 },
+							{ color: "FF0000", position: 0, transparency: 0 },
+							{ color: "0000FF", position: 100, transparency: 50 },
 						],
 					},
-					transparency: 0,
 				},
 				key: "gradient",
 			}),
@@ -448,7 +446,7 @@ describe(writePptx, () => {
 		const xml = await slideXml([
 			listItem(
 				[listParagraph("Shown"), listParagraph("Continued", { bullet: false })],
-				{ bulletColor: "ff0000" },
+				{ bulletColor: "FF0000" },
 			),
 		]);
 
@@ -462,7 +460,7 @@ describe(writePptx, () => {
 		expect(
 			await slideXml([
 				listItem([listParagraph("Arrow", { marker: '"→"' })], {
-					bulletColor: "ff0000",
+					bulletColor: "FF0000",
 				}),
 			]),
 		).toContain(
@@ -533,6 +531,19 @@ describe(writePptx, () => {
 		);
 	});
 
+	it("hides a list's paragraph when it's hidden in every click state", async () => {
+		expect(
+			await slideXml([
+				listItem([
+					listParagraph("Shown"),
+					listParagraph("Hidden", { visible: false }),
+				]),
+			]),
+		).toContain(
+			'<a:buChar char="&#x00A0;"/></a:pPr><a:r><a:rPr lang="en-US" kern="100" sz="2400" dirty="0"><a:solidFill><a:schemeClr val="tx1"><a:alpha val="0"/></a:schemeClr></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:rPr><a:t>Hidden</a:t>',
+		);
+	});
+
 	it("lowers a run when it's a subscript", async () => {
 		expect(
 			await slideXml([textItem([[run("H"), run("2", { script: "sub" })]])]),
@@ -547,7 +558,7 @@ describe(writePptx, () => {
 						run("Glow", {
 							shadow: {
 								blur: 8,
-								color: "ffffff",
+								color: "FFFFFF",
 								offsetX: 0,
 								offsetY: 0,
 								transparency: 0,
@@ -599,28 +610,60 @@ describe(writePptx, () => {
 		).not.toContain("<a:outer");
 	});
 
-	it("keeps one-line text within its container when the container leaves little room", async () => {
+	it("casts a box's shadow when it has one", async () => {
 		expect(
 			await slideXml([
-				textItem([[run("Tight")]], {
-					style: {
-						...style,
-						available: { left: 0, right: 450 },
-						nowrap: false,
+				boxItem({
+					shadow: {
+						blur: 8,
+						color: "000000",
+						offsetX: 0,
+						offsetY: 4,
+						transparency: 75,
 					},
 				}),
 			]),
-		).toContain('<a:off x="508000" y="165100"/><a:ext cx="5207000"');
+		).toContain(
+			'rotWithShape="0" blurRad="101600" dist="50800" dir="5400000"> <a:srgbClr val="000000"> <a:alpha val="25000"/></a:srgbClr>',
+		);
 	});
 
-	it("grows one-line text by its full slack when its container has room", async () => {
+	it("casts a picture's shadow when it has one", async () => {
 		expect(
 			await slideXml([
-				textItem([[run("Roomy")]], {
-					style: { ...style, nowrap: false },
+				imageItem({
+					shadow: {
+						blur: 8,
+						color: "000000",
+						offsetX: 0,
+						offsetY: 4,
+						transparency: 75,
+					},
 				}),
 			]),
-		).toContain('<a:off x="508000" y="165100"/><a:ext cx="5384800"');
+		).toContain(
+			'rotWithShape="0" blurRad="101600" dist="50800" dir="5400000"><a:srgbClr val="000000"><a:alpha val="25000"/></a:srgbClr>',
+		);
+	});
+
+	it("joins whitespace into its neighboring runs when only its color differs", async () => {
+		const red = { color: "FF0000" };
+
+		expect(
+			(
+				await slideXml([
+					textItem([
+						[
+							run("  "),
+							run("const", red),
+							run(" "),
+							run("a", red),
+							run(" ", { underline: { style: "single" } }),
+						],
+					]),
+				])
+			)?.match(/<a:t>[^<]*<\/a:t>/g),
+		).toEqual(["<a:t>  const a</a:t>", "<a:t> </a:t>"]);
 	});
 
 	it("places rotated text by its line box when it's rotated", async () => {
@@ -645,28 +688,6 @@ describe(writePptx, () => {
 		);
 	});
 
-	it("paints an item that first shows on a later click beneath what it's beneath in that click", async () => {
-		const text = textItem([[run("Words")]]);
-
-		expect(
-			(
-				await part(
-					await writeZip(
-						deckOf([
-							{
-								states: [
-									{ clicks: 0, items: [text] },
-									{ clicks: 1, items: [boxItem(), text] },
-								],
-							},
-						]),
-					),
-					"ppt/slides/slide1.xml",
-				)
-			)?.match(/(?<=<p:cNvPr id="\d+" )name="[^"]+"/g),
-		).toEqual(['name="Box"', 'name="Text: Words"']);
-	});
-
 	it("marks a shape decorative when it's decoration", async () => {
 		expect(await slideXml([boxItem({ decorative: true })])).toContain(
 			'name="Box"><a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext></a:extLst></p:cNvPr>',
@@ -674,7 +695,7 @@ describe(writePptx, () => {
 	});
 
 	it("marks a picture decorative without a description when it has no alt text", async () => {
-		expect(await slideXml([imageItem({ alt: "" })])).toMatch(
+		expect(await slideXml([imageItem({ alt: "", decorative: true })])).toMatch(
 			/name="Image" descr="">\s*<a:extLst><a:ext uri="\{C183D7F6-B498-43B3-948B-1728B52AA6E4\}">/,
 		);
 	});
@@ -772,7 +793,7 @@ describe(writePptx, () => {
 			[
 				[
 					run("Most of the body text"),
-					run("a link", { color: "3366cc", href: "https://sli.dev" }),
+					run("a link", { color: "3366CC", href: "https://sli.dev" }),
 				],
 			],
 			{ key: "body" },
@@ -805,13 +826,13 @@ describe(writePptx, () => {
 	it("picks accents by how many shapes and texts use them when the deck colors several", async () => {
 		const theme = await part(
 			await writeItems([
-				boxItem({ fill: { color: "00a3ff", transparency: 0 }, key: "a" }),
-				boxItem({ fill: { color: "00a3ff", transparency: 0 }, key: "b" }),
+				boxItem({ fill: { color: "00A3FF", transparency: 0 }, key: "a" }),
+				boxItem({ fill: { color: "00A3FF", transparency: 0 }, key: "b" }),
 				boxItem({
-					border: { color: "55e1f3", transparency: 0, width: 1 },
+					border: { color: "55E1F3", transparency: 0, width: 1 },
 					key: "c",
 				}),
-				boxItem({ fill: { color: "ffffff", transparency: 97 }, key: "d" }),
+				boxItem({ fill: { color: "FFFFFF", transparency: 97 }, key: "d" }),
 			]),
 			"ppt/theme/theme1.xml",
 		);
@@ -834,7 +855,7 @@ describe(writePptx, () => {
 	it("styles the master's title like the slides' titles when it writes it", async () => {
 		const master = await part(
 			await writeItems([
-				textItem([[run("Title", { color: "e5edf3", font: "Heading" })]], {
+				textItem([[run("Title", { color: "E5EDF3", font: "Heading" })]], {
 					heading: true,
 				}),
 				textItem([[run("Body text")]], { key: "body" }),
@@ -891,7 +912,7 @@ describe(writePptx, () => {
 			(
 				await part(
 					await writeItems([
-						textItem([[run("Title", { color: "e5edf3" })]], { heading: true }),
+						textItem([[run("Title", { color: "E5EDF3" })]], { heading: true }),
 						textItem([[run("Body text")]], { key: "body" }),
 					]),
 					"ppt/theme/theme1.xml",
@@ -965,7 +986,7 @@ describe(writePptx, () => {
 					await writeItems([
 						boxItem({ ...card, key: "a" }),
 						boxItem({ ...card, key: "b" }),
-						boxItem({ fill: { color: "ff0000", transparency: 0 }, key: "c" }),
+						boxItem({ fill: { color: "FF0000", transparency: 0 }, key: "c" }),
 					]),
 					"ppt/theme/theme1.xml",
 				)
@@ -1047,6 +1068,12 @@ describe(writePptx, () => {
 				'<a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>',
 			),
 		});
+	});
+
+	it("lists the notes master before the slides", async () => {
+		expect(await part(await writeItems([]), "ppt/presentation.xml")).toMatch(
+			/<\/p:sldMasterIdLst><p:notesMasterIdLst>.*?<\/p:notesMasterIdLst><p:sldIdLst>/,
+		);
 	});
 
 	it("sizes notes pages as portrait pages", async () => {
@@ -1180,6 +1207,53 @@ describe(writePptx, () => {
 			first: expect.not.stringContaining("Shown"),
 			second: expect.stringContaining("<a:t>Shown</a:t>"),
 		});
+	});
+
+	it("numbers each click slide's note by its Slidev click when withClicks is set", async () => {
+		const zip = await writeZip(
+			deckOf([
+				{
+					states: [
+						{ clicks: 2, items: [] },
+						{ clicks: 3, items: [] },
+					],
+				},
+			]),
+			true,
+		);
+
+		expect({
+			first: await part(zip, "ppt/notesSlides/notesSlide1.xml"),
+			second: await part(zip, "ppt/notesSlides/notesSlide2.xml"),
+		}).toEqual({
+			first: expect.stringContaining("<a:t>Slide 1, click 2</a:t>"),
+			second: expect.stringContaining("<a:t>Slide 1, click 3</a:t>"),
+		});
+	});
+
+	it("counts a slide's title once when it shows on several click slides", async () => {
+		const title = (size: number) =>
+			textItem([[run("Title", { size })]], { heading: true });
+		const zip = await writeZip(
+			deckOf([
+				{
+					states: [0, 1, 2].map((clicks) => ({
+						clicks,
+						items: [title(40)],
+					})),
+				},
+				{ states: [{ clicks: 0, items: [title(24)] }] },
+				{ states: [{ clicks: 0, items: [title(24)] }] },
+			]),
+			true,
+		);
+
+		expect(
+			firstLevel(
+				await part(zip, "ppt/slideMasters/slideMaster1.xml"),
+				"p:titleStyle",
+			)?.properties,
+		).toContain('<a:defRPr sz="2400"');
 	});
 
 	it("plays a slide's transition only into its first click state when withClicks is set", async () => {
@@ -1316,6 +1390,8 @@ describe(markerFor, () => {
 		['""', undefined],
 		["upper-roman", { kind: "number", style: "romanUcPeriod" }],
 		["cjk-decimal", { kind: "number", style: "arabicPeriod" }],
+		["disclosure-closed", { code: "25B8", kind: "string" }],
+		["none", undefined],
 	])("writes %s as %j", (listStyle, marker) => {
 		expect(markerFor(listStyle)).toEqual(marker);
 	});

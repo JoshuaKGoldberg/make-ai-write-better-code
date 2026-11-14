@@ -17,6 +17,7 @@ export interface BuildPptxOptions {
 export interface BuildPptxProblem {
 	/** The click state it happened in, when it's specific to one. */
 	click?: number;
+	/** A sentence saying what didn't export as it looks, such as "Couldn't export a video (/clip.mp4)." */
 	message: string;
 	/** "error" when content is missing from the PowerPoint, or "warning" when it's there but may look different. */
 	severity: "error" | "warning";
@@ -27,6 +28,7 @@ export interface BuildPptxProblem {
 export interface BuildPptxResult {
 	/** The absolute path of the .pptx file written. */
 	output: string;
+	/** Everything that may not have exported as it looks in Slidev, ordered by slide and click. */
 	problems: BuildPptxProblem[];
 	/** How many PowerPoint slides were written: one per Slidev slide, or one per click state with `withClicks`. */
 	slides: number;

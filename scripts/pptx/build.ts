@@ -43,6 +43,16 @@ interface PreparedSlide {
 
 type Report = (problem: BuildPptxProblem) => void;
 
+/**
+ * Builds a native, editable PowerPoint file from a Slidev deck.
+ * @example
+ * ```ts
+ * const { problems } = await buildPptx({
+ * 	entry: "slides.md",
+ * 	output: "talk.pptx",
+ * });
+ * ```
+ */
 export async function buildPptx({
 	work,
 	...options
@@ -79,12 +89,10 @@ async function build(
 	const numbers = slideNumbersOf(range, deckSlides.length);
 	const colorScheme = colorSchemeOf(dark, config.colorSchema);
 	config.colorSchema = colorScheme;
+	const defaultName = `${path.basename(entry, ".md")}-export`;
 	const outputFile = path.resolve(
-		pptxFileName(
-			output ??
-				config.exportFilename ??
-				`${path.basename(entry, ".md")}-export`,
-		),
+		// eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- Like Slidev, an empty name means none.
+		pptxFileName(output || config.exportFilename || defaultName),
 	);
 	await fs.mkdir(path.join(work, "rasters"), { recursive: true });
 	const renderer = await createSlideRenderer(deck);
@@ -103,6 +111,7 @@ async function build(
 			}
 		};
 
+		renderer.problems.forEach(report);
 		const canvas: Canvas = {
 			height: Math.ceil(config.canvasWidth / config.aspectRatio),
 			width: config.canvasWidth,
@@ -113,7 +122,6 @@ async function build(
 			work,
 		});
 
-		// Render every slide first, so UnoCSS has seen every class before its CSS is collected.
 		const rendered = await eachSlide(
 			numbers.map((number) => ({ number })),
 			report,
@@ -146,7 +154,6 @@ async function build(
 			styled.map(({ rendered }) => rendered.globalBottom),
 		);
 
-		// Style every state first, so the fonts their text uses load before any layout.
 		const prepared: PreparedSlide[] = styled.map((slide) => ({
 			...slide,
 			states: slide.rendered.states.map((html) =>
@@ -168,7 +175,7 @@ async function build(
 			),
 		);
 
-		const extractor = createStateExtractor({
+		const extract = createStateExtractor({
 			assets,
 			canvas,
 			fonts,
@@ -183,7 +190,7 @@ async function build(
 				const clicks = slide.rendered.clicksStart + index;
 				states.push({
 					clicks,
-					items: await extractor.extract(slide, clicks, state),
+					items: await extract(slide, clicks, state),
 				});
 			}
 
@@ -228,7 +235,15 @@ async function build(
 		}
 
 		written.problems.forEach(report);
-		return { output: outputFile, problems, slides: written.slides };
+		return {
+			output: outputFile,
+			problems: problems.toSorted(
+				(first, second) =>
+					(first.slide ?? 0) - (second.slide ?? 0) ||
+					(first.click ?? 0) - (second.click ?? 0),
+			),
+			slides: written.slides,
+		};
 	} finally {
 		await renderer.close();
 	}
@@ -334,7 +349,7 @@ function createStateExtractor({
 		return items;
 	}
 
-	return { extract };
+	return extract;
 }
 
 function cssOf(

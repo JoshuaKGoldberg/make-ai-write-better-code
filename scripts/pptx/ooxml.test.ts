@@ -46,7 +46,11 @@ const theme: Theme = {
 
 const lightTheme: Theme = { ...theme, background: "FFFFFF", text: "000000" };
 
-const patch = (xml: string, changes: Partial<SlidePatch>) =>
+const patch = (
+	xml: string,
+	changes: Partial<SlidePatch>,
+	gradients = createGradients(new Set()),
+) =>
 	patchSlide(
 		xml,
 		{
@@ -57,7 +61,7 @@ const patch = (xml: string, changes: Partial<SlidePatch>) =>
 			pictureCorners: [],
 			...changes,
 		},
-		{ gradients: createGradients(new Set()), theme },
+		{ gradients, theme },
 	);
 
 const buildList = (xml: string) => /<p:bldLst>.*<\/p:bldLst>/.exec(xml)?.[0];
@@ -90,14 +94,11 @@ describe(patchSlide, () => {
 			effects: [{ click: 1, name: "List", paragraph: 1, type: "entr" }],
 		});
 
-		expect({
-			builds: buildList(xml),
-			target: xml.includes(
+		expect({ builds: buildList(xml), xml }).toEqual({
+			builds: '<p:bldLst><p:bldP spid="2" grpId="0" build="p"/></p:bldLst>',
+			xml: expect.stringContaining(
 				'<p:spTgt spid="2"><p:txEl><p:pRg st="1" end="1"/></p:txEl></p:spTgt>',
 			),
-		}).toEqual({
-			builds: '<p:bldLst><p:bldP spid="2" grpId="0" build="p"/></p:bldLst>',
-			target: true,
 		});
 	});
 
@@ -156,7 +157,7 @@ describe(patchSlide, () => {
 		const sentinel = gradients.sentinel({ angle: 0, stops: [] });
 
 		expect(() =>
-			patchSlide(
+			patch(
 				slideXml(
 					shapeXml(
 						2,
@@ -164,14 +165,8 @@ describe(patchSlide, () => {
 						`<a:solidFill><a:srgbClr val="${sentinel}"><a:lumMod val="50000"/></a:srgbClr></a:solidFill>`,
 					),
 				),
-				{
-					decorative: [],
-					effects: [],
-					lists: [],
-					notes: "",
-					pictureCorners: [],
-				},
-				{ gradients, theme },
+				{},
+				gradients,
 			),
 		).toThrow('Expected no val="FEA000" left in the package\'s XML.');
 	});
@@ -236,6 +231,23 @@ describe(patchSlide, () => {
 		);
 	});
 
+	it("refers every one of a run's colors to the theme when they're the text's", () => {
+		expect(
+			patch(
+				slideXml(
+					shapeXml(
+						2,
+						"A",
+						'<a:p><a:r><a:rPr lang="en-US"><a:ln><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:rPr><a:t>a</a:t></a:r></a:p>',
+					),
+				),
+				{},
+			),
+		).toContain(
+			'<a:rPr lang="en-US" kern="100"><a:ln><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr>',
+		);
+	});
+
 	it("rounds a picture's corners by the adjustment it's given", () => {
 		expect(
 			patch(
@@ -294,6 +306,15 @@ describe(themeXml, () => {
 		);
 	});
 
+	it("gives the theme's second background the deck's most common box over its background", () => {
+		expect(
+			themeXml(original, {
+				...lightTheme,
+				shape: { fill: { color: "336699", transparency: 50 } },
+			}),
+		).toContain('<a:lt2><a:srgbClr val="99B3CC"/></a:lt2>');
+	});
+
 	it("gives new shapes no outline when the deck's most common box has none", () => {
 		expect(
 			themeXml(original, {
@@ -321,9 +342,42 @@ describe(notesParagraphs, () => {
 	const paragraphs = (notes: string) =>
 		notesParagraphs(notes, "Mono", () => "rId1");
 
-	it("writes an HTML block's text when the notes have one", () => {
+	it("writes an HTML block's text in its formats when the notes have one", () => {
 		expect(paragraphs("<div>A whole <b>block</b></div>")).toEqual([
-			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>A whole block</a:t></a:r></a:p>',
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>A whole </a:t></a:r><a:r><a:rPr lang="en-US" b="1" dirty="0"/><a:t>block</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("breaks the line when an HTML block has a br", () => {
+		expect(paragraphs("<div>Line one<br>\n  Line two</div>")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Line one</a:t></a:r><a:br><a:rPr lang="en-US" dirty="0"/></a:br><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Line two</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("writes each block an HTML block nests as a paragraph", () => {
+		expect(
+			paragraphs("<div>\n  <p>Para one</p>\n  <p>Para two</p>\n</div>"),
+		).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Para one</a:t></a:r></a:p>',
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Para two</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("keeps text bold after an inner bold tag closes when an outer bold is still open", () => {
+		expect(paragraphs("**a <b>b</b> c**")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" b="1" dirty="0"/><a:t>a b c</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("keeps text italic after inner emphasis closes when an outer italic tag is still open", () => {
+		expect(paragraphs("<i>x *y* z</i>")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" i="1" dirty="0"/><a:t>x y z</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("writes no empty run when a note starts with formatting", () => {
+		expect(paragraphs("**Bold** start")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" b="1" dirty="0"/><a:t>Bold</a:t></a:r><a:r><a:rPr lang="en-US" dirty="0"/><a:t> start</a:t></a:r></a:p>',
 		]);
 	});
 

@@ -25,7 +25,7 @@ import type {
 } from "./model.ts";
 import type {
 	Gradients,
-	ListMarker,
+	Marker,
 	ShapeLook,
 	SlidePatch,
 	Theme,
@@ -63,11 +63,6 @@ interface Entry {
 }
 
 type ItemWriter = ReturnType<typeof createItemWriter>;
-
-/** A list's marker in PowerPoint: a character bullet, or automatic numbering. */
-type Marker =
-	| { code: string; kind: "keyword" | "string" }
-	| { kind: "number"; style: string };
 
 type TextParagraph = Paragraph & {
 	/** For list items: the marker, and the hanging indent it sits in. */
@@ -145,7 +140,7 @@ const SAME_PLACE_TOLERANCE = 1.5;
 
 const MIN_ROUNDED_RADIUS = 0.5;
 const NAME_LENGTH = 48;
-const NO_BREAK_SPACE = "00A0";
+const NO_BREAK_SPACE_CODE = "00A0";
 
 const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
 
@@ -176,6 +171,12 @@ const KEYWORD_MARKERS: Partial<Record<string, string>> = {
 	square: "25A0",
 };
 
+/** The triangles browsers draw for disclosure markers, in the text's font. */
+const DISCLOSURE_MARKERS: Partial<Record<string, string>> = {
+	"disclosure-closed": "25B8",
+	"disclosure-open": "25BE",
+};
+
 const UNDERLINE_STYLES = {
 	dashed: "dash",
 	dotted: "dotted",
@@ -183,6 +184,20 @@ const UNDERLINE_STYLES = {
 	single: "sng",
 	wavy: "wavy",
 } as const satisfies Record<Underline["style"], string>;
+
+/** Run properties neighboring runs may differ in and still join into one. */
+const JOINED_PROPERTIES = ["lineBreak", "text"];
+
+/** Run properties whitespace doesn't show, so runs that differ only in them still join where one is whitespace. */
+const UNSEEN_ON_WHITESPACE = [
+	...JOINED_PROPERTIES,
+	"color",
+	"gradient",
+	"shadow",
+	"stroke",
+	"transparency",
+	"upper",
+];
 
 /** How many roman numerals each decimal digit takes, as in IV or VIII. */
 const ROMAN_LENGTHS = [0, 1, 2, 3, 2, 1, 2, 3, 4, 2];
@@ -214,15 +229,16 @@ export async function writePptx({
 	};
 	const gradients = createGradients(colorsOf(deck));
 	const addItem = createItemWriter({ fonts, gradients, presentation, units });
-	const timelines = deck.slides.map((slide) => ({
-		entries: timeline(slide),
-		slide,
-	}));
-	const patches = timelines.flatMap(({ entries, slide }) =>
-		withClicks
-			? writeClickSlides(presentation, slide, entries, addItem)
-			: [writeAnimatedSlide(presentation, slide, entries, addItem)],
-	);
+	const slides = deck.slides.map((slide) => {
+		const entries = timeline(slide);
+		return {
+			entries,
+			patches: withClicks
+				? writeClickSlides(presentation, slide, entries, addItem)
+				: [writeAnimatedSlide(presentation, slide, entries, addItem)],
+		};
+	});
+	const patches = slides.flatMap((slide) => slide.patches);
 
 	const zip = await JSZip.loadAsync(
 		await presentation.write({ outputType: "nodebuffer" }),
@@ -238,11 +254,12 @@ export async function writePptx({
 			slides: patches,
 			theme: themeOf({
 				deck,
-				items: timelines.flatMap(({ entries }) =>
-					entries.map(({ item }) => item),
-				),
+				items: slides.flatMap(({ entries }) => entries.map(({ item }) => item)),
 				monospace,
-				patches,
+				titles: slides.flatMap(
+					(slide) =>
+						slide.patches.find(({ title }) => title)?.title?.look ?? [],
+				),
 				units,
 			}),
 		}),
@@ -250,7 +267,6 @@ export async function writePptx({
 	return { problems: numberingProblems(deck), slides: patches.length };
 }
 
-/** Writes a slide with its click states as animations. */
 function writeAnimatedSlide(
 	presentation: Presentation,
 	slide: Slide,
@@ -262,7 +278,13 @@ function writeAnimatedSlide(
 	const used = new Set<string>();
 	for (const entry of entries) {
 		const name = uniqueName(entry.item, used);
-		const shapes = addItem(powerPointSlide, patch, entry.item, name);
+		const shapes = addItem(
+			powerPointSlide,
+			patch,
+			entry.item,
+			name,
+			entry.paragraphStates?.map((states) => states.size > 0),
+		);
 
 		for (let click = 1; click < slide.states.length; click++) {
 			const now = entry.states.has(click);
@@ -293,27 +315,26 @@ function writeAnimatedSlide(
 	return patch;
 }
 
-/** Writes one static slide per click state. */
 function writeClickSlides(
 	presentation: Presentation,
 	slide: Slide,
 	entries: Entry[],
 	addItem: ItemWriter,
 ) {
-	return slide.states.map((_, click) => {
+	return slide.states.map(({ clicks }, state) => {
 		const powerPointSlide = presentation.addSlide();
 		const patch = slidePatch(
-			`Slide ${String(slide.number)}, click ${String(click)}\n\n${slide.notes}`,
-			click === 0 ? slide.transition : undefined,
+			`Slide ${String(slide.number)}, click ${String(clicks)}\n\n${slide.notes}`,
+			state === 0 ? slide.transition : undefined,
 		);
 		const used = new Set<string>();
-		for (const entry of entries.filter(({ states }) => states.has(click))) {
+		for (const entry of entries.filter(({ states }) => states.has(state))) {
 			addItem(
 				powerPointSlide,
 				patch,
 				entry.item,
 				uniqueName(entry.item, used),
-				entry.paragraphStates?.map((states) => states.has(click)),
+				entry.paragraphStates?.map((states) => states.has(state)),
 			);
 		}
 
@@ -352,36 +373,38 @@ function createItemWriter({
 		y: inches(box.y),
 	});
 	const fillFor = (fill: Fill | undefined): pptxgen.default.ShapeFillProps =>
-		fill
-			? {
-					color: fill.gradient ? gradients.sentinel(fill.gradient) : fill.color,
-					transparency: fill.gradient
-						? undefined
-						: fill.transparency || undefined,
-				}
-			: { type: "none" };
+		!fill
+			? { type: "none" }
+			: "gradient" in fill
+				? { color: gradients.sentinel(fill.gradient) }
+				: { color: fill.color, transparency: fill.transparency || undefined };
 	const lineFor = (stroke: Stroke | undefined) =>
 		stroke && {
 			color: stroke.color,
 			transparency: stroke.transparency,
 			width: Math.max(MIN_LINE_WIDTH, points(stroke.width)),
 		};
-	const shadowFor = (shadow: Shadow): pptxgen.default.ShadowProps => ({
-		angle:
-			normalizeDegrees(
-				Math.round(
-					(Math.atan2(shadow.offsetY, shadow.offsetX) * 180) / Math.PI,
-				),
-			) || NEAR_FULL_TURN,
-		blur: Math.max(NEAR_ZERO, points(shadow.blur)),
-		color: shadow.color,
-		offset: Math.max(
-			NEAR_ZERO,
-			points(Math.hypot(shadow.offsetX, shadow.offsetY)),
-		),
-		opacity: 1 - shadow.transparency / 100,
-		type: "outer",
-	});
+	const shadowFor = (
+		shadow: Shadow | undefined,
+	): pptxgen.default.ShadowProps | undefined =>
+		shadow && shadow.transparency < 100
+			? {
+					angle:
+						normalizeDegrees(
+							Math.round(
+								(Math.atan2(shadow.offsetY, shadow.offsetX) * 180) / Math.PI,
+							),
+						) || NEAR_FULL_TURN,
+					blur: Math.max(NEAR_ZERO, points(shadow.blur)),
+					color: shadow.color,
+					offset: Math.max(
+						NEAR_ZERO,
+						points(Math.hypot(shadow.offsetX, shadow.offsetY)),
+					),
+					opacity: 1 - shadow.transparency / 100,
+					type: "outer",
+				}
+			: undefined;
 
 	const textRuns = (
 		paragraphs: TextParagraph[],
@@ -478,7 +501,7 @@ function createItemWriter({
 		const list =
 			item.kind === "list"
 				? {
-						color: item.bulletColor?.toUpperCase(),
+						color: item.bulletColor,
 						paragraphs: listParagraphs(
 							item,
 							visibleParagraphs,
@@ -514,8 +537,7 @@ function createItemWriter({
 			margin: 0,
 			objectName: name,
 			rotate: rotation ? normalizeDegrees(rotation) : undefined,
-			shadow:
-				shadow && shadow.transparency < 100 ? shadowFor(shadow) : undefined,
+			shadow: shadowFor(shadow),
 			valign: "top",
 			wrap: !style.nowrap,
 		};
@@ -597,6 +619,7 @@ function createItemWriter({
 						objectName: name,
 						rectRadius: rounded ? inches(radius) : undefined,
 						rotate: item.rotation ? normalizeDegrees(item.rotation) : undefined,
+						shadow: shadowFor(item.shadow),
 					},
 				);
 				return [name];
@@ -630,12 +653,13 @@ function createItemWriter({
 						},
 						w: inches(crop.width),
 					}),
-					altText: isDecorative(item)
+					altText: item.decorative
 						? DECORATIVE
 						: withoutControlCharacters(item.alt),
 					objectName: name,
 					path: item.file,
 					rounding: item.kind === "image" && isCircle(item),
+					shadow: item.kind === "image" ? shadowFor(item.shadow) : undefined,
 					transparency:
 						item.kind === "image" ? item.transparency || undefined : undefined,
 				});
@@ -685,7 +709,7 @@ function createItemWriter({
 		visibleParagraphs?: boolean[],
 	) => {
 		const names = addItem(slide, patch, item, name, visibleParagraphs);
-		if (isDecorative(item)) {
+		if (item.decorative) {
 			patch.decorative.push(...names);
 		}
 
@@ -697,12 +721,6 @@ function createItemWriter({
 const isCircle = (image: ImageItem) =>
 	image.radius >= Math.min(image.box.width, image.box.height) / 2 - 1;
 
-/** Whether screen readers should skip an item; pptxgenjs writes a picture's file path for empty alt text, so pictures without any are decorative too. */
-const isDecorative = (item: Item) =>
-	item.decorative ||
-	((item.kind === "image" || item.kind === "raster") &&
-		!withoutControlCharacters(item.alt));
-
 /** Where a title's box sits and how its first run looks, for the master's title style. */
 function titleLook(
 	box: Box,
@@ -713,7 +731,7 @@ function titleLook(
 	return {
 		align: ALIGNMENTS[style.align],
 		bold: run.bold,
-		color: run.color.toUpperCase(),
+		color: run.color,
 		cx: emu(box.width),
 		cy: emu(box.height),
 		font: run.font,
@@ -771,7 +789,7 @@ function listParagraphs(
 	visibleParagraphs: boolean[] | undefined,
 	markerGap: number,
 	points: Units["points"],
-): (TextParagraph & { marker: ListMarker })[] {
+): (TextParagraph & { marker?: Marker["kind"] })[] {
 	const numbering = createNumbering();
 	return spacedListParagraphs(item, points).map((paragraph, index) => {
 		const { level, number } = paragraph;
@@ -790,7 +808,7 @@ function listParagraphs(
 		return {
 			bullet:
 				marker === undefined
-					? { characterCode: NO_BREAK_SPACE, indent }
+					? { characterCode: NO_BREAK_SPACE_CODE, indent }
 					: marker.kind === "number"
 						? {
 								indent,
@@ -800,7 +818,7 @@ function listParagraphs(
 							}
 						: { characterCode: marker.code, indent },
 			indentLevel: level || undefined,
-			marker: marker?.kind ?? "none",
+			marker: marker?.kind,
 			runs: visible
 				? paragraph.runs
 				: paragraph.runs.map((run) => ({ ...run, transparency: 100 })),
@@ -885,9 +903,18 @@ export function horizontalPlacement(
 
 /** The PowerPoint marker for a CSS list-style-type, if it shows one. */
 export function markerFor(listStyle: string): Marker | undefined {
+	if (listStyle === "none") {
+		return undefined;
+	}
+
 	const keyword = KEYWORD_MARKERS[listStyle];
 	if (keyword) {
 		return { code: keyword, kind: "keyword" };
+	}
+
+	const disclosure = DISCLOSURE_MARKERS[listStyle];
+	if (disclosure) {
+		return { code: disclosure, kind: "string" };
 	}
 
 	if (/^["']/.test(listStyle)) {
@@ -1004,24 +1031,35 @@ const spacingPercent = (multiple: number | undefined) =>
 const breaksBefore = (run: Run, wrap: boolean) =>
 	run.lineBreak === "forced" || (!wrap && run.lineBreak === "wrap");
 
-/** Joins neighboring runs that look alike (as takumi splits text per line) into one run to edit, except where a line break is kept. */
+/** Joins neighboring runs that look alike (as takumi splits text per line), or that differ only where whitespace between them can't show it, into one run to edit, except where a line break is kept. */
 function mergeRuns(runs: Run[], wrap: boolean) {
-	const breakAndText = new Set(["lineBreak", "text"]);
-	const format = (run: Run) =>
-		JSON.stringify(run, (name, value: unknown) =>
-			breakAndText.has(name) ? undefined : value,
+	const lookOf = (run: Run, ignored: string[]) =>
+		JSON.stringify(
+			Object.fromEntries(
+				Object.entries(run).filter(([name]) => !ignored.includes(name)),
+			),
 		);
+	const isBlank = (run: Run) => !run.text.trim();
 	const merged: Run[] = [];
 	for (const run of runs) {
 		const previous = merged.at(-1);
-		if (
+		const joins =
 			previous &&
 			!breaksBefore(run, wrap) &&
-			format(previous) === format(run)
-		) {
-			previous.text += run.text;
-		} else {
+			(lookOf(previous, JOINED_PROPERTIES) === lookOf(run, JOINED_PROPERTIES) ||
+				((isBlank(previous) || isBlank(run)) &&
+					lookOf(previous, UNSEEN_ON_WHITESPACE) ===
+						lookOf(run, UNSEEN_ON_WHITESPACE)));
+		if (!joins) {
 			merged.push({ ...run });
+		} else if (isBlank(previous) && !isBlank(run)) {
+			merged[merged.length - 1] = {
+				...run,
+				lineBreak: previous.lineBreak,
+				text: previous.text + run.text,
+			};
+		} else {
+			previous.text += run.text;
 		}
 	}
 
@@ -1183,7 +1221,7 @@ function colorsOf(deck: Deck) {
 			(key === "color" || key === "bulletColor") &&
 			typeof value === "string"
 		) {
-			colors.add(value.toUpperCase());
+			colors.add(value);
 		}
 
 		return value;
@@ -1223,28 +1261,27 @@ function themeOf({
 	deck,
 	items,
 	monospace,
-	patches,
+	titles,
 	units,
 }: {
 	deck: Deck;
 	/** Each slide's items, once across its click states. */
 	items: Item[];
 	monospace: string;
-	patches: SlidePatch[];
+	/** Each slide's title, once across its click states. */
+	titles: TitleLook[];
 	units: Units;
 }): Theme {
 	const texts = items.filter(
 		(item) => item.kind === "list" || item.kind === "text",
 	);
 	const runs = contentRunsOf(texts);
-	const text =
-		ranked(runs, (run) => run.color.toUpperCase(), characters).at(0) ??
-		"000000";
+	const text = ranked(runs, (run) => run.color, characters).at(0) ?? "000000";
 	const fonts = fontsOf(items, monospace);
 	const title =
-		titleLookOf(patches) ??
+		titleLookOf(titles) ??
 		defaultTitle(deck, { color: text, font: fonts.majorFont }, units);
-	const background = deck.background.color.toUpperCase();
+	const background = deck.background.color;
 	return {
 		...bodyStyleOf(
 			texts.filter((item) => !isHeading(item)),
@@ -1255,7 +1292,7 @@ function themeOf({
 		background,
 		link: ranked(
 			runs.filter((run) => run.href),
-			(run) => run.color.toUpperCase(),
+			(run) => run.color,
 			characters,
 		).at(0),
 		name: deck.title,
@@ -1341,10 +1378,9 @@ function defaultTitle(
 }
 
 /** The slides' most common title style, at its most common place (the topmost, when places tie). */
-function titleLookOf(patches: SlidePatch[]) {
+function titleLookOf(looks: TitleLook[]) {
 	const styleOf = (look: TitleLook) =>
 		JSON.stringify({ ...look, cy: undefined, y: undefined });
-	const looks = patches.flatMap(({ title }) => (title ? [title.look] : []));
 	const style = ranked(looks, styleOf).at(0);
 	const group = looks.filter((look) => styleOf(look) === style);
 	const y = ranked(
@@ -1357,15 +1393,15 @@ function titleLookOf(patches: SlidePatch[]) {
 /** The look of the deck's most common box with a solid fill, for new shapes. */
 function shapeLookOf(items: Item[], { points }: Units) {
 	const looks = items.flatMap((item): ShapeLook[] =>
-		item.kind === "box" && item.fill && !item.fill.gradient
+		item.kind === "box" && item.fill && !("gradient" in item.fill)
 			? [
 					{
 						fill: {
-							color: item.fill.color.toUpperCase(),
+							color: item.fill.color,
 							transparency: item.fill.transparency,
 						},
 						line: item.border && {
-							color: item.border.color.toUpperCase(),
+							color: item.border.color,
 							transparency: item.border.transparency,
 							width: Math.round(
 								Math.max(MIN_LINE_WIDTH, points(item.border.width)) *
@@ -1382,25 +1418,22 @@ function shapeLookOf(items: Item[], { points }: Units) {
 
 /** The colors the deck uses most for shapes, borders, markers, and text, other than its text and background colors. */
 function accentsOf(items: Item[], excluded: Set<string>) {
-	const uses = items.flatMap((item) => {
-		const solid = (
-			paint:
-				undefined | { color: string; gradient?: unknown; transparency: number },
-		) =>
-			paint && !paint.gradient && paint.transparency < 50 ? [paint.color] : [];
-		return [
-			...("fill" in item ? solid(item.fill) : []),
-			...("border" in item ? solid(item.border) : []),
-			...(item.kind === "list" && item.bulletColor ? [item.bulletColor] : []),
-			...("paragraphs" in item
-				? new Set(
-						item.paragraphs.flatMap(({ runs }) =>
-							runs.flatMap((run) => solid(run)),
-						),
-					)
-				: []),
-		].map((color) => color.toUpperCase());
-	});
+	const solid = (paint: undefined | { color: string; transparency: number }) =>
+		paint && paint.transparency < 50 ? [paint.color] : [];
+	const uses = items.flatMap((item) => [
+		...("fill" in item && item.fill && !("gradient" in item.fill)
+			? solid(item.fill)
+			: []),
+		...("border" in item ? solid(item.border) : []),
+		...(item.kind === "list" && item.bulletColor ? [item.bulletColor] : []),
+		...("paragraphs" in item
+			? new Set(
+					item.paragraphs.flatMap(({ runs }) =>
+						runs.flatMap((run) => (run.gradient ? [] : solid(run))),
+					),
+				)
+			: []),
+	]);
 	return ranked(
 		uses.filter((color) => !excluded.has(color)),
 		(color) => color,

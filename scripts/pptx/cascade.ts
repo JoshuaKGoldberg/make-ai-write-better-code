@@ -225,6 +225,14 @@ const BORDER_STYLES = new Set([
 	"ridge",
 	"solid",
 ]);
+const FONT_PROPERTIES = [
+	"font-family",
+	"font-size",
+	"font-style",
+	"font-weight",
+	"line-height",
+];
+
 const CSS_WIDE_KEYWORDS = new Set([
 	"inherit",
 	"initial",
@@ -408,7 +416,7 @@ export const isOutOfFlow = (style: ComputedStyle) =>
 
 /** Whether an element in a line lays out apart from its text: an atomic inline, or a block-level box (out of flow, floated, or a block inside an inline). */
 export const laysOutApart = (style: ComputedStyle) =>
-	isAtomicInline(style) || !style.display.startsWith("inline");
+	isAtomicInline(style) || !/^(?:inline|contents)/.test(style.display);
 
 /** Parses stylesheets (after the user-agent defaults) into an ordered rule list. */
 export function createCascade(sheets: string[], environment: CascadeOptions) {
@@ -887,10 +895,12 @@ function contentText(value: string | undefined, element: Element) {
 	const altTextStart = nodes.findIndex(
 		(node) => node.type === "Operator" && node.value === "/",
 	);
-	return nodes
-		.slice(0, altTextStart < 0 ? undefined : altTextStart)
-		.map((node) => contentPart(node, element))
-		.join("");
+	const shown = nodes.slice(0, altTextStart < 0 ? undefined : altTextStart);
+	return shown.some(
+		(node) => node.type === "Function" && /^counters?$/.test(node.name),
+	)
+		? undefined
+		: shown.map((node) => contentPart(node, element)).join("");
 }
 
 function evaluateArithmetic(expression: string) {
@@ -1099,6 +1109,12 @@ function expandBorder(prefix: string, value: string) {
 }
 
 function expandFont(value: string) {
+	if (CSS_WIDE_KEYWORDS.has(value)) {
+		return Object.fromEntries(
+			FONT_PROPERTIES.map((property) => [property, value]),
+		);
+	}
+
 	const parts = splitTopLevel(splitTopLevel(value, "/").join(" / "), " ");
 	const sizeIndex = parts.findIndex(
 		(part) =>

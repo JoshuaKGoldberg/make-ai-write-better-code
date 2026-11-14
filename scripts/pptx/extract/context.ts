@@ -2,7 +2,7 @@ import type { Assets } from "../assets.ts";
 import type { FontBook } from "../fonts.ts";
 import type { LaidOutRuns, Layout } from "../layout.ts";
 import type { Canvas, ExtractedItem } from "../model.ts";
-import type { Insets, Side } from "./geometry.ts";
+import type { Clip, Insets, Side } from "./geometry.ts";
 
 import {
 	INITIAL_STYLE,
@@ -11,8 +11,17 @@ import {
 	laysOutApart,
 	resolveLength,
 } from "../cascade.ts";
+import { splitTopLevel } from "../css.ts";
 import { GENERATED_ELEMENTS, ID } from "../layout.ts";
-import { scaleOf, SIDES } from "./geometry.ts";
+import {
+	clipBox,
+	geometryOf,
+	insetBox,
+	rotatedBounds,
+	sameBox,
+	scaleOf,
+	SIDES,
+} from "./geometry.ts";
 
 export type ExtractContext = ReturnType<typeof createExtractContext>;
 
@@ -52,6 +61,57 @@ const isElement = (node: Node): node is Element =>
 
 const isDecoration = (item: ItemInput) =>
 	!("paragraphs" in item) && !("alt" in item && item.alt.trim());
+
+/** An item cut to a clip: shapes and pictures to the part inside it, text to the height it shows; undefined when none of it shows. */
+function clipItem(item: ItemInput, clip: Clip): ItemInput | undefined {
+	const rotation = "rotation" in item ? item.rotation : 0;
+	const box = clipBox(item.box, clip);
+	const shown = rotation
+		? clipBox(rotatedBounds(item.box, rotation), clip)
+		: box;
+	if (shown.width <= 0 || shown.height <= 0) {
+		return undefined;
+	}
+
+	if (rotation) {
+		return item;
+	}
+
+	const fills = sameBox(box, {
+		height: clip.bottom - clip.top,
+		width: clip.right - clip.left,
+		x: clip.left,
+		y: clip.top,
+	});
+	switch (item.kind) {
+		case "box":
+			return {
+				...item,
+				box,
+				radius: fills ? Math.max(item.radius, clip.radius) : item.radius,
+			};
+		case "code":
+		case "list":
+		case "text":
+			return {
+				...item,
+				box: { ...item.box, height: box.y + box.height - item.box.y },
+			};
+		case "image": {
+			const drawn = item.crop ?? item.box;
+			return {
+				...item,
+				box,
+				crop: sameBox(box, drawn) ? undefined : drawn,
+				radius: fills ? Math.max(item.radius, clip.radius) : item.radius,
+			};
+		}
+		case "raster":
+			return { ...item, box };
+		default:
+			return item;
+	}
+}
 
 export const isMath = (element: Element) => element.classList.contains("katex");
 
@@ -163,6 +223,68 @@ export function createExtractContext(
 		return product;
 	};
 
+	/** The area overflow clips an element to: its ancestors' (from its containing block up, when it's out of flow), and its own too for its content. */
+	const clipOf = (element: Element, ownContent: boolean) => {
+		let clip: Clip | undefined;
+		let escaping = false;
+		for (
+			let current: Element | null = element;
+			current && current.id !== "slide-content";
+			current = current.parentElement
+		) {
+			const style = styleOf(current);
+			const containing = !escaping || (style.position ?? "static") !== "static";
+			if (containing && (current !== element || ownContent)) {
+				clip = clipWithin(current, clip);
+			}
+
+			if (containing) {
+				escaping = isOutOfFlow(style);
+			}
+		}
+
+		return clip;
+	};
+
+	const clipWithin = (element: Element, clip: Clip | undefined) => {
+		const style = styleOf(element);
+		const [overflowX = "visible", overflowY = overflowX] = splitTopLevel(
+			style.overflow ?? "visible",
+			" ",
+		);
+		const clipsX = (style["overflow-x"] ?? overflowX) !== "visible";
+		const clipsY = (style["overflow-y"] ?? overflowY) !== "visible";
+		const laidOut = boxOf(element);
+		if (!laidOut || (!clipsX && !clipsY)) {
+			return clip;
+		}
+
+		const { box, rotation, scale } = geometryOf(laidOut);
+		if (rotation) {
+			return clip;
+		}
+
+		const padding = insetBox(box, borderInsets(element), scale);
+		const bounds = clip ?? {
+			bottom: Infinity,
+			left: -Infinity,
+			radius: 0,
+			right: Infinity,
+			top: -Infinity,
+		};
+		return {
+			bottom: clipsY
+				? Math.min(bounds.bottom, padding.y + padding.height)
+				: bounds.bottom,
+			left: clipsX ? Math.max(bounds.left, padding.x) : bounds.left,
+			radius: clip?.radius ?? radiusOf(element) * scale,
+			right: clipsX
+				? Math.min(bounds.right, padding.x + padding.width)
+				: bounds.right,
+			top: clipsY ? Math.max(bounds.top, padding.y) : bounds.top,
+		};
+	};
+
 	const isInline = (element: Element) =>
 		styleOf(element).display.startsWith("inline");
 
@@ -211,6 +333,7 @@ export function createExtractContext(
 		boxOf,
 		byId,
 		canvas,
+		clipOf,
 		contentInsets,
 		drawsApart,
 		fonts,
@@ -232,10 +355,13 @@ export function createExtractContext(
 		push: (element: Element, ...added: ItemInput[]) => {
 			const hidden = element.closest('[aria-hidden="true"]') !== null;
 			items.push(
-				...added.map((item) => ({
-					...item,
-					decorative: hidden || isDecoration(item),
-				})),
+				...added.flatMap((item) => {
+					const clip = clipOf(element, "paragraphs" in item);
+					const clipped = clip ? clipItem(item, clip) : item;
+					return clipped
+						? [{ ...clipped, decorative: hidden || isDecoration(item) }]
+						: [];
+				}),
 			);
 		},
 		radiusOf,

@@ -1,23 +1,26 @@
 import type {
+	AppContext,
+	AppSetup,
 	ClicksContext,
 	RawAtValue,
 	ResolvedSlidevOptions,
 	SlidevThemeConfig,
 } from "@slidev/types";
-import type { App, Component, ObjectDirective, Ref } from "vue";
+import type { Component, FunctionalComponent, ObjectDirective, Ref } from "vue";
 
 import { createServer, resolveOptions } from "@slidev/cli";
 import { ImportType, init, parse } from "es-module-lexer";
 import { parseHTML } from "linkedom";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createSSRApp, defineComponent, Fragment, h, reactive, ref } from "vue";
 import { renderToString } from "vue/server-renderer";
 
 import type { ClickTarget } from "./ssr/clicks.ts";
 import type { SlideProblem } from "./ssr/problems.ts";
 import type * as NavStandIn from "./ssr/useNav.ts";
+import type { BuildPptxProblem } from "./types.ts";
 
 import { BuildPptxError } from "./error.ts";
 import {
@@ -66,7 +69,21 @@ type Layers = Record<
 	Component
 >;
 
+interface RenderingSlide {
+	frontmatter: Frontmatter;
+	number: number;
+	zoom: number;
+}
+
 type Server = Awaited<ReturnType<typeof createServer>>;
+
+interface VueRouter {
+	createMemoryHistory: () => unknown;
+	createRouter: (options: {
+		history: unknown;
+		routes: [];
+	}) => AppContext["router"];
+}
 
 const GLOBAL_LAYERS_MODULE = "/@slidev/global-layers";
 
@@ -80,6 +97,7 @@ const STAND_INS = {
 	"builtin/CodeBlockWrapper.vue": "CodeBlockWrapper.vue",
 	"builtin/CodeGroup.vue": "CodeGroup.vue",
 	"builtin/KaTexBlockWrapper.vue": "KaTexBlockWrapper.vue",
+	"builtin/Mermaid.vue": "MermaidDiagram.vue",
 	"builtin/Monaco.vue": "MonacoEditor.vue",
 	"builtin/ShikiMagicMove.vue": "ShikiMagicMove.vue",
 	"builtin/VClickGap.vue": "VClickGap.vue",
@@ -90,8 +108,7 @@ const STAND_INS = {
 const MAY_IMPORT_CSS =
 	/\.(?:css|less|sass|scss|styl|stylus|pcss|postcss|sss|vue|[cm]?[jt]sx?|md)(?:$|\?)|uno:|__uno|type=style|\/@slidev\//;
 
-/** The compiled CSS in a CSS module as Vite's dev server serves it. */
-const VITE_CSS = /const __vite__css = ("(?:[^"\\]|\\.)*")/;
+const VITE_CSS_MODULE_SOURCE = /const __vite__css = ("(?:[^"\\]|\\.)*")/;
 
 const popperStandIn = defineComponent({
 	inheritAttrs: false,
@@ -106,6 +123,11 @@ const popperStandIn = defineComponent({
 					])
 				: slots.default?.(),
 });
+
+const routerLinkStandIn: FunctionalComponent<{ to: string }> = (
+	props,
+	{ slots },
+) => h("a", { href: props.to }, slots.default?.());
 
 const standIn = (file: string) =>
 	fileURLToPath(new URL(`./ssr/${file}`, import.meta.url));
@@ -247,9 +269,22 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		typeof NavStandIn
 	>(standIn("useNav.ts"));
 	const layers = await load<Layers>(GLOBAL_LAYERS_MODULE);
-	const { default: setups } = await load<{
-		default: ((context: { app: App }) => unknown)[];
-	}>("/@slidev/setups/main");
+	const { default: setups } = await load<{ default: AppSetup[] }>(
+		"/@slidev/setups/main",
+	);
+	const vueRouter = await server.environments.ssr.pluginContainer.resolveId(
+		"vue-router",
+		path.join(deck.clientRoot, "index.ts"),
+	);
+	if (!vueRouter) {
+		throw new BuildPptxError(
+			"This version of Slidev isn't supported: its client has no vue-router.",
+		);
+	}
+
+	const { createMemoryHistory, createRouter } = (await import(
+		pathToFileURL(vueRouter.id).href
+	)) as VueRouter;
 	const { config, slides } = deck.data;
 	const { client } = server.environments;
 	await init;
@@ -257,30 +292,28 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		`${deck.entry}__slidev_${String(slideNumber)}.md`;
 
 	async function renderApp(
-		slideNumber: number,
+		{ frontmatter, number: slideNumber, zoom }: RenderingSlide,
 		component: Component,
 		clicks: number,
-		totalClicks?: number,
+		totalClicks = frontmatter.clicks,
 	) {
-		const frontmatter: Frontmatter = slides[slideNumber - 1].frontmatter;
 		const clicksContext = createClicksContextBase(
 			ref(clicks),
 			frontmatter.clicksStart,
-			totalClicks ?? frontmatter.clicks,
+			totalClicks,
 		);
 		const { nav, route } = createSlideContext(slideNumber, clicksContext);
 		const problems: SlideProblem[] = [];
 		const targets: ClickTarget[] = [];
+		const defaultAnimations =
+			// eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- Like Slidev, an empty clickAnimation means none.
+			(frontmatter.clickAnimation || config.clickAnimation)
+				.split(/[\s,]+/)
+				.filter(Boolean);
 		const click = (kind: "after" | "click" | "hide") =>
-			clickDirective(
-				constants,
-				targets,
-				kind,
-				(frontmatter.clickAnimation ?? config.clickAnimation)
-					.split(/[\s,]+/)
-					.filter(Boolean),
-			);
+			clickDirective(constants, targets, kind, defaultAnimations);
 		const app = createSSRApp({ render: () => h(component) });
+		app.config.throwUnhandledErrorInProduction = true;
 		app.config.warnHandler = (message) => {
 			const unresolved = UNRESOLVED_ASSET.exec(message);
 			if (unresolved) {
@@ -299,10 +332,11 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 			constants.injectionSlidevContext,
 			reactive({ configs: config, nav, themeConfigs: config.themeConfig }),
 		);
-		app.provide(constants.injectionSlideZoom, ref(frontmatter.zoom ?? 1));
+		app.provide(constants.injectionSlideZoom, ref(zoom));
 		app.provide(injectionSlideNav, nav);
 		app.provide(injectionClickTargets, targets);
 		app.provide(injectionSlideProblems, problems);
+		app.component("RouterLink", routerLinkStandIn);
 		for (const name of FLOATING_VUE_COMPONENTS) {
 			app.component(name, popperStandIn);
 		}
@@ -321,8 +355,9 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		});
 		app.directive("mark", markDirective(targets, problems));
 		app.directive("motion", {});
+		const router = createRouter({ history: createMemoryHistory(), routes: [] });
 		for (const setup of setups) {
-			await setup({ app });
+			await app.runWithContext(() => setup({ app, router }));
 		}
 
 		const html = await renderToString(app);
@@ -335,34 +370,10 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		};
 	}
 
-	function resolveClickTargets(
-		html: string,
-		targets: ClickTarget[],
-		clicksContext: ClicksContext,
-	) {
-		const { document } = parseHTML(
-			`<!doctype html><html><body>${html}</body></html>`,
-		);
-		for (const element of childrenFirst(document.body)) {
-			const indices = element
-				.getAttributeNames()
-				.filter((name) => name.startsWith(CLICK_TARGET_ATTRIBUTE))
-				.map((name) => {
-					element.removeAttribute(name);
-					return Number(name.slice(CLICK_TARGET_ATTRIBUTE.length));
-				})
-				.sort((a, b) => a - b);
-			for (const index of indices) {
-				targets[index](clicksContext, element);
-			}
-		}
-
-		return document.body.innerHTML;
-	}
-
 	async function renderSlide(slideNumber: number): Promise<RenderedSlide> {
-		const { frontmatter } = slides[slideNumber - 1];
-		const { clicks, clicksStart = 0, zoom = 1 }: Frontmatter = frontmatter;
+		const frontmatter: Frontmatter = slides[slideNumber - 1].frontmatter;
+		const { clicksStart = 0, zoom = 1 } = frontmatter;
+		const rendering = { frontmatter, number: slideNumber, zoom };
 		const { default: content } = await load<{ default: Component }>(
 			slideModule(slideNumber),
 		);
@@ -370,18 +381,19 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 			render: () =>
 				h(Fragment, [h(layers.SlideBottom), h(content), h(layers.SlideTop)]),
 		};
-		const counted = await renderApp(slideNumber, slide, clicksStart);
+		const counted = await renderApp(rendering, slide, clicksStart);
 		const totalClicks = Math.max(
 			clicksStart,
-			clicks ?? Math.max(0, ...counted.clicksContext.maxMap.values()),
+			frontmatter.clicks ??
+				Math.max(0, ...counted.clicksContext.maxMap.values()),
 		);
 		const { problems } = counted;
 		const states = [];
 		for (let click = clicksStart; click <= totalClicks; click++) {
 			try {
-				states.push(
-					(await renderApp(slideNumber, slide, click, totalClicks)).html,
-				);
+				const state = await renderApp(rendering, slide, click, totalClicks);
+				problems.push(...state.problems);
+				states.push(state.html);
 			} catch (error) {
 				problems.push({
 					click,
@@ -392,11 +404,14 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 			}
 		}
 
+		const globalBottom = await renderApp(rendering, layers.GlobalBottom, 0);
+		const globalTop = await renderApp(rendering, layers.GlobalTop, 0);
+		problems.push(...globalBottom.problems, ...globalTop.problems);
 		return {
 			clicksStart,
-			globalBottom: (await renderApp(slideNumber, layers.GlobalBottom, 0)).html,
-			globalTop: (await renderApp(slideNumber, layers.GlobalTop, 0)).html,
-			problems,
+			globalBottom: globalBottom.html,
+			globalTop: globalTop.html,
+			problems: uniqueProblems(problems),
 			states,
 			zoom,
 		};
@@ -416,7 +431,7 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 				return;
 			}
 
-			const css = VITE_CSS.exec(transformed.code);
+			const css = VITE_CSS_MODULE_SOURCE.exec(transformed.code);
 			if (css) {
 				sheets.push(JSON.parse(css[1]) as string);
 				return;
@@ -436,12 +451,23 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		return sheets;
 	}
 
+	const problems: BuildPptxProblem[] =
+		process.env.NODE_ENV === "production"
+			? [
+					{
+						message:
+							"Couldn't check for components Vue can't resolve, because NODE_ENV is production.",
+						severity: "warning",
+					},
+				]
+			: [];
 	return {
 		close: () => server.close(),
 		globalCss: async () => [
 			...(await collectCss([`${deck.clientRoot}/styles/index.ts`])),
 			themeVariables(config.themeConfig),
 		],
+		problems,
 		publicDir: server.config.publicDir,
 		renderSlide,
 		root: deck.userRoot,
@@ -508,8 +534,44 @@ function markDirective(
 	};
 }
 
-function themeVariables(themeConfig: SlidevThemeConfig = {}) {
+function resolveClickTargets(
+	html: string,
+	targets: ClickTarget[],
+	clicksContext: ClicksContext,
+) {
+	const { document } = parseHTML(
+		`<!doctype html><html><body>${html}</body></html>`,
+	);
+	for (const element of childrenFirst(document.body)) {
+		const indices = element
+			.getAttributeNames()
+			.filter((name) => name.startsWith(CLICK_TARGET_ATTRIBUTE))
+			.map((name) => {
+				element.removeAttribute(name);
+				return Number(name.slice(CLICK_TARGET_ATTRIBUTE.length));
+			})
+			.sort((a, b) => a - b);
+		for (const index of indices) {
+			targets[index](clicksContext, element);
+		}
+	}
+
+	return document.body.innerHTML;
+}
+
+function themeVariables(themeConfig: SlidevThemeConfig) {
 	return `body{${Object.entries(themeConfig)
 		.map(([key, value]) => `--slidev-theme-${key}:${String(value)};`)
 		.join("")}}`;
+}
+
+function uniqueProblems(problems: SlideProblem[]) {
+	return [
+		...new Map(
+			problems.map((problem) => [
+				`${String(problem.click)} ${problem.message}`,
+				problem,
+			]),
+		).values(),
+	];
 }

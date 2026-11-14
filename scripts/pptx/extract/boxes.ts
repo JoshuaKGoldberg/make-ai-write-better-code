@@ -1,7 +1,7 @@
 import type { ComputedStyle } from "../cascade.ts";
-import type { Box, Fill, Gradient } from "../model.ts";
+import type { Box, Canvas, Fill, Shadow } from "../model.ts";
 import type { ExtractContext, ItemInput } from "./context.ts";
-import type { Geometry, Side, Size } from "./geometry.ts";
+import type { Geometry, Side } from "./geometry.ts";
 
 import { cssUrls, imageSize } from "../assets.ts";
 import {
@@ -10,6 +10,7 @@ import {
 	MIN_VISIBLE_ALPHA,
 	parseColor,
 	parseLinearGradient,
+	parseShadows,
 	transparencyOf,
 } from "../color.ts";
 import { splitTopLevel } from "../css.ts";
@@ -28,12 +29,6 @@ import {
 const TILE_COVERAGE_TOLERANCE = 0.5;
 
 type BoxStyle = NonNullable<ReturnType<typeof boxStyle>>;
-
-const gradientFill = (gradient: Gradient): Fill => ({
-	color: gradient.stops[gradient.stops.length - 1].color,
-	gradient,
-	transparency: 0,
-});
 
 export function availableSpanOf(context: ExtractContext, element: Element) {
 	const contentSpan = (current: Element) => {
@@ -101,6 +96,7 @@ export function boxItems(
 			border: layered ? undefined : border,
 			fill: style.fill,
 			key: `${key}#box`,
+			shadow: style.fill && style.shadow && scaledShadow(style.shadow, scale),
 		});
 	}
 
@@ -142,11 +138,16 @@ export function boxStyle(
 	const layers = splitTopLevel(style["background-image"], ",");
 	const gradient =
 		(!color || color.alpha === 0) && layers.length === 1 && !clipsToText(style)
-			? parseLinearGradient(layers[0], opacity, paintedSizeOf(context, element))
+			? parseLinearGradient(
+					layers[0],
+					opacity,
+					paintedSizeOf(context, element),
+					style.color,
+				)
 			: undefined;
 	const fill: Fill | undefined =
 		gradient && hasVisibleStop(gradient)
-			? gradientFill(gradient)
+			? { gradient }
 			: color && color.alpha > MIN_VISIBLE_ALPHA
 				? {
 						color: color.hex,
@@ -189,8 +190,40 @@ export function boxStyle(
 		edges: uniform || !sides.length ? undefined : sides,
 		fill,
 		radius: context.radiusOf(element),
+		shadow: boxShadowOf(context, element, opacity),
 	};
 }
+
+/** An element's most visible outer box-shadow layer, the one with the farthest reach, faded by an opacity. */
+export function boxShadowOf(
+	context: ExtractContext,
+	element: Element,
+	opacity: number,
+) {
+	const style = context.styleOf(element);
+	const reachOf = ({ blur, offsetX, offsetY }: Shadow) =>
+		blur + Math.hypot(offsetX, offsetY);
+	const shadow = parseShadows(
+		style["box-shadow"] ?? "none",
+		(length) => context.resolve(element, length),
+		style.color,
+	)
+		.toSorted((first, second) => reachOf(second) - reachOf(first))
+		.at(0);
+	return (
+		shadow && {
+			...shadow,
+			transparency: transparencyOf(1 - shadow.transparency / 100, opacity),
+		}
+	);
+}
+
+export const scaledShadow = (shadow: Shadow, scale: number) => ({
+	...shadow,
+	blur: shadow.blur * scale,
+	offsetX: shadow.offsetX * scale,
+	offsetY: shadow.offsetY * scale,
+});
 
 export const clipsToText = (style: ComputedStyle) =>
 	(style["-webkit-background-clip"] ?? style["background-clip"]).includes(
@@ -211,9 +244,10 @@ export function paintItems(
 	geometry: Geometry,
 ) {
 	const style = boxStyle(context, element, opacity);
-	const backgrounds = style?.fill?.gradient
-		? []
-		: backgroundItems(context, element, opacity, geometry);
+	const backgrounds =
+		style?.fill && "gradient" in style.fill
+			? []
+			: backgroundItems(context, element, opacity, geometry);
 	if (!backgrounds) {
 		return undefined;
 	}
@@ -249,7 +283,8 @@ function backgroundItems(
 	if (
 		layers.some(
 			(layer) =>
-				isGradient(layer) && !parseLinearGradient(layer, opacity, size),
+				isGradient(layer) &&
+				!parseLinearGradient(layer, opacity, size, style.color),
 		)
 	) {
 		return undefined;
@@ -267,12 +302,12 @@ function backgroundItems(
 	const items: ItemInput[] = [];
 	for (const [index, layer] of [...layers.entries()].toReversed()) {
 		const at = (list: string[]) => list[index % list.length] ?? "";
-		const gradient = parseLinearGradient(layer, opacity, size);
+		const gradient = parseLinearGradient(layer, opacity, size, style.color);
 		if (gradient) {
 			if (hasVisibleStop(gradient)) {
 				items.push({
 					box: border,
-					fill: gradientFill(gradient),
+					fill: { gradient },
 					key: `${key}#background-${String(index)}`,
 					kind: "box",
 					label,
@@ -330,7 +365,7 @@ function backgroundItems(
 function backgroundSize(
 	value: string,
 	area: Box,
-	natural: Size,
+	natural: Canvas,
 	resolve: (length: string, base: number) => number,
 ) {
 	const ratio = natural.width / natural.height;
