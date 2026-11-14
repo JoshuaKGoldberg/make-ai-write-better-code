@@ -15,7 +15,7 @@ import {
 	transparencyOf,
 } from "../color.ts";
 import { splitTopLevel } from "../css.ts";
-import { pathOf } from "./context.ts";
+import { pathOf, showsShadow } from "./context.ts";
 import {
 	edgeBox,
 	fitSize,
@@ -28,9 +28,6 @@ import {
 } from "./geometry.ts";
 
 const TILE_COVERAGE_TOLERANCE = 0.5;
-
-/** PowerPoint fades a shape's shadow by its fill's opacity, so a shadow beneath a fill more transparent than this (0-100) would barely show. */
-const MAX_SHADOWED_FILL_TRANSPARENCY = 50;
 
 type BoxStyle = NonNullable<ReturnType<typeof boxStyle>>;
 
@@ -245,23 +242,6 @@ const shadowLayersOf = (context: ExtractContext, element: Element) => {
 	);
 };
 
-/** Whether PowerPoint shows a shadow beneath a fill: one that's mostly opaque. */
-function showsShadow(fill: Fill | undefined) {
-	if (!fill) {
-		return false;
-	}
-
-	const transparencies =
-		"gradient" in fill
-			? fill.gradient.stops.map(({ transparency }) => transparency)
-			: [fill.transparency];
-	return (
-		transparencies.reduce((sum, transparency) => sum + transparency, 0) /
-			transparencies.length <=
-		MAX_SHADOWED_FILL_TRANSPARENCY
-	);
-}
-
 export const clipsToText = (style: ComputedStyle) =>
 	(style["-webkit-background-clip"] ?? style["background-clip"]).includes(
 		"text",
@@ -293,7 +273,7 @@ export function paintItems(
 		? undefined
 		: boxShadowOf(context, element, opacity);
 	if (shadow) {
-		context.framedShadows.set(element, scaledShadow(shadow, geometry.scale));
+		context.clipShadows.set(element, scaledShadow(shadow, geometry.scale));
 	}
 
 	return [

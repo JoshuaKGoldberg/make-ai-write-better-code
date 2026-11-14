@@ -1032,6 +1032,16 @@ describe(extractState, () => {
 		);
 	});
 
+	it("colors a list's markers when an item's first run is hidden", async () => {
+		const { items } = await extract(
+			`<ul><li><span style="opacity: 0">Revealed</span> then the rest</li></ul>`,
+		);
+
+		expect(items).toContainEqual(
+			expect.objectContaining({ bulletColor: "000000", kind: "list" }),
+		);
+	});
+
 	it("leaves a list's markers uncolored when they match the text", async () => {
 		const { items } = await extract(`<ul><li>text</li></ul>`);
 
@@ -1149,6 +1159,67 @@ describe(extractState, () => {
 		]);
 	});
 
+	it("exports a list's items as marked lists when its grid lays them side by side", async () => {
+		const { items } = await extract(
+			`<ol start="3" style="display: grid; grid-template-columns: 1fr 1fr"><li>A</li><li>B</li></ol>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				key: "ol0/li0#list",
+				kind: "list",
+				paragraphs: [
+					expect.objectContaining({
+						bullet: true,
+						marker: "decimal",
+						number: 3,
+						runs: [expect.objectContaining({ text: "A" })],
+					}),
+				],
+			}),
+			expect.objectContaining({
+				key: "ol0/li1#list",
+				kind: "list",
+				paragraphs: [
+					expect.objectContaining({
+						bullet: true,
+						marker: "decimal",
+						number: 4,
+						runs: [expect.objectContaining({ text: "B" })],
+					}),
+				],
+			}),
+		]);
+	});
+
+	it("exports a flex column's items as one list when hidden items are moved up", async () => {
+		const { items } = await extract(
+			`<ul style="display: flex; flex-direction: column"><li>A</li><li style="translate: 0 -20px; opacity: 0">B</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ key: "ul0#list", kind: "list" }),
+		]);
+	});
+
+	it("renders a list item as a picture when PowerPoint can't draw its background", async () => {
+		const { items } = await extract(
+			`<ul><li style="background-image: radial-gradient(red, blue)">a<pre>code</pre></li><li>b</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ key: "ul0/li0#raster", kind: "raster" }),
+			expect.objectContaining({
+				key: "ul0#list",
+				paragraphs: [
+					expect.objectContaining({
+						runs: [expect.objectContaining({ text: "b" })],
+					}),
+				],
+			}),
+		]);
+	});
+
 	it("exports a list's items as a list when its grid stacks them", async () => {
 		const { items } = await extract(
 			`<ul style="display: grid; gap: 4px"><li>A</li><li>B</li></ul>`,
@@ -1248,6 +1319,26 @@ describe(extractState, () => {
 		]);
 	});
 
+	it("gives a filled box its clip's shadow and corners when it fills a clip with no fill", async () => {
+		const { items } = await extract(
+			`<div style="width: 40px; overflow: hidden; border-radius: 6px; box-shadow: 0 2px 4px blue"><div style="height: 20px; background: white"></div></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "box",
+				radius: 6,
+				shadow: {
+					blur: 4,
+					color: "0000FF",
+					offsetX: 0,
+					offsetY: 2,
+					transparency: 0,
+				},
+			}),
+		]);
+	});
+
 	it("gives a box no shadow when its fill is mostly transparent", async () => {
 		const { items } = await extract(
 			`<div style="width: 10px; height: 10px; background: rgb(0 0 0 / 10%); box-shadow: 0 2px 4px blue"></div>`,
@@ -1319,6 +1410,29 @@ describe(extractState, () => {
 							expect.objectContaining({ text: "2" }),
 							expect.objectContaining({ pad: true }),
 							expect.objectContaining({ text: "second" }),
+						],
+					},
+				],
+			}),
+		]);
+	});
+
+	it("keeps a code line's runs in order when the line wraps", async () => {
+		const { items } = await extract(
+			`<pre style="white-space: pre-wrap; width: 120px"><code><span class="line"><span>const</span><span> veryLongName = </span><span>anotherLongName</span><span>(argument)</span></span></code></pre>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "code",
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ text: "const" }),
+							expect.objectContaining({ text: " " }),
+							expect.objectContaining({ text: "veryLongName = " }),
+							expect.objectContaining({ text: "anotherLongName" }),
+							expect.objectContaining({ text: "(argument)" }),
 						],
 					},
 				],

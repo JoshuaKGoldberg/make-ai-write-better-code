@@ -369,10 +369,12 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 			history: createMemoryHistory(),
 			routes: [{ component: { render: () => null }, path: "/:path(.*)*" }],
 		});
-		await router.push(`/${String(slideNumber)}`);
-		for (const setup of setups) {
-			await app.runWithContext(() => setup({ app, router }));
-		}
+		const settingUp = (async () => {
+			for (const setup of setups) {
+				await app.runWithContext(() => setup({ app, router }));
+			}
+		})();
+		await Promise.all([settingUp, router.push(`/${String(slideNumber)}`)]);
 
 		const html = await renderToString(app);
 		return {

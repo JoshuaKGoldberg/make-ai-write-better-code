@@ -34,7 +34,7 @@ function stylesOf(
 	const pseudosOf = (selector: string) =>
 		computed.pseudos.get(element(selector));
 
-	return { computed, element, of, pseudosOf };
+	return { computed, document, element, of, pseudosOf };
 }
 
 describe(resolveLength, () => {
@@ -714,13 +714,71 @@ describe(computeStyles, () => {
 	it("counts no content when an element isn't displayed", () => {
 		const { computed, element } = stylesOf(
 			`<p>a</p><p style="display: none">b</p><p>c</p>`,
-			`p::before { content: counter(item); counter-increment: item }`,
+			`body { counter-reset: item } p::before { content: counter(item); counter-increment: item }`,
 		);
 		expect(
 			[...element("body").children].map(
 				(paragraph) => computed.pseudos.get(paragraph)?.before?.text,
 			),
 		).toEqual(["1", undefined, "2"]);
+	});
+
+	it("numbers ::before content by list-item when an ol has no markers", () => {
+		const { computed, document } = stylesOf(
+			`<ol><li>a</li><li>b</li></ol>`,
+			`ol { list-style: none } ol li::before { content: counter(list-item) ". " }`,
+		);
+		expect(
+			[...document.querySelectorAll("li")].map(
+				(item) => computed.pseudos.get(item)?.before?.text,
+			),
+		).toEqual(["1. ", "2. "]);
+	});
+
+	it("numbers ::before content by list-item from an ol's start", () => {
+		const { computed, document } = stylesOf(
+			`<ol start="3"><li>a</li><li>b</li></ol>`,
+			`ol { list-style: none } ol li::before { content: counter(list-item) ". " }`,
+		);
+		expect(
+			[...document.querySelectorAll("li")].map(
+				(item) => computed.pseudos.get(item)?.before?.text,
+			),
+		).toEqual(["3. ", "4. "]);
+	});
+
+	it("joins nested counters when content uses counters()", () => {
+		const { computed, document } = stylesOf(
+			`<ol><li>a<ol><li>a1</li><li>a2</li></ol></li><li>b</li></ol>`,
+			`ol { counter-reset: s } li { counter-increment: s } li::before { content: counters(s, ".") " " }`,
+		);
+		expect(
+			[...document.querySelectorAll("li")].map(
+				(item) => computed.pseudos.get(item)?.before?.text,
+			),
+		).toEqual(["1 ", "1.1 ", "1.2 ", "2 "]);
+	});
+
+	it("replaces a counter when a sibling resets it", () => {
+		const { computed, document } = stylesOf(
+			`<h2>a</h2><p>a1</p><h2>b</h2><p>b1</p>`,
+			`h2 { counter-reset: s } p::before { content: counters(s, ".") ; counter-increment: s }`,
+		);
+		expect(
+			[...document.querySelectorAll("p")].map(
+				(paragraph) => computed.pseudos.get(paragraph)?.before?.text,
+			),
+		).toEqual(["1", "1"]);
+	});
+
+	it("counts no pseudo-element when it has no content", () => {
+		const { pseudosOf } = stylesOf(
+			`<p>a</p>`,
+			`p::before { counter-increment: s } p::after { content: counter(s) }`,
+		);
+		expect(pseudosOf("p")).toEqual({
+			after: expect.objectContaining({ text: "0" }),
+		});
 	});
 
 	it("generates no content when the element isn't displayed", () => {

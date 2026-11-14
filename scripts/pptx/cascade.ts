@@ -58,6 +58,9 @@ export interface Viewport {
 	width: number;
 }
 
+/** Each counter's nested instances in scope, outermost first, with the depth of the elements whose counter-reset scopes them. */
+type Counters = Map<string, { depth: number; value: number }[]>;
+
 type KnownProperty = keyof typeof INITIAL;
 
 type PseudoElementName = "after" | "before" | "marker";
@@ -204,10 +207,14 @@ s, strike, del { text-decoration-line: line-through }
 mark { background-color: yellow; color: black }
 ul, menu { list-style-type: disc }
 ol { list-style-type: decimal }
+ol, ul, menu { counter-reset: list-item }
 img, svg, video, canvas { display: inline-block }
 [dir=ltr i] { direction: ltr }
 [dir=rtl i] { direction: rtl }
 `;
+
+/** The counter list items count, which numbers their markers. */
+const LIST_ITEM_COUNTER = "list-item";
 
 const USER_AGENT_LAYER = "<user agent>";
 const USER_AGENT_LAYER_RANK = -1;
@@ -580,7 +587,7 @@ export function computeStyles(
 	const styles = new Map<Element, ComputedStyle>();
 	const markers = new Map<Element, ComputedStyle>();
 	const pseudos: ComputedStyles["pseudos"] = new Map();
-	const counters = new Map<string, number>();
+	const counters: Counters = new Map();
 	const supported = rules.filter((rule) =>
 		isSupported(document, rule.selector),
 	);
@@ -737,7 +744,12 @@ export function computeStyles(
 		return { declared, style: computed };
 	};
 
-	const walk = (element: Element, parent: StyleMap, shown = true) => {
+	const walk = (
+		element: Element,
+		parent: StyleMap,
+		shown = true,
+		depth = 0,
+	) => {
 		const inlineStyle = element.getAttribute("style");
 		const { style } = resolve(
 			parent,
@@ -758,7 +770,7 @@ export function computeStyles(
 
 		const displayed = shown && style.display !== "none";
 		if (displayed) {
-			count(style);
+			count(style, depth);
 		}
 
 		const generates =
@@ -766,26 +778,60 @@ export function computeStyles(
 			!REPLACED_ELEMENTS.has(element.localName) &&
 			element.namespaceURI !== SVG_NAMESPACE;
 		if (generates) {
-			generate(element, style, "before");
+			generate(element, style, "before", depth + 1);
 		}
 
 		for (const child of element.children) {
-			walk(child, style, displayed);
+			walk(child, style, displayed, depth + 1);
 		}
 
 		if (generates) {
-			generate(element, style, "after");
+			generate(element, style, "after", depth + 1);
+		}
+
+		for (const [name, stack] of counters) {
+			const kept = stack.filter((counter) => counter.depth <= depth);
+			if (kept.length) {
+				counters.set(name, kept);
+			} else {
+				counters.delete(name);
+			}
 		}
 	};
 
-	/** Applies a style's counter-reset, then its counter-increment, to the counters in document order (each counter has one scope). */
-	const count = (style: StyleMap) => {
+	/**
+	 * Applies a style's counter-reset, then its counter-increment, to the counters in scope.
+	 * A reset nests a new counter, or replaces a sibling's; its scope ends with its parent's.
+	 * A list item increments `list-item` unless it increments that itself.
+	 */
+	const count = (style: ComputedStyle, depth: number) => {
+		const reset = (name: string, value: number) => {
+			const stack = counters.get(name) ?? [];
+			counters.set(name, [
+				...stack.filter((counter) => counter.depth < depth),
+				{ depth, value },
+			]);
+		};
+
 		for (const [name, value] of counterChanges(style["counter-reset"], 0)) {
-			counters.set(name, value);
+			reset(name, value);
 		}
 
-		for (const [name, value] of counterChanges(style["counter-increment"], 1)) {
-			counters.set(name, (counters.get(name) ?? 0) + value);
+		const increments = counterChanges(style["counter-increment"], 1);
+		if (
+			style.display === "list-item" &&
+			!increments.some(([name]) => name === LIST_ITEM_COUNTER)
+		) {
+			increments.push([LIST_ITEM_COUNTER, 1]);
+		}
+
+		for (const [name, value] of increments) {
+			const counter = counters.get(name)?.at(-1);
+			if (counter) {
+				counter.value += value;
+			} else {
+				reset(name, value);
+			}
 		}
 	};
 
@@ -793,6 +839,7 @@ export function computeStyles(
 		element: Element,
 		style: ComputedStyle,
 		kind: "after" | "before",
+		depth: number,
 	) => {
 		const applying = matching(element, pseudoRules[kind]);
 		if (!applying.length) {
@@ -800,22 +847,29 @@ export function computeStyles(
 		}
 
 		const { declared, style: pseudoStyle } = resolve(style, applying);
-		if (pseudoStyle.display === "none") {
+		const { content } = pseudoStyle;
+		if (
+			pseudoStyle.display === "none" ||
+			!content ||
+			content === "none" ||
+			content === "normal"
+		) {
 			return;
 		}
 
-		count(pseudoStyle);
-		const text = contentText(pseudoStyle.content, element, counters);
-		if (text !== undefined) {
-			const css = declared
-				.filter(({ property }) => !/^(?:content|counter-)/.test(property))
-				.map(({ property, value }) => `${property}:${value}`)
-				.join(";");
-			pseudos.set(element, {
-				...pseudos.get(element),
-				[kind]: { css, style: pseudoStyle, text },
-			});
-		}
+		count(pseudoStyle, depth);
+		const css = declared
+			.filter(({ property }) => !/^(?:content|counter-)/.test(property))
+			.map(({ property, value }) => `${property}:${value}`)
+			.join(";");
+		pseudos.set(element, {
+			...pseudos.get(element),
+			[kind]: {
+				css,
+				style: pseudoStyle,
+				text: contentText(content, element, counters),
+			},
+		});
 	};
 
 	walk(document.documentElement, {});
@@ -903,20 +957,29 @@ function conditionMatches(
 function contentPart(
 	node: csstree.CssNode,
 	element: Element,
-	counters: Map<string, number>,
+	counters: Counters,
 ) {
 	switch (node.type) {
 		case "Function": {
-			const name = node.children.first;
+			const parts = node.children.toArray();
+			const [name, separator] = [parts.at(0), parts.at(2)];
 			if (name?.type !== "Identifier") {
 				return "";
 			}
 
-			return node.name === "attr"
-				? (element.getAttribute(name.name) ?? "")
-				: /^counters?$/.test(node.name)
-					? String(counters.get(name.name) ?? 0)
-					: "";
+			const values = counters.get(name.name)?.map(({ value }) => value) ?? [0];
+			switch (node.name) {
+				case "attr":
+					return element.getAttribute(name.name) ?? "";
+				case "counter":
+					return String(values.at(-1));
+				case "counters":
+					return values.join(
+						separator?.type === "String" ? separator.value : "",
+					);
+				default:
+					return "";
+			}
 		}
 		case "Identifier":
 			return QUOTES[node.name] ?? "";
@@ -927,15 +990,7 @@ function contentPart(
 	}
 }
 
-function contentText(
-	value: string | undefined,
-	element: Element,
-	counters: Map<string, number>,
-) {
-	if (!value || value === "none" || value === "normal") {
-		return undefined;
-	}
-
+function contentText(value: string, element: Element, counters: Counters) {
 	const ast = csstree.parse(value, { context: "value" });
 	const nodes = ast.type === "Value" ? ast.children.toArray() : [];
 	const altTextStart = nodes.findIndex(
@@ -1365,13 +1420,22 @@ function preludeMatches(
 }
 
 function presentationHints(element: Element): CascadeRule[] {
-	const declarations =
+	const start = Number(element.getAttribute("start") ?? NaN);
+	const declarations: Declaration[] =
 		element.namespaceURI === SVG_NAMESPACE
 			? PRESENTATION_ATTRIBUTES.flatMap((property): Declaration[] => {
 					const value = element.getAttribute(property);
 					return value === null ? [] : [{ important: false, property, value }];
 				})
-			: [];
+			: element.localName === "ol" && Number.isInteger(start)
+				? [
+						{
+							important: false,
+							property: "counter-reset",
+							value: `${LIST_ITEM_COUNTER} ${String(start - 1)}`,
+						},
+					]
+				: [];
 	return declarations.length
 		? [
 				{

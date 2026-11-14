@@ -1,7 +1,7 @@
 import type { Assets } from "../assets.ts";
 import type { FontBook } from "../fonts.ts";
 import type { LaidOutRuns, Layout } from "../layout.ts";
-import type { Canvas, ExtractedItem, Shadow } from "../model.ts";
+import type { Canvas, ExtractedItem, Fill, Shadow } from "../model.ts";
 import type { Clip, Insets, Side } from "./geometry.ts";
 
 import {
@@ -47,9 +47,14 @@ type WithoutDerived<Item> = Item extends unknown
 
 export const MIN_OPACITY = 0.05;
 
-/** px an item may fall short of its frame's (clip's) edges and still fill it, for layout rounding, and below it for the line box an inline image leaves. */
-const FRAME_TOLERANCE = 0.5;
-const FRAME_BOTTOM_GAP = 8;
+/** px an item may fall short of its clip's edges and still fill it, for layout rounding. */
+const CLIP_FILL_TOLERANCE = 0.5;
+
+/** px an item may fall short of its clip's bottom and still fill it, for the line box below an inline image. */
+const CLIP_FILL_BOTTOM_GAP = 8;
+
+/** PowerPoint fades a shape's shadow by its fill's opacity, so a shadow beneath a fill more transparent than this (0-100) would barely show. */
+const MAX_SHADOWED_FILL_TRANSPARENCY = 50;
 
 const GENERATED_CONTENT = new Set<string>(Object.values(GENERATED_ELEMENTS));
 
@@ -93,16 +98,20 @@ function clipItem(item: ItemInput, clip: Clip): ItemInput | undefined {
 	}
 
 	const fills =
-		box.x - clip.left < FRAME_TOLERANCE &&
-		box.y - clip.top < FRAME_TOLERANCE &&
-		clip.right - (box.x + box.width) < FRAME_TOLERANCE &&
-		clip.bottom - (box.y + box.height) < FRAME_BOTTOM_GAP;
+		box.x - clip.left < CLIP_FILL_TOLERANCE &&
+		box.y - clip.top < CLIP_FILL_TOLERANCE &&
+		clip.right - (box.x + box.width) < CLIP_FILL_TOLERANCE &&
+		clip.bottom - (box.y + box.height) < CLIP_FILL_BOTTOM_GAP;
 	switch (item.kind) {
 		case "box":
 			return {
 				...item,
 				box,
 				radius: fills ? Math.max(item.radius, clip.radius) : item.radius,
+				shadow:
+					fills && showsShadow(item.fill)
+						? (item.shadow ?? clip.shadow)
+						: item.shadow,
 			};
 		case "code":
 		case "list":
@@ -136,7 +145,7 @@ export function createExtractContext(
 ) {
 	const { boxes, byId, document, looseRuns, markers, runs, styles } = layout;
 	const items: ExtractedItem[] = [];
-	const framedShadows = new Map<Element, Shadow>();
+	const clipShadows = new Map<Element, Shadow>();
 	const problems: string[] = [];
 	const styleOf = (element: Element) => styles.get(element) ?? INITIAL_STYLE;
 	const idOf = (element: Element) => element.getAttribute(ID) ?? "";
@@ -242,7 +251,7 @@ export function createExtractContext(
 	/** The area overflow clips an element to: its ancestors' (from its containing block up, when it's out of flow), and its own too for its content. */
 	const clipOf = (element: Element, ownContent: boolean) => {
 		let clip: Clip | undefined;
-		let escaping: string | undefined;
+		let escaping: "absolute" | "fixed" | undefined;
 		for (
 			let current: Element | null = element;
 			current && current.id !== "slide-content";
@@ -260,7 +269,11 @@ export function createExtractContext(
 			}
 
 			if (containing) {
-				escaping = isOutOfFlow(style) ? style.position : undefined;
+				const { position } = style;
+				escaping =
+					position === "absolute" || position === "fixed"
+						? position
+						: undefined;
 			}
 		}
 
@@ -304,7 +317,7 @@ export function createExtractContext(
 			right: clipsX
 				? Math.min(bounds.right, padding.x + padding.width)
 				: bounds.right,
-			shadow: clip ? clip.shadow : framedShadows.get(element),
+			shadow: clip ? clip.shadow : clipShadows.get(element),
 			top: clipsY ? Math.max(bounds.top, padding.y) : bounds.top,
 		};
 	};
@@ -362,8 +375,8 @@ export function createExtractContext(
 		contentInsets,
 		drawsApart,
 		fonts,
-		/** Shadows of elements whose own boxes can't show them, for an image they frame (clip) to take. */
-		framedShadows,
+		/** Shadows of elements whose own boxes can't show them, for an image or filled box that fills their clip to take. */
+		clipShadows,
 		idOf,
 		isInline,
 		items,
@@ -421,4 +434,21 @@ export function pathOf(element: Element) {
 	}
 
 	return parts.join("/");
+}
+
+/** Whether PowerPoint shows a shadow beneath a fill: one that's mostly opaque. */
+export function showsShadow(fill: Fill | undefined) {
+	if (!fill) {
+		return false;
+	}
+
+	const transparencies =
+		"gradient" in fill
+			? fill.gradient.stops.map(({ transparency }) => transparency)
+			: [fill.transparency];
+	return (
+		transparencies.reduce((sum, transparency) => sum + transparency, 0) /
+			transparencies.length <=
+		MAX_SHADOWED_FILL_TRANSPARENCY
+	);
 }

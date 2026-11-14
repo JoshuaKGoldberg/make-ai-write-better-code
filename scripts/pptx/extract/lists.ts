@@ -6,6 +6,7 @@ import { parseColor } from "../color.ts";
 import { availableSpanOf, paintItems } from "./boxes.ts";
 import { MIN_OPACITY, pathOf } from "./context.ts";
 import { geometryOf, insetBox } from "./geometry.ts";
+import { rasterItem } from "./images.ts";
 import {
 	alignOf,
 	isInvisible,
@@ -35,9 +36,20 @@ export function isTextList(context: ExtractContext, element: Element) {
 		const laidOut = context.boxOf(item);
 		return laidOut ? [geometryOf(laidOut).box] : [];
 	});
-	return boxes.every(
+	return !boxes.some(
 		(box, index) =>
-			index === 0 || box.y >= boxes[index - 1].y + boxes[index - 1].height - 1,
+			index > 0 && box.x >= boxes[index - 1].x + boxes[index - 1].width - 1,
+	);
+}
+
+/** Whether an element is a list item that shows a marker but lays out apart from its list's text, as in a grid. */
+export function isMarkedApart(context: ExtractContext, element: Element) {
+	const list = element.parentElement;
+	return (
+		element.localName === "li" &&
+		hasMarker(context.styleOf(element)) &&
+		(list?.localName === "ol" || list?.localName === "ul") &&
+		!isTextList(context, list)
 	);
 }
 
@@ -48,39 +60,56 @@ export const isListAside = (context: ExtractContext, child: Element) =>
 	!context.isInline(child) &&
 	context.ownRunsOf(child) === undefined;
 
+/** Exports a list as list paragraphs, over its items' paint; returns the items it rendered as images instead, whose content it left out. */
 export function listItem(
 	context: ExtractContext,
 	list: Element,
 	opacity: number,
 ) {
+	const rasterized: Element[] = [];
 	const laidOut = context.boxOf(list);
 	if (!laidOut) {
-		return;
+		return rasterized;
 	}
 
 	for (const item of itemsWithin(context, list)) {
 		const itemBox = context.boxOf(item);
 		const itemOpacity = context.opacityOf(item);
-		if (itemBox && itemOpacity >= MIN_OPACITY) {
-			context.push(
-				item,
-				...(paintItems(context, item, itemOpacity, geometryOf(itemBox)) ?? []),
-			);
+		if (
+			!itemBox ||
+			itemOpacity < MIN_OPACITY ||
+			rasterized.some((raster) => raster.contains(item))
+		) {
+			continue;
+		}
+
+		const paint = paintItems(context, item, itemOpacity, geometryOf(itemBox));
+		if (paint) {
+			context.push(item, ...paint);
+		} else {
+			rasterItem(context, item);
+			rasterized.push(item);
 		}
 	}
 
 	const { box: listBox, scale } = geometryOf(laidOut);
 	const content = insetBox(listBox, context.contentInsets(list), scale);
 	const first = [...list.children].find((child) => child.localName === "li");
-	const marker = first && context.markers.get(first);
-	const markerColor = marker && parseColor(marker.color)?.hex;
 	const styled = first ?? list;
 	const columns = columnsOf(context, list);
 	for (const [index, { items, left, right }] of columns.entries()) {
 		const x = content.x + left - columns[0].left;
 		const box =
 			columns.length > 1 ? { ...content, width: right - x, x } : content;
-		const converted = listParagraphs(context, list, 0, box.x, opacity, items);
+		const converted = listParagraphs(
+			context,
+			list,
+			0,
+			box.x,
+			opacity,
+			rasterized,
+			items,
+		);
 		const paragraphs = converted.map(({ paragraph }) => paragraph);
 		if (isInvisible(paragraphs)) {
 			continue;
@@ -88,16 +117,7 @@ export function listItem(
 
 		context.push(list, {
 			box,
-			bulletColor: paragraphs.some(({ bullet, runs }) => {
-				const first = runs.at(0);
-				return (
-					bullet &&
-					first !== undefined &&
-					(first.pad || first.color !== markerColor)
-				);
-			})
-				? markerColor
-				: undefined,
+			bulletColor: bulletColorOf(context, first, paragraphs),
 			key: `${pathOf(list)}#list${index ? `-${String(index)}` : ""}`,
 			kind: "list",
 			paragraphs,
@@ -116,6 +136,61 @@ export function listItem(
 			},
 		});
 	}
+
+	return rasterized;
+}
+
+/** A list item that lays out apart from its list's text, as one list paragraph with its marker. */
+export function markedItem(
+	context: ExtractContext,
+	item: Element,
+	entry: TextRuns,
+) {
+	const laidOut = context.boxOf(item);
+	const list = item.parentElement;
+	if (!laidOut || !list) {
+		return;
+	}
+
+	const { box, scale } = geometryOf(laidOut);
+	const style = context.styleOf(item);
+	const items = itemsOf(list).filter((sibling) => context.boxOf(sibling));
+	const { baselines, left, right, runs, wrapRight } = runsToParagraph(
+		context,
+		entry,
+		item,
+	);
+	const paragraphs = [
+		{
+			baselines,
+			bullet: true,
+			indent: left - box.x,
+			level: 0,
+			marker: style["list-style-type"],
+			number: ordinalsOf(list, items)[items.indexOf(item)],
+			runs,
+			visible: true,
+		},
+	];
+	if (isInvisible(paragraphs)) {
+		return;
+	}
+
+	context.push(item, {
+		box,
+		bulletColor: bulletColorOf(context, item, paragraphs),
+		key: `${pathOf(item)}#list`,
+		kind: "list",
+		paragraphs,
+		style: {
+			align: alignOf(context, item),
+			available: availableSpanOf(context, item),
+			lineHeight: lineHeightOf(style) * scale,
+			nowrap: false,
+			rtl: isRightToLeft(context, item),
+			wrapWidth: wrapRight === undefined ? undefined : right - box.x,
+		},
+	});
 }
 
 export function ordinalsOf(list: Element, items: Element[]) {
@@ -160,6 +235,26 @@ function columnsOf(context: ExtractContext, list: Element) {
 	return columns;
 }
 
+/** The marker color a list needs written, which PowerPoint otherwise takes from each paragraph's first run: when a marked paragraph's first run is a spacer, or shows unlike the marker. */
+function bulletColorOf(
+	context: ExtractContext,
+	item: Element | undefined,
+	paragraphs: ListParagraph[],
+) {
+	const marker = item && context.markers.get(item);
+	const color = marker && parseColor(marker.color)?.hex;
+	return paragraphs.some(({ bullet, runs }) => {
+		const first = runs.at(0);
+		return (
+			bullet &&
+			first !== undefined &&
+			(first.pad || first.transparency > 0 || first.color !== color)
+		);
+	})
+		? color
+		: undefined;
+}
+
 const itemsOf = (list: Element) =>
 	[...list.children].filter((child) => child.localName === "li");
 
@@ -200,12 +295,13 @@ function listParagraphs(
 	level: number,
 	textLeft: number,
 	opacity: number,
+	rasterized: Element[],
 	shown = itemsOf(list),
 ): { paragraph: ListParagraph; right: number; wrapped: boolean }[] {
 	const items = itemsOf(list).filter((item) => context.boxOf(item));
 	const numbers = ordinalsOf(list, items);
 	return items.flatMap((item, index) => {
-		if (!shown.includes(item)) {
+		if (!shown.includes(item) || rasterized.includes(item)) {
 			return [];
 		}
 
@@ -226,6 +322,7 @@ function listParagraphs(
 					level + 1,
 					textLeft,
 					opacity,
+					rasterized,
 				);
 			}
 

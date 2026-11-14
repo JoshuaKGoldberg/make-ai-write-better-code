@@ -9,7 +9,13 @@ import {
 } from "./extract/context.ts";
 import { geometryOf } from "./extract/geometry.ts";
 import { imageItem, rasterItem } from "./extract/images.ts";
-import { isListAside, isTextList, listItem } from "./extract/lists.ts";
+import {
+	isListAside,
+	isMarkedApart,
+	isTextList,
+	listItem,
+	markedItem,
+} from "./extract/lists.ts";
 import { svgItems } from "./extract/svg.ts";
 import { codeItem, inlinePills, textItem } from "./extract/text.ts";
 import { isBackgroundOnly } from "./layout.ts";
@@ -126,16 +132,23 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 		) {
 			rasterItem(context, element);
 		} else if (isTextList(context, element)) {
-			listItem(context, element, opacity);
+			const rasterized = listItem(context, element, opacity);
 			walkApart(
 				element,
-				(child) => context.drawsApart(child) || isListAside(context, child),
+				(child) =>
+					!rasterized.some((raster) => raster.contains(child)) &&
+					(context.drawsApart(child) || isListAside(context, child)),
 			);
 		} else {
 			const entry = context.ownRunsOf(element);
 			if (entry) {
 				inlinePills(context, element, entry);
-				textItem(context, element, entry);
+				if (isMarkedApart(context, element)) {
+					markedItem(context, element, entry);
+				} else {
+					textItem(context, element, entry);
+				}
+
 				walkApart(element);
 				return;
 			}

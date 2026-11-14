@@ -229,7 +229,7 @@ describe(createSlideRenderer, () => {
 
 	it("renders what the deck's setup and floating-vue register, at the slide's route, when the setup awaits the router", async () => {
 		expect((await renderSlideTitled("Deck Setup")).states[0]).toContain(
-			'<p>Registered in setup at /20</p><p class="themed">Themed</p><p><span>Tipped</span></p>',
+			'<p>Registered in setup at /20 after navigating to /20</p><p class="themed">Themed</p><p><span>Tipped</span></p>',
 		);
 	});
 

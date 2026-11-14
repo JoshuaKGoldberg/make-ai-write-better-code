@@ -69,7 +69,10 @@ export function codeItem(context: ExtractContext, pre: Element) {
 		.map((entry) => ({ ...entry, rect: runRect(entry.frame, entry.run) }))
 		.toSorted(
 			(first, second) =>
-				first.index - second.index || first.rect.x - second.rect.x,
+				first.index - second.index ||
+				(Math.abs(first.rect.y - second.rect.y) > first.rect.height / 2
+					? first.rect.y - second.rect.y
+					: first.rect.x - second.rect.x),
 		)) {
 		const style = runStyle(context, owner, context.opacityOf(owner));
 		const pad = padRun(context, style, rect.x - (ends[index] ?? content.x));
