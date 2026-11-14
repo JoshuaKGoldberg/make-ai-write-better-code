@@ -6,10 +6,14 @@
  */
 import * as csstree from "css-tree";
 
+import type { Declaration } from "./css.ts";
+
+import { declarationsOf, parseDeclarations, splitTopLevel } from "./css.ts";
+
 export interface CascadeOptions {
 	/** Which `prefers-color-scheme` media queries match. */
-	colorScheme?: "dark" | "light";
-	viewport?: Viewport;
+	colorScheme: "dark" | "light";
+	viewport: Viewport;
 }
 
 export interface CascadeRule {
@@ -17,14 +21,14 @@ export interface CascadeRule {
 	/** The rule's cascade layer's precedence: higher wins for normal declarations, lower for !important. */
 	layer: number;
 	order: number;
-	/** Rules for pseudo-elements are kept apart from the element's own rules. */
+	/** The pseudo-element the rule styles, if any. */
 	pseudo?: Pseudo;
 	selector: string;
 	specificity: number;
 }
 
 /** A ::before or ::after pseudo-element with generated content. */
-export interface PseudoElement {
+interface PseudoElement {
 	/** Its declarations (variables resolved), in cascade order, as an inline style. */
 	css: string;
 	style: ComputedStyle;
@@ -45,10 +49,21 @@ export interface ComputedStyles {
 	styles: Map<Element, ComputedStyle>;
 }
 
-interface Declaration {
-	important?: boolean;
-	prop: string;
-	value: string;
+/** What lengths resolve against, in px. */
+export interface LengthContext {
+	/** The font size `em` resolves against. */
+	fontSize: number;
+	/** The size percentages resolve against. */
+	percentBase?: number;
+	/** The root element's font size, which `rem` resolves against. */
+	rootFontSize: number;
+	viewport: Viewport;
+}
+
+/** The viewport lengths resolve against: the slide canvas, as Slidev exports it. */
+export interface Viewport {
+	height: number;
+	width: number;
 }
 
 type KnownProperty = "line-height-px" | keyof typeof INITIAL;
@@ -60,8 +75,6 @@ const INHERITED = new Set([
 	"-webkit-text-stroke-color",
 	"-webkit-text-stroke-width",
 	"color",
-	"cursor",
-	"direction",
 	"dominant-baseline",
 	"fill",
 	"font-family",
@@ -71,8 +84,8 @@ const INHERITED = new Set([
 	"letter-spacing",
 	"line-height",
 	"list-style-type",
-	"paint-order",
 	"stroke",
+	"stroke-width",
 	"text-align",
 	"text-anchor",
 	"text-shadow",
@@ -137,9 +150,11 @@ const INITIAL = {
 	zoom: "1",
 } as const satisfies Record<string, string>;
 
-/** Lengths normalized to px once an element's font size is known. */
+const INITIAL_VALUES: StyleMap = INITIAL;
+
 const BORDER_WIDTHS: StyleMap = { medium: "3px", thick: "5px", thin: "1px" };
 
+/** Lengths normalized to px once an element's font size is known. */
 const LENGTHS = [
 	"-webkit-text-stroke-width",
 	"border-bottom-width",
@@ -189,7 +204,13 @@ const BORDER_STYLES = new Set([
 	"ridge",
 	"solid",
 ]);
-const KEYWORD_SIZES: Record<string, number> = {
+const CSS_WIDE_KEYWORDS = new Set([
+	"initial",
+	"revert",
+	"revert-layer",
+	"unset",
+]);
+const KEYWORD_SIZES: Partial<Record<string, number>> = {
 	large: 18,
 	medium: 16,
 	small: 13,
@@ -197,116 +218,180 @@ const KEYWORD_SIZES: Record<string, number> = {
 	"x-small": 10,
 	"xx-large": 32,
 };
-const RELATIVE_SIZES: Record<string, number> = { larger: 1.2, smaller: 0.833 };
+const RELATIVE_SIZES: Partial<Record<string, number>> = {
+	larger: 1.2,
+	smaller: 0.833,
+};
+const NORMAL_LINE_HEIGHT = 1.2;
 const SIDES = ["top", "right", "bottom", "left"] as const;
-const DEFAULT_VIEWPORT: Viewport = { height: 552, width: 980 };
+const UNITLESS = /^[\d.]+$/;
 
 /** Elements that can't have ::before or ::after content. */
 const REPLACED = new Set([
-	"BR",
-	"CANVAS",
-	"HR",
-	"IFRAME",
-	"IMG",
-	"INPUT",
-	"SELECT",
-	"svg",
-	"TEXTAREA",
-	"VIDEO",
+	"br",
+	"canvas",
+	"hr",
+	"iframe",
+	"img",
+	"input",
+	"select",
+	"textarea",
+	"video",
 ]);
+
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+/** SVG attributes that set the CSS property of the same name, below every author rule. */
+const PRESENTATION_ATTRIBUTES = [
+	"display",
+	"dominant-baseline",
+	"fill",
+	"font-family",
+	"font-size",
+	"font-style",
+	"font-weight",
+	"opacity",
+	"stop-color",
+	"stop-opacity",
+	"stroke",
+	"stroke-width",
+	"text-anchor",
+	"visibility",
+];
+
+const LEGACY_PSEUDO_ELEMENTS = new Set([
+	"after",
+	"before",
+	"first-letter",
+	"first-line",
+]);
+
+const CONDITIONAL_RULES = new Set(["container", "media", "supports"]);
+const SCREEN_MEDIA_TYPES = new Set(["all", "screen"]);
+
+const COMPARISONS: Record<string, (left: number, right: number) => boolean> = {
+	"<": (left, right) => left < right,
+	"<=": (left, right) => left <= right,
+	"=": (left, right) => left === right,
+	">": (left, right) => left > right,
+	">=": (left, right) => left >= right,
+};
+
+const ID_WEIGHT = 1e6;
+const CLASS_WEIGHT = 1e3;
+const TYPE_WEIGHT = 1;
+
+const ABSOLUTE_UNITS: Partial<Record<string, number>> = {
+	"": 1,
+	cm: 96 / 2.54,
+	in: 96,
+	mm: 96 / 25.4,
+	pc: 16,
+	pt: 96 / 72,
+	px: 1,
+	q: 96 / 101.6,
+};
+const FONT_UNITS: Partial<Record<string, number>> = {
+	cap: 0.7,
+	ch: 0.6,
+	em: 1,
+	ex: 0.5,
+};
+const VIEWPORT_UNITS: Record<string, (viewport: Viewport) => number> = {
+	vb: ({ height }) => height,
+	vh: ({ height }) => height,
+	vi: ({ width }) => width,
+	vmax: ({ height, width }) => Math.max(width, height),
+	vmin: ({ height, width }) => Math.min(width, height),
+	vw: ({ width }) => width,
+};
+
+const LENGTH_SOURCE = String.raw`(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(rem|em|ex|ch|cap|px|pt|pc|in|cm|mm|q|%|[sld]?v(?:min|max|[whib]))?`;
+const LENGTH = new RegExp(`^${LENGTH_SOURCE}$`, "i");
+const LENGTHS_IN_TEXT = new RegExp(LENGTH_SOURCE, "gi");
+const MATH_FUNCTION = /^(?:calc|min|max|clamp)\(/;
+const VAR = /var\(\s*(--[\w-]+)\s*(?:,((?:[^()]|\([^()]*\))*))?\)/g;
 
 const isPseudo = (value: string): value is Pseudo =>
 	value === "after" || value === "before" || value === "marker";
 
-const initial = (key: string): string | undefined =>
-	key in INITIAL ? INITIAL[key as keyof typeof INITIAL] : undefined;
+const isLength = (value: string) =>
+	LENGTH.test(value) || MATH_FUNCTION.test(value);
+
+const isPseudoElement = (
+	node: csstree.CssNode,
+): node is csstree.PseudoClassSelector | csstree.PseudoElementSelector =>
+	node.type === "PseudoElementSelector" ||
+	(node.type === "PseudoClassSelector" &&
+		LEGACY_PSEUDO_ELEMENTS.has(node.name));
+
+const pixels = (value: number) => `${String(value)}px`;
 
 /** The computed style of an element no rule applies to. */
 export const INITIAL_STYLE: ComputedStyle = {
 	...INITIAL,
-	"line-height-px": "19.2",
+	"line-height-px": String(16 * NORMAL_LINE_HEIGHT),
 };
 
 /** Parses stylesheets (after the user-agent defaults) into an ordered rule list. */
-export function createCascade(
-	sheets: string[],
-	{ colorScheme = "light", viewport = DEFAULT_VIEWPORT }: CascadeOptions = {},
-): CascadeRule[] {
-	const rules: (CascadeRule & { layerName: string })[] = [];
+export function createCascade(sheets: string[], environment: CascadeOptions) {
+	const rules: (Omit<CascadeRule, "layer"> & { layerName: string })[] = [];
 	let order = 0;
-	// Layer names in the order they're first declared; "" holds unlayered rules.
 	const layers: string[] = [];
 	let anonymous = 0;
 	const declareLayer = (name: string) => {
 		const parts = name.split(".");
-		for (let i = 1; i <= parts.length; i++) {
-			const prefix = parts.slice(0, i).join(".");
+		for (let index = 1; index <= parts.length; index++) {
+			const prefix = parts.slice(0, index).join(".");
 			if (!layers.includes(prefix)) {
 				layers.push(prefix);
 			}
 		}
 	};
 
-	const visitRule = (rule: csstree.Rule, layerName: string) => {
-		const declarations: Declaration[] = [];
-		rule.block.children.forEach((node) => {
-			if (node.type !== "Declaration") {
-				return;
-			}
-
-			const value =
-				node.value.type === "Raw"
-					? node.value.value
-					: csstree.generate(node.value);
-			declarations.push({
-				important: Boolean(node.important),
-				prop: node.property.toLowerCase(),
-				value: value.trim(),
-			});
-		});
-		if (!declarations.length) {
+	const visitRule = (rule: csstree.Rule, layerName: string, scope?: string) => {
+		const declarations = declarationsOf(rule.block.children);
+		if (!declarations.length || rule.prelude.type !== "SelectorList") {
 			return;
 		}
 
-		for (const selector of splitTopLevel(csstree.generate(rule.prelude), ",")) {
-			const pseudo =
-				/::?(marker|before|after|placeholder|selection|backdrop|-webkit-[\w-]+|first-letter|first-line)\b/.exec(
-					selector,
-				);
-			const kind = pseudo?.[1];
-			if (kind !== undefined && !isPseudo(kind)) {
-				continue;
+		rule.prelude.children.forEach((selector) => {
+			if (selector.type !== "Selector") {
+				return;
 			}
 
-			const base = pseudo
-				? selector.replace(pseudo[0], "").trim() || "*"
-				: selector.trim();
-			let weight: number;
-			try {
-				weight = specificity(selector.trim());
-			} catch {
-				continue;
+			const nodes = selector.children.toArray();
+			const pseudoElement = nodes.find(isPseudoElement);
+			const pseudo = pseudoElement?.name;
+			if (pseudo !== undefined && !isPseudo(pseudo)) {
+				return;
 			}
 
+			const base =
+				nodes
+					.filter((node) => node !== pseudoElement)
+					.map((node) => csstree.generate(node))
+					.join("")
+					.trim() || "*";
 			rules.push({
 				declarations,
-				layer: 0,
 				layerName,
 				order: order++,
-				pseudo: kind,
-				selector: base,
-				specificity: weight,
+				pseudo,
+				selector: scope ? scoped(base, scope) : base,
+				specificity: specificity(selector),
 			});
-		}
+		});
 	};
 
 	const visitBlock = (
 		children: csstree.List<csstree.CssNode>,
 		layerName: string,
+		scope?: string,
 	) => {
 		children.forEach((node) => {
 			if (node.type === "Rule") {
-				visitRule(node, layerName);
+				visitRule(node, layerName, scope);
 				return;
 			}
 
@@ -315,13 +400,11 @@ export function createCascade(
 			}
 
 			const name = node.name.toLowerCase();
-			const prelude = node.prelude ? csstree.generate(node.prelude) : "";
 			if (name === "layer") {
-				const names = prelude
-					.split(",")
-					.map((part) => part.trim())
-					.filter(Boolean)
-					.map((part) => (layerName ? `${layerName}.${part}` : part));
+				const names = splitTopLevel(
+					node.prelude ? csstree.generate(node.prelude) : "",
+					",",
+				).map((part) => (layerName ? `${layerName}.${part}` : part));
 				if (!node.block) {
 					names.forEach(declareLayer);
 					return;
@@ -331,19 +414,25 @@ export function createCascade(
 					names[0] ??
 					`${layerName ? `${layerName}.` : ""}<anonymous ${String(anonymous++)}>`;
 				declareLayer(nested);
-				visitBlock(node.block.children, nested);
+				visitBlock(node.block.children, nested, scope);
 				return;
 			}
 
 			if (
 				!node.block ||
-				(name === "media" && !mediaMatches(prelude, viewport, colorScheme))
+				(name === "media" && !mediaMatches(node.prelude, environment))
 			) {
 				return;
 			}
 
-			if (["container", "media", "scope", "supports"].includes(name)) {
-				visitBlock(node.block.children, layerName);
+			if (name === "scope") {
+				visitBlock(
+					node.block.children,
+					layerName,
+					scopeRoot(node.prelude) ?? scope,
+				);
+			} else if (CONDITIONAL_RULES.has(name)) {
+				visitBlock(node.block.children, layerName, scope);
 			}
 		});
 	};
@@ -358,21 +447,23 @@ export function createCascade(
 		}
 	}
 
-	// A layer's own rules beat its sublayers', and later layers beat earlier ones; unlayered
-	// rules beat every layer.
-	const ranked = [...layers].sort((a, b) => {
-		const pa = a.split(".");
-		const pb = b.split(".");
-		for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
-			if (pa[i] !== pb[i]) {
-				const prefix = pa.slice(0, i).join(".");
-				const ia = layers.indexOf(prefix ? `${prefix}.${pa[i]}` : pa[i]);
-				const ib = layers.indexOf(prefix ? `${prefix}.${pb[i]}` : pb[i]);
-				return ia - ib;
+	const ranked = layers.toSorted((first, second) => {
+		const firstParts = first.split(".");
+		const secondParts = second.split(".");
+		for (
+			let index = 0;
+			index < Math.min(firstParts.length, secondParts.length);
+			index++
+		) {
+			if (firstParts[index] !== secondParts[index]) {
+				return (
+					layers.indexOf(firstParts.slice(0, index + 1).join(".")) -
+					layers.indexOf(secondParts.slice(0, index + 1).join("."))
+				);
 			}
 		}
 
-		return pb.length - pa.length;
+		return secondParts.length - firstParts.length;
 	});
 	return rules.map(({ layerName, ...rule }) => ({
 		...rule,
@@ -384,29 +475,39 @@ export function createCascade(
 export function computeStyles(
 	document: Document,
 	rules: CascadeRule[],
-	{
-		rootFontSize = 16,
-		viewport = DEFAULT_VIEWPORT,
-	}: { rootFontSize?: number; viewport?: Viewport } = {},
-): ComputedStyles {
+	{ viewport }: { viewport: Viewport },
+) {
 	const styles = new Map<Element, ComputedStyle>();
 	const markers = new Map<Element, ComputedStyle>();
 	const pseudos: ComputedStyles["pseudos"] = new Map();
-	const pseudoRules = new Set(rules.map((rule) => rule.pseudo));
+	const supported = rules.filter((rule) =>
+		isSupported(document, rule.selector),
+	);
+	const rulesFor = (pseudo: Pseudo | undefined) =>
+		supported.filter((rule) => rule.pseudo === pseudo);
+	const elementRules = rulesFor(undefined);
+	const pseudoRules = {
+		after: rulesFor("after"),
+		before: rulesFor("before"),
+		marker: rulesFor("marker"),
+	};
+	let rootFontSize = 16;
 	const length = (value: string, fontSize: number, percentBase = 0) =>
-		toPx(value, fontSize, rootFontSize, percentBase, viewport);
-
-	const matched = (el: Element, pseudo: CascadeRule["pseudo"]) =>
-		rules.filter(
-			(rule) => rule.pseudo === pseudo && matches(el, rule.selector),
-		);
+		resolveLength(value, { fontSize, percentBase, rootFontSize, viewport });
+	const matching = (element: Element, candidates: CascadeRule[]) =>
+		candidates.filter((rule) => element.matches(rule.selector));
+	const byPrecedence =
+		(layerOrder: -1 | 1) => (first: CascadeRule, second: CascadeRule) =>
+			layerOrder * (first.layer - second.layer) ||
+			first.specificity - second.specificity ||
+			first.order - second.order;
 
 	const resolve = (
-		el: Element,
+		element: Element,
 		parent: StyleMap,
-		pseudo?: CascadeRule["pseudo"],
-		declaredOut?: string[],
-	): ComputedStyle => {
+		applying: CascadeRule[],
+		pseudo = false,
+	) => {
 		const style: StyleMap = {};
 		for (const [key, value] of Object.entries(parent)) {
 			if (INHERITED.has(key) || key.startsWith("--")) {
@@ -414,42 +515,27 @@ export function computeStyles(
 			}
 		}
 
-		// Declarations in cascade order (later wins). Inline styles beat normal rules,
-		// and !important beats both.
-		const normal: Declaration[] = [];
-		const important: Declaration[] = [];
-		const applying = matched(el, pseudo);
-		const byPrecedence = (layer: -1 | 1) => (a: CascadeRule, b: CascadeRule) =>
-			layer * (a.layer - b.layer) ||
-			a.specificity - b.specificity ||
-			a.order - b.order;
-		for (const rule of applying.toSorted(byPrecedence(1))) {
-			normal.push(...rule.declarations.filter((d) => !d.important));
-		}
+		const inlineStyle = pseudo ? null : element.getAttribute("style");
+		const inline = inlineStyle ? parseDeclarations(inlineStyle) : [];
+		const ordered = [
+			...(pseudo ? [] : presentationHints(element)),
+			...applying
+				.toSorted(byPrecedence(1))
+				.flatMap((rule) =>
+					rule.declarations.filter((declaration) => !declaration.important),
+				),
+			...inline.filter((declaration) => !declaration.important),
+			...applying
+				.toSorted(byPrecedence(-1))
+				.flatMap((rule) =>
+					rule.declarations.filter((declaration) => declaration.important),
+				),
+			...inline.filter((declaration) => declaration.important),
+		];
 
-		for (const rule of applying.toSorted(byPrecedence(-1))) {
-			important.push(...rule.declarations.filter((d) => d.important));
-		}
-
-		const inline = pseudo ? null : el.getAttribute("style");
-		if (inline) {
-			for (const declaration of splitTopLevel(inline, ";")) {
-				const colon = declaration.indexOf(":");
-				if (colon >= 0) {
-					normal.push({
-						prop: declaration.slice(0, colon).trim().toLowerCase(),
-						value: declaration.slice(colon + 1).trim(),
-					});
-				}
-			}
-		}
-
-		const ordered = [...normal, ...important];
-
-		// Custom properties first, so other values can use them; shorthands expand after var().
-		for (const declaration of ordered) {
-			if (declaration.prop.startsWith("--")) {
-				style[declaration.prop] = declaration.value;
+		for (const { property, value } of ordered) {
+			if (property.startsWith("--")) {
+				style[property] = value;
 			}
 		}
 
@@ -459,75 +545,59 @@ export function computeStyles(
 			}
 		}
 
+		const declared: Declaration[] = [];
 		const raw: StyleMap = {};
 		for (const declaration of ordered) {
-			if (!declaration.prop.startsWith("--")) {
-				const value = resolveVars(declaration.value, style);
-				Object.assign(raw, expand(declaration.prop, value));
-				if (declaration.prop !== "content") {
-					declaredOut?.push(`${declaration.prop}:${value}`);
-				}
+			if (!declaration.property.startsWith("--")) {
+				const value = resolveVars(declaration.value, style) ?? "unset";
+				Object.assign(raw, expand(declaration.property, value));
+				declared.push({ ...declaration, value });
 			}
 		}
 
 		for (const [key, value = ""] of Object.entries(raw)) {
-			const keyword = value.trim();
-			if (keyword === "inherit") {
-				style[key] = parent[key] ?? initial(key);
-			} else if (["initial", "revert", "unset"].includes(keyword)) {
-				style[key] =
-					INHERITED.has(key) && keyword !== "initial"
-						? parent[key]
-						: initial(key);
-			} else {
-				style[key] = keyword;
-			}
+			const inherits =
+				value === "inherit" ||
+				(INHERITED.has(key) && (value === "unset" || value === "revert"));
+			style[key] = inherits
+				? (parent[key] ?? INITIAL_VALUES[key])
+				: CSS_WIDE_KEYWORDS.has(value)
+					? INITIAL_VALUES[key]
+					: value;
 		}
 
-		// Font size first: em units elsewhere depend on it.
-		const parentSize = parseFloat(parent["font-size"] ?? "") || rootFontSize;
-		const fontSize =
-			style["font-size"] === undefined || raw["font-size"] === undefined
-				? parentSize
-				: resolveFontSize(style["font-size"], parentSize, (value) =>
-						length(value, parentSize),
-					);
-		style["font-size"] = `${String(fontSize)}px`;
+		const parentSize = parseFloat(parent["font-size"] ?? INITIAL["font-size"]);
+		const fontSize = resolveFontSize(
+			style["font-size"] ?? INITIAL["font-size"],
+			parentSize,
+			(value) => length(value, parentSize, parentSize),
+		);
+		style["font-size"] = pixels(fontSize);
+		style["font-weight"] = resolveWeight(
+			style["font-weight"] ?? INITIAL["font-weight"],
+			Number(parent["font-weight"] ?? INITIAL["font-weight"]),
+		);
+
+		const letterSpacing = style["letter-spacing"];
+		if (letterSpacing !== undefined && letterSpacing !== "normal") {
+			style["letter-spacing"] = pixels(length(letterSpacing, fontSize));
+		}
+
+		const lineHeight = style["line-height"];
 		if (
-			style["font-weight"] !== undefined &&
-			raw["font-weight"] !== undefined
+			lineHeight !== undefined &&
+			lineHeight !== "normal" &&
+			!UNITLESS.test(lineHeight)
 		) {
-			style["font-weight"] = resolveWeight(
-				style["font-weight"],
-				Number(parent["font-weight"] ?? 400),
-			);
+			style["line-height"] = pixels(length(lineHeight, fontSize, fontSize));
 		}
 
-		if (
-			style["letter-spacing"] !== undefined &&
-			raw["letter-spacing"] !== undefined &&
-			style["letter-spacing"] !== "normal"
-		) {
-			style["letter-spacing"] =
-				`${String(length(style["letter-spacing"], fontSize))}px`;
-		}
-
-		const lineHeightValue = style["line-height"];
-		if (lineHeightValue !== undefined && raw["line-height"] !== undefined) {
-			// Unitless line heights inherit as factors; lengths inherit as px.
-			style["line-height"] =
-				lineHeightValue === "normal" || /^[\d.]+$/.test(lineHeightValue)
-					? lineHeightValue
-					: `${String(length(lineHeightValue, fontSize, fontSize))}px`;
-		}
-
-		const computed = {
+		const computed: ComputedStyle = {
 			...INITIAL,
 			...style,
 			"line-height-px": "",
-		} as ComputedStyle;
+		};
 
-		// Flex and grid items, floats, and absolutely positioned elements are blockified.
 		if (
 			(/flex|grid/.test(parent.display ?? "") ||
 				/^(?:absolute|fixed)$/.test(computed.position ?? "") ||
@@ -546,7 +616,7 @@ export function computeStyles(
 				BORDER_WIDTHS[value] ??
 				(value.endsWith("%") || value === "auto"
 					? value
-					: `${String(length(value, fontSize))}px`);
+					: pixels(length(value, fontSize)));
 		}
 
 		for (const side of SIDES) {
@@ -555,56 +625,166 @@ export function computeStyles(
 			}
 		}
 
-		const lineHeight = computed["line-height"];
-		computed["line-height-px"] = String(
-			lineHeight === "normal"
-				? fontSize * 1.2
-				: /^[\d.]+$/.test(lineHeight)
-					? Number(lineHeight) * fontSize
-					: length(lineHeight, fontSize, fontSize),
-		);
-		return computed;
+		computed["line-height-px"] = String(lineHeightOf(computed));
+		return { declared, style: computed };
 	};
 
-	const walk = (el: Element, parent: StyleMap) => {
-		const style = resolve(el, parent);
-		styles.set(el, style);
-		if (el.tagName === "LI") {
-			markers.set(el, resolve(el, style, "marker"));
+	const walk = (element: Element, parent: StyleMap) => {
+		const { style } = resolve(element, parent, matching(element, elementRules));
+		styles.set(element, style);
+		if (element === document.documentElement) {
+			rootFontSize = parseFloat(style["font-size"]);
 		}
 
-		if (style.display !== "none" && !REPLACED.has(el.tagName)) {
+		if (element.localName === "li") {
+			markers.set(
+				element,
+				resolve(element, style, matching(element, pseudoRules.marker), true)
+					.style,
+			);
+		}
+
+		if (
+			style.display !== "none" &&
+			!REPLACED.has(element.localName) &&
+			element.namespaceURI !== SVG_NAMESPACE
+		) {
 			for (const kind of ["before", "after"] as const) {
-				if (!pseudoRules.has(kind) || !matched(el, kind).length) {
+				const applying = matching(element, pseudoRules[kind]);
+				if (!applying.length) {
 					continue;
 				}
 
-				const declared: string[] = [];
-				const pseudoStyle = resolve(el, style, kind, declared);
-				const text = contentText(pseudoStyle.content, el);
+				const { declared, style: pseudoStyle } = resolve(
+					element,
+					style,
+					applying,
+					true,
+				);
+				const text = contentText(pseudoStyle.content, element);
 				if (text !== undefined && pseudoStyle.display !== "none") {
-					pseudos.set(el, {
-						...pseudos.get(el),
-						[kind]: { css: declared.join(";"), style: pseudoStyle, text },
+					const css = declared
+						.filter(({ property }) => property !== "content")
+						.map(({ property, value }) => `${property}:${value}`)
+						.join(";");
+					pseudos.set(element, {
+						...pseudos.get(element),
+						[kind]: { css, style: pseudoStyle, text },
 					});
 				}
 			}
 		}
 
-		for (const child of el.children) {
+		for (const child of element.children) {
 			walk(child, style);
 		}
 	};
 
-	walk(document.documentElement, { "font-size": `${String(rootFontSize)}px` });
+	walk(document.documentElement, {});
 	return { markers, pseudos, styles };
 }
 
-/** The text a pseudo-element's `content` generates, or undefined when it generates none. */
-export function contentText(
+/** An element's line height in px, from its computed font size and line height. */
+export function lineHeightOf(style: ComputedStyle) {
+	const fontSize = parseFloat(style["font-size"]);
+	const lineHeight = style["line-height"];
+	return lineHeight === "normal"
+		? fontSize * NORMAL_LINE_HEIGHT
+		: UNITLESS.test(lineHeight)
+			? Number(lineHeight) * fontSize
+			: parseFloat(lineHeight);
+}
+
+/** Resolves a length, or a `calc()`, `min()`, `max()`, or `clamp()` expression, to px. */
+export function resolveLength(
 	value: string | undefined,
-	el: Element,
-): string | undefined {
+	{ fontSize, percentBase = 0, rootFontSize, viewport }: LengthContext,
+) {
+	const text = (value ?? "").trim().toLowerCase();
+	if (!text || ["auto", "none", "normal"].includes(text)) {
+		return 0;
+	}
+
+	const toPixels = (amount: string, unit: string) => {
+		const number = Number(amount);
+		const absolute = ABSOLUTE_UNITS[unit];
+		const relative = FONT_UNITS[unit];
+		return absolute !== undefined
+			? number * absolute
+			: relative !== undefined
+				? number * relative * fontSize
+				: unit === "rem"
+					? number * rootFontSize
+					: unit === "%"
+						? (number / 100) * percentBase
+						: (number / 100) *
+							VIEWPORT_UNITS[unit.replace(/^[sld]/, "")](viewport);
+	};
+
+	if (MATH_FUNCTION.test(text) || /[+*/]|\s-\s/.test(text)) {
+		const expression = text.replace(
+			LENGTHS_IN_TEXT,
+			(_: string, amount: string, unit?: string) =>
+				String(toPixels(amount, unit ?? "")),
+		);
+		return /^(?:[\d\s.e+\-*/(),]|calc|min|max|clamp)+$/.test(expression)
+			? evaluateArithmetic(expression)
+			: 0;
+	}
+
+	const match = LENGTH.exec(text);
+	return match ? toPixels(match[1], match.at(2) ?? "") : 0;
+}
+
+/** Resolves a length to px, like {@link resolveLength} with positional context. */
+export function toPx(
+	value: string | undefined,
+	fontSize: number,
+	rootFontSize = 16,
+	percentBase = 0,
+	viewport: Viewport = { height: 0, width: 0 },
+) {
+	return resolveLength(value, {
+		fontSize,
+		percentBase,
+		rootFontSize,
+		viewport,
+	});
+}
+
+/** Unescapes a CSS string's escapes, like "\\2192 " for an arrow. */
+export function unescapeCss(value: string) {
+	return value.replace(
+		/\\(?:([\da-f]{1,6})\s?|(\n)|(.))/gi,
+		(_, hex?: string, newline?: string, character?: string) =>
+			hex
+				? String.fromCodePoint(parseInt(hex, 16))
+				: newline
+					? ""
+					: (character ?? ""),
+	);
+}
+
+function conditionMatches(
+	condition: csstree.Condition,
+	environment: CascadeOptions,
+): boolean {
+	const terms = condition.children.toArray();
+	const operator = terms.find(
+		(term): term is csstree.Identifier => term.type === "Identifier",
+	)?.name;
+	const results = terms
+		.filter((term) => term.type !== "Identifier")
+		.map((term) => termMatches(term, environment));
+	return operator === "not"
+		? !results[0]
+		: operator === "or"
+			? results.some(Boolean)
+			: results.every(Boolean);
+}
+
+/** The text a pseudo-element's `content` generates, or undefined when it generates none. */
+function contentText(value: string | undefined, element: Element) {
 	const content = value?.trim() ?? "";
 	if (!content || content === "none" || content === "normal") {
 		return undefined;
@@ -615,7 +795,6 @@ export function contentText(
 		/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[\w-]+\([^)]*\)|open-quote|close-quote|\//g,
 	)) {
 		if (token === "/") {
-			// Alternative text for screen readers follows a slash.
 			break;
 		}
 
@@ -623,168 +802,72 @@ export function contentText(
 			text += unescapeCss(token.slice(1, -1));
 		} else if (token.startsWith("attr(")) {
 			const name = token.slice(5, -1).trim().split(/[\s,]/)[0];
-			text += el.getAttribute(name) ?? "";
+			text += element.getAttribute(name) ?? "";
 		} else if (token === "open-quote") {
-			text += "\u201C";
+			text += "“";
 		} else if (token === "close-quote") {
-			text += "\u201D";
+			text += "”";
 		}
 	}
 
 	return text;
 }
 
-/** Unescapes a CSS string's escapes, like "\\2192 " for an arrow. */
-export function unescapeCss(value: string) {
-	return value.replace(
-		/\\(?:([\da-f]{1,6})\s?|(\n)|(.))/gi,
-		(_, hex?: string, newline?: string, char?: string) =>
-			hex
-				? String.fromCodePoint(parseInt(hex, 16))
-				: newline
-					? ""
-					: (char ?? ""),
-	);
-}
-
-/** The viewport lengths resolve against: the slide canvas, as Slidev exports it. */
-export interface Viewport {
-	height: number;
-	width: number;
-}
-
-const LENGTH =
-	/(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(rem|em|ex|ch|cap|px|pt|pc|in|cm|mm|q|%|[sld]?v(?:min|max|[whib]))?/gi;
-
-/** Resolves a length, or a `calc()`, `min()`, `max()`, or `clamp()` expression, to px. */
-export function toPx(
-	value: string | undefined,
-	fontSize: number,
-	rootFontSize = 16,
-	percentBase = 0,
-	viewport: Viewport = { height: 0, width: 0 },
-): number {
-	const v = (value ?? "").trim().toLowerCase();
-	if (!v || ["auto", "none", "normal"].includes(v)) {
-		return 0;
-	}
-
-	const unit = (n: string, u: string) => {
-		const num = Number(n);
-		switch (u) {
-			case "":
-			case "px":
-				return num;
-			case "%":
-				return (num / 100) * percentBase;
-			case "cap":
-				return num * fontSize * 0.7;
-			case "ch":
-				return num * fontSize * 0.6;
-			case "cm":
-				return (num * 96) / 2.54;
-			case "em":
-				return num * fontSize;
-			case "ex":
-				return num * fontSize * 0.5;
-			case "in":
-				return num * 96;
-			case "mm":
-				return (num * 96) / 25.4;
-			case "pc":
-				return num * 16;
-			case "pt":
-				return (num * 96) / 72;
-			case "q":
-				return (num * 96) / 101.6;
-			case "rem":
-				return num * rootFontSize;
-		}
-
-		// Viewport units, with small, large, and dynamic viewports all the canvas.
-		const axis = u.replace(/^[sld]/, "");
-		const size =
-			axis === "vw" || axis === "vi"
-				? viewport.width
-				: axis === "vh" || axis === "vb"
-					? viewport.height
-					: axis === "vmin"
-						? Math.min(viewport.width, viewport.height)
-						: Math.max(viewport.width, viewport.height);
-		return (num / 100) * size;
-	};
-
-	if (/^(?:calc|min|max|clamp)\(/.test(v) || /[+*/]|\s-\s/.test(v)) {
-		const expression = v.replace(LENGTH, (_: string, n: string, u?: string) =>
-			String(unit(n, u ?? "")),
-		);
-		return /^(?:[\d\s.e+\-*/(),]|calc|min|max|clamp)+$/.test(expression)
-			? evaluateArithmetic(expression)
-			: 0;
-	}
-
-	const match =
-		/^(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(rem|em|ex|ch|cap|px|pt|pc|in|cm|mm|q|%|[sld]?v(?:min|max|[whib]))?$/i.exec(
-			v,
-		);
-	return match ? unit(match[1], (match.at(2) ?? "").toLowerCase()) : 0;
-}
-
 /** Evaluates + - * /, parentheses, and calc(), min(), max(), and clamp() over numbers. */
-function evaluateArithmetic(expression: string): number {
+function evaluateArithmetic(expression: string) {
 	const tokens =
 		expression.match(
 			/(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|calc|min|max|clamp|[+\-*/(),]/g,
 		) ?? [];
-	let i = 0;
+	let index = 0;
 	const args = (): number[] => {
-		i++; // (
+		index++;
 		const values = [sum()];
-		while (tokens[i] === ",") {
-			i++;
+		while (tokens[index] === ",") {
+			index++;
 			values.push(sum());
 		}
 
-		i++; // )
+		index++;
 		return values;
 	};
 
 	const factor = (): number => {
-		const token = tokens[i];
+		const token = tokens[index];
 		switch (token) {
 			case "(": {
-				i++;
+				index++;
 				const value = sum();
-				i++;
+				index++;
 				return value;
 			}
 			case "-":
-				i++;
+				index++;
 				return -factor();
 			case "calc":
-				i++;
+				index++;
 				return args()[0] ?? 0;
 			case "clamp": {
-				i++;
+				index++;
 				const [low = 0, value = 0, high = 0] = args();
 				return Math.max(low, Math.min(value, high));
 			}
 			case "max":
-				i++;
+				index++;
 				return Math.max(...args());
 			case "min":
-				i++;
+				index++;
 				return Math.min(...args());
 			default:
-				i++;
+				index++;
 				return Number(token);
 		}
 	};
 
 	const product = (): number => {
 		let value = factor();
-		while (tokens[i] === "*" || tokens[i] === "/") {
-			value = tokens[i++] === "*" ? value * factor() : value / factor();
+		while (tokens[index] === "*" || tokens[index] === "/") {
+			value = tokens[index++] === "*" ? value * factor() : value / factor();
 		}
 
 		return value;
@@ -792,8 +875,8 @@ function evaluateArithmetic(expression: string): number {
 
 	const sum = (): number => {
 		let value = product();
-		while (tokens[i] === "+" || tokens[i] === "-") {
-			value = tokens[i++] === "+" ? value + product() : value - product();
+		while (tokens[index] === "+" || tokens[index] === "-") {
+			value = tokens[index++] === "+" ? value + product() : value - product();
 		}
 
 		return value;
@@ -804,34 +887,38 @@ function evaluateArithmetic(expression: string): number {
 }
 
 /** Expands the shorthands decks commonly use into the longhands the exporter reads. */
-function expand(prop: string, value: string): StyleMap {
-	switch (prop) {
+function expand(property: string, value: string): StyleMap {
+	switch (property) {
 		case "-webkit-text-stroke": {
-			const parts = splitTopLevel(value, " ");
+			const [width, color = "currentcolor"] = splitTopLevel(value, " ");
 			return {
-				"-webkit-text-stroke-color": parts.at(1) ?? "currentcolor",
-				"-webkit-text-stroke-width": parts.at(0),
+				"-webkit-text-stroke-color": color,
+				"-webkit-text-stroke-width": width,
 			};
 		}
 		case "background":
 			return expandBackground(value);
 		case "border":
-			return Object.assign(
-				{},
-				...SIDES.map((side) => expandBorder(`border-${side}`, value)),
-			) as StyleMap;
+			return Object.fromEntries(
+				SIDES.flatMap((side) =>
+					Object.entries(expandBorder(`border-${side}`, value)),
+				),
+			);
 		case "border-bottom":
 		case "border-left":
 		case "border-right":
 		case "border-top":
-			return expandBorder(prop, value);
+			return expandBorder(property, value);
 		case "border-color":
 		case "border-style":
 		case "border-width":
-			return expandSides(prop.replace("-", "-*-"), value);
+			return expandSides(property.replace("-", "-*-"), value);
 		case "border-radius":
 			return {
-				"border-top-left-radius": splitTopLevel(value.split("/")[0], " ")[0],
+				"border-top-left-radius": splitTopLevel(
+					splitTopLevel(value, "/")[0] ?? "",
+					" ",
+				)[0],
 			};
 		case "columns": {
 			const count = splitTopLevel(value, " ").find((part) =>
@@ -839,22 +926,8 @@ function expand(prop: string, value: string): StyleMap {
 			);
 			return count ? { "column-count": count } : {};
 		}
-		case "font": {
-			const match =
-				/(?:(\d{3}|bold|normal)\s+)?([\d.]+(?:px|rem|em|%))(?:\s*\/\s*([\w.%]+))?\s+(.+)/.exec(
-					value,
-				);
-			if (!match) {
-				return {};
-			}
-
-			return {
-				"font-family": match[4],
-				"font-size": match[2],
-				...(match[1] ? { "font-weight": match[1] } : {}),
-				...(match[3] ? { "line-height": match[3] } : {}),
-			};
-		}
+		case "font":
+			return expandFont(value);
 		case "inset":
 			return expandSides("*", value);
 		case "list-style":
@@ -866,16 +939,16 @@ function expand(prop: string, value: string): StyleMap {
 			};
 		case "margin":
 		case "padding":
-			return expandSides(`${prop}-*`, value);
+			return expandSides(`${property}-*`, value);
 		case "text-decoration":
 			return { "text-decoration-line": splitTopLevel(value, " ")[0] };
 		default:
-			return { [prop]: value };
+			return { [property]: value };
 	}
 }
 
 /** Expands the `background` shorthand's layers into their images, positions, sizes, repeats, and color. */
-function expandBackground(value: string): StyleMap {
+function expandBackground(value: string) {
 	const images: string[] = [];
 	const positions: string[] = [];
 	const sizes: string[] = [];
@@ -887,7 +960,6 @@ function expandBackground(value: string): StyleMap {
 		const size: string[] = [];
 		const repeat: string[] = [];
 		let afterSlash = false;
-		// A slash between position and size may have no spaces around it.
 		const spaced = splitTopLevel(layer, "/").join(" / ");
 		for (const part of splitTopLevel(spaced, " ")) {
 			if (part === "/") {
@@ -902,17 +974,15 @@ function expandBackground(value: string): StyleMap {
 			} else if (/^(?:repeat(?:-[xy])?|no-repeat|space|round)$/.test(part)) {
 				repeat.push(part);
 			} else if (
-				/^(?:scroll|fixed|local|(?:border|padding|content)-box|text)$/.test(
-					part,
-				)
-			) {
-				// Attachment, origin, and clip don't change a static export.
-			} else if (
 				/^(?:left|right|top|bottom|center|cover|contain|auto)$/.test(part) ||
 				/^(?:-?[\d.]|calc\()/.test(part)
 			) {
 				(afterSlash ? size : position).push(part);
-			} else {
+			} else if (
+				!/^(?:scroll|fixed|local|(?:border|padding|content)-box|text)$/.test(
+					part,
+				)
+			) {
 				color = part;
 			}
 		}
@@ -935,75 +1005,172 @@ function expandBackground(value: string): StyleMap {
 }
 
 /** Expands one side's border shorthand (e.g. `border-top`) into its width, style, and color. */
-function expandBorder(prefix: string, value: string): StyleMap {
-	const out: StyleMap = {
+function expandBorder(prefix: string, value: string) {
+	const longhands: StyleMap = {
 		[`${prefix}-color`]: "currentcolor",
 		[`${prefix}-style`]: "none",
 		[`${prefix}-width`]: "medium",
 	};
 	for (const part of splitTopLevel(value, " ")) {
 		if (BORDER_STYLES.has(part)) {
-			out[`${prefix}-style`] = part;
-		} else if (/^[\d.]+(?:px|rem|em)?$|^(?:thin|medium|thick)$/.test(part)) {
-			out[`${prefix}-width`] = part;
+			longhands[`${prefix}-style`] = part;
+		} else if (isLength(part) || part in BORDER_WIDTHS) {
+			longhands[`${prefix}-width`] = part;
 		} else {
-			out[`${prefix}-color`] = part;
+			longhands[`${prefix}-color`] = part;
 		}
 	}
 
-	return out;
+	return longhands;
 }
 
-function expandSides(pattern: string, value: string): StyleMap {
+function expandFont(value: string): StyleMap {
+	const parts = splitTopLevel(splitTopLevel(value, "/").join(" / "), " ");
+	const sizeIndex = parts.findIndex(
+		(part) => isLength(part) || part in KEYWORD_SIZES || part in RELATIVE_SIZES,
+	);
+	if (sizeIndex < 0) {
+		return {};
+	}
+
+	const modifiers = parts.slice(0, sizeIndex);
+	const lineHeight =
+		parts[sizeIndex + 1] === "/" ? parts[sizeIndex + 2] : undefined;
+	return {
+		"font-family": parts
+			.slice(sizeIndex + (lineHeight === undefined ? 1 : 3))
+			.join(" "),
+		"font-size": parts[sizeIndex],
+		"font-style":
+			modifiers.find((part) => /^(?:italic|oblique)$/.test(part)) ?? "normal",
+		"font-weight":
+			modifiers.find((part) => /^(?:bold|bolder|lighter|\d+)$/.test(part)) ??
+			"normal",
+		"line-height": lineHeight ?? "normal",
+	};
+}
+
+function expandSides(pattern: string, value: string) {
 	const [top, right = top, bottom = top, left = right] = splitTopLevel(
 		value,
 		" ",
 	);
 	return Object.fromEntries(
-		[top, right, bottom, left].map((side, i) => [
-			pattern.replace("*", SIDES[i]),
+		[top, right, bottom, left].map((side, index) => [
+			pattern.replace("*", SIDES[index]),
 			side,
 		]),
 	);
 }
 
-function matches(el: Element, selector: string) {
+function featureMatches(
+	{ name, value }: csstree.Feature,
+	{ colorScheme, viewport }: CascadeOptions,
+) {
+	const text = value ? csstree.generate(value) : undefined;
+	switch (name) {
+		case "orientation":
+			return (
+				text === (viewport.width >= viewport.height ? "landscape" : "portrait")
+			);
+		case "prefers-color-scheme":
+			return text === colorScheme;
+		case "prefers-reduced-motion":
+			return text !== "reduce";
+	}
+
+	const [, bound, dimension] =
+		/^(?:(min|max)-)?(width|height)$/.exec(name) ?? [];
+	if (!dimension || text === undefined) {
+		return true;
+	}
+
+	const size = dimension === "width" ? viewport.width : viewport.height;
+	const limit = mediaLength(text, viewport);
+	return bound === "min"
+		? size >= limit
+		: bound === "max"
+			? size <= limit
+			: size === limit;
+}
+
+function isSupported(document: Document, selector: string) {
 	try {
-		return el.matches(selector);
+		document.documentElement.matches(selector);
+		return true;
 	} catch {
 		return false;
 	}
 }
 
+function mediaLength(value: string, viewport: Viewport) {
+	return resolveLength(value, { fontSize: 16, rootFontSize: 16, viewport });
+}
+
 function mediaMatches(
-	prelude: string,
-	viewport: Viewport,
-	colorScheme: "dark" | "light",
+	prelude: csstree.AtrulePrelude | csstree.Raw | null,
+	environment: CascadeOptions,
 ) {
-	const text = prelude.toLowerCase();
-	const scheme = /prefers-color-scheme:\s*(dark|light)/.exec(text)?.[1];
-	if (
-		(text.includes("print") && !/screen|all/.test(text)) ||
-		(scheme && scheme !== colorScheme) ||
-		/prefers-reduced-motion:\s*reduce/.test(text)
-	) {
-		return false;
+	if (!prelude) {
+		return true;
 	}
 
-	for (const match of text.matchAll(
-		/(min|max)-(width|height):\s*([\d.]+)(px|r?em)/g,
-	)) {
-		const limit = Number(match[3]) * (match[4] === "px" ? 1 : 16);
-		const size = match[2] === "width" ? viewport.width : viewport.height;
-		if (match[1] === "min" ? size < limit : size > limit) {
-			return false;
-		}
-	}
-
-	const orientation = /orientation:\s*(landscape|portrait)/.exec(text)?.[1];
+	const list = prelude.type === "AtrulePrelude" ? prelude.children.first : null;
 	return (
-		!orientation ||
-		(orientation === "landscape") === viewport.width >= viewport.height
+		list?.type === "MediaQueryList" &&
+		list.children
+			.toArray()
+			.some(
+				(query) =>
+					query.type === "MediaQuery" && queryMatches(query, environment),
+			)
+	);
+}
+
+function presentationHints(element: Element) {
+	if (element.namespaceURI !== SVG_NAMESPACE) {
+		return [];
+	}
+
+	return PRESENTATION_ATTRIBUTES.flatMap((property): Declaration[] => {
+		const value = element.getAttribute(property);
+		return value === null ? [] : [{ important: false, property, value }];
+	});
+}
+
+function queryMatches(
+	{ condition, mediaType, modifier }: csstree.MediaQuery,
+	environment: CascadeOptions,
+) {
+	const matches =
+		(!mediaType || SCREEN_MEDIA_TYPES.has(mediaType.toLowerCase())) &&
+		(!condition || conditionMatches(condition, environment));
+	return modifier === "not" ? !matches : matches;
+}
+
+function rangeMatches(
+	{
+		left,
+		leftComparison,
+		middle,
+		right,
+		rightComparison,
+	}: csstree.FeatureRange,
+	{ viewport }: CascadeOptions,
+) {
+	const operand = (node: csstree.CssNode) =>
+		node.type === "Identifier"
+			? node.name === "width"
+				? viewport.width
+				: node.name === "height"
+					? viewport.height
+					: NaN
+			: mediaLength(csstree.generate(node), viewport);
+	return (
+		COMPARISONS[leftComparison](operand(left), operand(middle)) &&
+		(!right ||
+			!rightComparison ||
+			COMPARISONS[rightComparison](operand(middle), operand(right)))
 	);
 }
 
@@ -1012,43 +1179,41 @@ function resolveFontSize(
 	parentSize: number,
 	length: (value: string) => number,
 ) {
-	if (value in KEYWORD_SIZES) {
-		return KEYWORD_SIZES[value];
-	}
-
-	if (value in RELATIVE_SIZES) {
-		return parentSize * RELATIVE_SIZES[value];
-	}
-
-	if (value.endsWith("%")) {
-		return (parseFloat(value) / 100) * parentSize;
-	}
-
-	if (value.endsWith("em") && !value.endsWith("rem")) {
-		return parseFloat(value) * parentSize;
-	}
-
-	return length(value);
+	const relative = RELATIVE_SIZES[value];
+	return (
+		KEYWORD_SIZES[value] ??
+		(relative === undefined ? length(value) : parentSize * relative)
+	);
 }
 
-function resolveVars(value: string, style: StyleMap, depth = 0): string {
-	if (depth > 20 || !value.includes("var(")) {
+/** Substitutes var() references, or returns undefined when one is invalid at computed-value time. */
+function resolveVars(
+	value: string,
+	style: StyleMap,
+	depth = 0,
+): string | undefined {
+	if (!value.includes("var(")) {
 		return value;
 	}
 
-	// Innermost var() first, so fallbacks can contain var().
-	const out = value.replace(
-		/var\(\s*(--[\w-]+)\s*(?:,((?:[^()]|\([^()]*\))*))?\)/g,
-		(_: string, name: string, fallback: string | undefined) => {
-			const resolved = style[name];
-			if (resolved) {
-				return resolved;
-			}
+	if (
+		depth > 20 ||
+		[...value.matchAll(VAR)].some(
+			(reference) =>
+				style[reference[1]] === undefined && reference.at(2) === undefined,
+		)
+	) {
+		return undefined;
+	}
 
-			return fallback?.trim() ?? "";
-		},
+	const substituted = value.replace(
+		VAR,
+		(_: string, name: string, fallback: string | undefined) =>
+			style[name] ?? fallback?.trim() ?? "",
 	);
-	return out === value ? out : resolveVars(out, style, depth + 1);
+	return substituted === value
+		? substituted
+		: resolveVars(substituted, style, depth + 1);
 }
 
 function resolveWeight(value: string, parentWeight: number) {
@@ -1056,9 +1221,9 @@ function resolveWeight(value: string, parentWeight: number) {
 		case "bold":
 			return "700";
 		case "bolder":
-			return parentWeight < 600 ? "700" : "900";
+			return parentWeight < 350 ? "400" : parentWeight < 550 ? "700" : "900";
 		case "lighter":
-			return "300";
+			return parentWeight < 550 ? "100" : parentWeight < 750 ? "400" : "700";
 		case "normal":
 			return "400";
 		default:
@@ -1066,105 +1231,82 @@ function resolveWeight(value: string, parentWeight: number) {
 	}
 }
 
-function specificity(selector: string): number {
-	let ids = 0;
-	let classes = 0;
-	let types = 0;
-	csstree.walk(
-		csstree.parse(selector, { context: "selector" }),
-		function (node) {
-			switch (node.type) {
-				case "AttributeSelector":
-				case "ClassSelector":
-					classes++;
-					break;
-				case "IdSelector":
-					ids++;
-					break;
-				case "PseudoClassSelector": {
-					if (node.name === "where") {
-						return this.skip;
-					}
-
-					if (["has", "is", "not"].includes(node.name) && node.children) {
-						// The specificity of the most specific argument.
-						let best = 0;
-						node.children.forEach((child) => {
-							csstree.walk(child, (inner) => {
-								if (inner.type === "Selector") {
-									best = Math.max(best, specificity(csstree.generate(inner)));
-								}
-							});
-						});
-						ids += Math.floor(best / 1e6);
-						classes += Math.floor((best % 1e6) / 1e3);
-						types += best % 1e3;
-						return this.skip;
-					}
-
-					classes++;
-					break;
-				}
-				case "PseudoElementSelector":
-					types++;
-					break;
-				case "TypeSelector":
-					if (node.name !== "*") {
-						types++;
-					}
-
-					break;
-			}
-
-			return undefined;
-		},
-	);
-	return ids * 1e6 + classes * 1e3 + types;
+function scoped(selector: string, scope: string) {
+	return selector.includes(":scope")
+		? selector.replaceAll(":scope", `:where(${scope})`)
+		: `:where(${scope}) ${selector}`;
 }
 
-/** Splits on a separator outside parentheses and strings (" " splits on any whitespace). */
-function splitTopLevel(value: string, separator: string): string[] {
-	const out: string[] = [];
-	let depth = 0;
-	let quote = "";
-	let escaped = false;
-	let current = "";
-	for (const ch of value.trim()) {
-		if (quote) {
-			current += ch;
-			if (escaped) {
-				escaped = false;
-			} else if (ch === "\\") {
-				escaped = true;
-			} else if (ch === quote) {
-				quote = "";
+function scopeRoot(prelude: csstree.AtrulePrelude | csstree.Raw | null) {
+	const scope =
+		prelude?.type === "AtrulePrelude" ? prelude.children.first : null;
+	return scope?.type === "Scope" && scope.root
+		? csstree.generate(scope.root)
+		: undefined;
+}
+
+function specificity(selector: csstree.CssNode) {
+	let weight = 0;
+	csstree.walk(selector, function (node) {
+		switch (node.type) {
+			case "AttributeSelector":
+			case "ClassSelector":
+				weight += CLASS_WEIGHT;
+				break;
+			case "IdSelector":
+				weight += ID_WEIGHT;
+				break;
+			case "PseudoClassSelector": {
+				if (LEGACY_PSEUDO_ELEMENTS.has(node.name)) {
+					weight += TYPE_WEIGHT;
+					break;
+				}
+
+				if (node.name === "where") {
+					return this.skip;
+				}
+
+				if (["has", "is", "not"].includes(node.name) && node.children) {
+					const selectors = node.children
+						.toArray()
+						.flatMap((child) =>
+							child.type === "SelectorList" ? child.children.toArray() : [],
+						);
+					weight += Math.max(0, ...selectors.map(specificity));
+					return this.skip;
+				}
+
+				weight += CLASS_WEIGHT;
+				break;
 			}
+			case "PseudoElementSelector":
+				weight += TYPE_WEIGHT;
+				break;
+			case "TypeSelector":
+				if (node.name !== "*") {
+					weight += TYPE_WEIGHT;
+				}
 
-			continue;
+				break;
 		}
 
-		if (ch === '"' || ch === "'") {
-			quote = ch;
-		} else if (ch === "(") {
-			depth++;
-		} else if (ch === ")") {
-			depth--;
-		}
+		return undefined;
+	});
+	return weight;
+}
 
-		if (depth === 0 && (separator === " " ? /\s/.test(ch) : ch === separator)) {
-			if (current) {
-				out.push(current);
-			}
-
-			current = "";
-		} else {
-			current += ch;
-		}
+function termMatches(
+	term: csstree.CssNode,
+	environment: CascadeOptions,
+): boolean {
+	switch (term.type) {
+		case "Condition":
+			return conditionMatches(term, environment);
+		case "Feature":
+			return featureMatches(term, environment);
+		case "FeatureRange":
+			return rangeMatches(term, environment);
+		default:
+			return false;
 	}
-
-	if (current) {
-		out.push(current);
-	}
-
-	return out;
 }

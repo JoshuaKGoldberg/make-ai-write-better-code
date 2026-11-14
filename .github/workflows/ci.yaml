@@ -7,6 +7,18 @@ jobs:
       - uses: ./.github/actions/prepare
       - run: pnpm build
 
+  build_pptx:
+    name: Build PowerPoint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/prepare
+      - run: pnpm build:pptx
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: make-ai-write-better-code.pptx
+          path: dist/make-ai-write-better-code.pptx
+
   dedupe_check:
     name: Dedupe Check
     runs-on: ubuntu-latest
@@ -61,7 +73,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/prepare

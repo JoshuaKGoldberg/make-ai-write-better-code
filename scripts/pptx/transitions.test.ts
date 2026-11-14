@@ -3,28 +3,59 @@ import { describe, expect, it } from "vitest";
 import { transitionInto, transitionXml } from "./transitions.ts";
 
 describe(transitionInto, () => {
-	const slides = [
-		{ frontmatter: { transition: "fade" } },
-		{ frontmatter: { transition: "slide-up | slide-down" } },
-		{ frontmatter: {} },
-		{ frontmatter: { transition: { name: "none" } } },
-		{ frontmatter: {} },
-	];
 	const config = { transition: "view-transition" };
 
-	it("plays nothing into the first slide", () => {
-		expect(transitionInto(1, slides, config)).toBeUndefined();
+	it("plays nothing when the slide is the first", () => {
+		expect(transitionInto(1, [{ frontmatter: {} }], config)).toBeUndefined();
 	});
 
-	it("uses the previous slide's transition, forward half", () => {
-		expect(transitionInto(2, slides, config)).toBe("fade");
-		expect(transitionInto(3, slides, config)).toBe("slide-up");
-		expect(transitionInto(5, slides, config)).toBe("none");
+	it("uses the previous slide's transition when it has one", () => {
+		expect(
+			transitionInto(
+				2,
+				[{ frontmatter: { transition: "fade" } }, { frontmatter: {} }],
+				config,
+			),
+		).toBe("fade");
 	});
 
-	it("falls back to the deck's transition", () => {
-		expect(transitionInto(4, slides, config)).toBe("view-transition");
-		expect(transitionInto(4, slides, {})).toBeUndefined();
+	it("uses the forward half when the transition is a pair", () => {
+		expect(
+			transitionInto(
+				2,
+				[{ frontmatter: { transition: "slide-up | slide-down" } }],
+				config,
+			),
+		).toBe("slide-up");
+	});
+
+	it("plays nothing when the pair's forward half is empty", () => {
+		expect(
+			transitionInto(2, [{ frontmatter: { transition: " | fade" } }], config),
+		).toBeUndefined();
+	});
+
+	it("reads the name when the transition is an object", () => {
+		expect(
+			transitionInto(
+				2,
+				[{ frontmatter: { transition: { name: "none" } } }],
+				config,
+			),
+		).toBe("none");
+	});
+
+	it.each([[undefined], [false], [""]])(
+		"uses the deck's transition when the previous slide's is %j",
+		(transition) => {
+			expect(transitionInto(2, [{ frontmatter: { transition } }], config)).toBe(
+				"view-transition",
+			);
+		},
+	);
+
+	it("plays nothing when neither the slide nor the deck has a transition", () => {
+		expect(transitionInto(2, [{ frontmatter: {} }], {})).toBeUndefined();
 	});
 });
 
@@ -40,7 +71,7 @@ describe(transitionXml, () => {
 		["slide-left", '<p:transition spd="fast"><p:push dir="l"/></p:transition>'],
 		["slide-down", '<p:transition spd="fast"><p:push dir="d"/></p:transition>'],
 		["my-custom", '<p:transition spd="fast"><p:fade/></p:transition>'],
-	])("writes %s", (name, xml) => {
+	])("writes %j as %j", (name, xml) => {
 		expect(transitionXml(name)).toBe(xml);
 	});
 });

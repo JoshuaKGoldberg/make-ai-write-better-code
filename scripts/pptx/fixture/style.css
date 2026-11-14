@@ -15,8 +15,13 @@
 .layer-loses {
 	color: teal;
 }
+@font-face {
+	font-family: "Fixture Sans";
+	src: url("./fonts/league-spartan.woff2") format("woff2-variations");
+	font-weight: 100 900;
+}
 .slidev-layout {
-	font-family: Georgia, serif;
+	font-family: "Fixture Sans", sans-serif;
 }
 .chip {
 	background: hsl(210deg 80% 45%);
@@ -61,4 +66,25 @@
 	width: 160px;
 	height: 80px;
 	object-fit: cover;
+}
+.ring {
+	display: inline-block;
+}
+.gradient {
+	background: linear-gradient(-300deg, red, blue);
+	width: 120px;
+	height: 1rem;
+}
+.faint {
+	background: rgb(255 0 0 / 2.5%);
+	width: 120px;
+	height: 1rem;
+}
+.invisible {
+	color: transparent;
+}
+.rounded {
+	width: 60px;
+	height: 60px;
+	border-radius: 12px;
 }

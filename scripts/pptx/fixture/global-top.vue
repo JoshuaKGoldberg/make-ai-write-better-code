@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useNav } from "@slidev/client";
-const { currentPage, total, currentLayout } = useNav();
+const { currentLayout, currentPage, total } = useNav();
 </script>
 
 <template>
@@ -14,6 +14,6 @@ const { currentPage, total, currentLayout } = useNav();
 	bottom: 8px;
 	font-size: 12px;
 	color: slategray;
-	font-family: Georgia, serif;
+	font-family: "Fixture Sans", sans-serif;
 }
 </style>

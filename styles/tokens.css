@@ -1,9 +1,5 @@
-/*
-Design tokens ported from joshuakgoldberg.com's dark mode (src/layouts/base.css),
-plus the squiggle color from its squiggle.svg.
-*/
+/* Ported from joshuakgoldberg.com's dark mode (src/layouts/base.css) and squiggle.svg. */
 :root {
-	/* Surfaces */
 	--jg-bg-top: #060910;
 	--jg-bg-bottom: #08080c;
 	--jg-bg:
@@ -14,12 +10,10 @@ plus the squiggle color from its squiggle.svg.
 			var(--jg-bg-bottom) 100%
 		);
 
-	/* Text */
 	--jg-fg: #dae7f3;
 	--jg-fg-strong: #e5edf3;
 	--jg-fg-muted: #789dc7;
 
-	/* Accents */
 	--jg-link: #77bbff;
 	--jg-squiggle: #00a3ff;
 	--jg-subtle: #052438;
@@ -30,7 +24,6 @@ plus the squiggle color from its squiggle.svg.
 	--jg-glow: 0 0 2.5rem rgb(0 163 255 / 9%);
 	--jg-title-gradient: linear-gradient(180deg, #ffffff 35%, #d4eaff 100%);
 
-	/* Type */
 	--jg-font-sans: "League Spartan Variable", "League Spartan", sans-serif;
 	--jg-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
 	--jg-weight-light: 300;
@@ -45,12 +38,9 @@ plus the squiggle color from its squiggle.svg.
 	--jg-size-small: 1.2rem;
 	--jg-text-shadow: 3px 3px 1px var(--jg-subtle);
 
-	/* Motion */
 	--jg-duration-medium: 280ms;
 	--jg-duration-slowest: 700ms;
 
-	/* Slidev (also see the html.dark overrides below) */
-	--slidev-code-background: var(--jg-card-bg);
 	--slidev-code-font-family: var(--jg-font-mono);
 	--slidev-code-font-size: 15px;
 	--slidev-code-line-height: 23px;

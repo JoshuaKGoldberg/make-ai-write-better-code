@@ -2,22 +2,30 @@
 import { useSlideContext } from "@slidev/client";
 import { computed, useId } from "vue";
 
-const props = withDefaults(
-	defineProps<{
-		/** Label beside the bug that makes it all the way through. */
-		bottom?: string;
-		/** A single stage to mark as "you are here", showing only its question. */
-		current?: string;
-		/** Stage names to emphasize, such as the development-time stages. */
-		highlight?: string[];
-		/** Optional questions shown beside each stage, one per click. */
-		questions?: string[];
-		stages: string[];
-		/** Label beside the bugs going into the funnel. */
-		top?: string;
-	}>(),
-	{ highlight: () => [], questions: () => [] },
-);
+const props = defineProps<{
+	/** Label beside the bug that makes it all the way through. */
+	bottom?: string;
+	/** A development stage to mark as "you are here", showing only its question. */
+	current?: string;
+	/** Whether to show only the development stages, beside their questions. */
+	development?: boolean;
+	/** Label beside the bugs going into the funnel. */
+	top?: string;
+}>();
+
+const developmentStages = [
+	{ question: "What should it be?", stage: "Design Thought" },
+	{ question: "Is it written right?", stage: "Static Analysis" },
+	{ question: "Does it match the spec?", stage: "Dynamic Analysis" },
+	{ question: "Is the spec correct?", stage: "Peer Review" },
+];
+
+const allStages: { question?: string; stage: string }[] = [
+	{ stage: "Core Systems" },
+	...developmentStages.map(({ stage }) => ({ stage })),
+	{ stage: "Telemetry" },
+	{ stage: "User Feedback" },
+];
 
 const { $clicks } = useSlideContext();
 
@@ -25,13 +33,22 @@ const { $clicks } = useSlideContext();
 // gradient ids: url(#id) would otherwise resolve to a hidden slide's gradient.
 const gradientId = `funnel-band-${useId()}`;
 
+const wide = computed(() => props.development || props.current !== undefined);
+const stages = computed(() => (wide.value ? developmentStages : allStages));
+const eyebrow = computed(() => {
+	const position =
+		developmentStages.findIndex(({ stage }) => stage === props.current) + 1;
+	return `${String(position)}/${String(developmentStages.length)}`;
+});
+
 const bugs = { bottom: 62, radius: 4.5, top: 16 };
 const cone = { bottom: 362, gap: 6, top: 82 };
 const mouthWidth = 560;
 const neckWidth = 120;
 const spoutBottom = 414;
-const center = computed(() => (props.questions.length ? 300 : 400));
-const width = computed(() => (props.questions.length ? 1000 : 800));
+const center = computed(() => (wide.value ? 300 : 400));
+const width = computed(() => (wide.value ? 1000 : 800));
+const eyebrowColumn = computed(() => (200 * center.value) / width.value);
 
 function widthAt(y: number) {
 	const progress = (y - cone.top) / (cone.bottom - cone.top);
@@ -59,10 +76,10 @@ const bugPositions = computed(() => {
 
 const bands = computed(() => {
 	const height =
-		(cone.bottom - cone.top - cone.gap * (props.stages.length - 1)) /
-		props.stages.length;
+		(cone.bottom - cone.top - cone.gap * (stages.value.length - 1)) /
+		stages.value.length;
 
-	return props.stages.map((stage, index) => {
+	return stages.value.map(({ question, stage }, index) => {
 		const y1 = cone.top + index * (height + cone.gap);
 		const y2 = y1 + height;
 		const [top, bottom] = [widthAt(y1) / 2, widthAt(y2) / 2];
@@ -71,9 +88,9 @@ const bands = computed(() => {
 		return {
 			highlighted: props.current
 				? props.current === stage
-				: props.highlight.includes(stage),
+				: developmentStages.some((development) => development.stage === stage),
 			points: `${x - top},${y1} ${x + top},${y1} ${x + bottom},${y2} ${x - bottom},${y2}`,
-			question: props.questions[index],
+			question,
 			stage,
 			visible: props.current ? props.current === stage : $clicks.value > index,
 			y: (y1 + y2) / 2,
@@ -89,10 +106,19 @@ const spout = computed(() => {
 </script>
 
 <template>
+	<div
+		v-if="current"
+		class="signpost-eyebrow"
+		:style="{
+			gridTemplateColumns: `${eyebrowColumn}% ${100 - eyebrowColumn}%`,
+		}"
+	>
+		<div class="eyebrow">{{ eyebrow }}</div>
+	</div>
 	<svg
-		:aria-label="`Funnel of bugs through: ${stages.join(', ')}`"
+		:aria-label="`Funnel of bugs through: ${stages.map(({ stage }) => stage).join(', ')}`"
 		class="funnel"
-		:class="{ wide: questions.length }"
+		:class="{ wide }"
 		role="img"
 		:viewBox="`0 0 ${width} 450`"
 	>
@@ -172,8 +198,14 @@ const spout = computed(() => {
 	width: 38rem;
 }
 
-.funnel.wide {
+.funnel.wide,
+.signpost-eyebrow {
 	width: 54rem;
+}
+
+.signpost-eyebrow {
+	display: grid;
+	margin: 0 auto -0.5rem;
 }
 
 .band {
@@ -199,13 +231,13 @@ text {
 .stage {
 	fill: var(--jg-fg-muted);
 	font-size: 19px;
-	font-weight: 500;
+	font-weight: var(--jg-weight-medium);
 	text-anchor: middle;
 }
 
 .stage.highlighted {
 	fill: var(--jg-fg-strong);
-	font-weight: 600;
+	font-weight: var(--jg-weight-bold);
 }
 
 .wide .stage {
@@ -215,7 +247,7 @@ text {
 .question {
 	fill: var(--jg-fg);
 	font-size: 26px;
-	font-weight: 300;
+	font-weight: var(--jg-weight-light);
 	opacity: 0;
 	transition: opacity var(--jg-duration-medium) ease;
 }

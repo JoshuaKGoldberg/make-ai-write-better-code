@@ -24,7 +24,6 @@
 	border-color: var(--jg-hairline);
 }
 
-/* A code block with IDE-style hovers positioned over it (see CodeHover.vue). */
 .slidev-layout .code-hovers {
 	--code-origin-left: calc(1px + 1.25rem);
 	--code-origin-top: calc(4px + 1px + 0.85rem);

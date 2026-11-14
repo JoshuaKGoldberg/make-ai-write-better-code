@@ -68,10 +68,4 @@ const progress = computed(() => `${(currentPage.value / total.value) * 100}%`);
 	position: absolute;
 	transition: width var(--jg-duration-slowest) ease;
 }
-
-@media (prefers-reduced-motion: reduce) {
-	.glow {
-		animation: none;
-	}
-}
 </style>

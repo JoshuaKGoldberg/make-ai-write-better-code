@@ -1,4 +1,3 @@
-/* The background lives on the slide canvas, not each slide, so fades never dip. */
 #slide-content {
 	background: var(--jg-bg);
 }
@@ -73,8 +72,6 @@
 	color: var(--jg-squiggle);
 }
 
-/* Layouts */
-
 .slidev-layout.default {
 	display: flex;
 	flex-direction: column;
@@ -123,8 +120,6 @@
 	font-size: var(--jg-size-large);
 }
 
-/* Small utilities used across slides */
-
 .slidev-layout .eyebrow {
 	background: var(--jg-card-bg);
 	border: 1px solid var(--jg-card-border);
@@ -159,7 +154,6 @@
 	font-size: var(--jg-size-small);
 }
 
-/* Click reveals: a gentle opacity fade, nothing that moves. */
 .slidev-vclick-target {
 	transition:
 		opacity 105ms ease,
@@ -174,7 +168,6 @@
 	transform: translateY(0.1rem);
 }
 
-/* Slide changes: a crossfade with a whisper of blur. */
 .fade-enter-active,
 .fade-leave-active {
 	transition:
@@ -198,13 +191,13 @@
 	*::after {
 		animation-duration: 0ms !important;
 		animation-iteration-count: 1 !important;
+		transition-duration: 0ms !important;
 	}
 }
 
-/* A stack of headed points, such as on the Precise Prompting slide */
 .slidev-layout .principles {
 	display: grid;
-	gap: 2.25rem;
+	gap: 1rem;
 }
 
 .slidev-layout .principles h3 {
@@ -218,28 +211,12 @@
 	margin: 0;
 }
 
-/* Section signposts: center the "N/4" label over the funnel, which sits at 30% of a 54rem-wide figure. */
-.slidev-layout .signpost-eyebrow {
-	display: grid;
-	grid-template-columns: 60% 40%;
-	margin: 0 auto -0.5rem;
-	width: 54rem;
-}
-
-/* Reaction GIFs between beats */
 .slidev-layout .reaction {
 	height: 25rem;
 	object-fit: contain;
 }
 
-/* Glassy cards for grouped points */
-.slidev-layout .principles > div,
-.slidev-layout .context-grid > div,
-.slidev-layout .layers > div,
-.slidev-layout .reasons > div,
-.slidev-layout .recap > div,
-.slidev-layout .links > div,
-.slidev-layout .protip {
+.slidev-layout .cards > div {
 	background: var(--jg-card-bg);
 	border: 1px solid var(--jg-card-border);
 	border-radius: var(--jg-card-radius);
@@ -247,14 +224,19 @@
 	padding: 1rem 1.35rem;
 }
 
-.slidev-layout .principles {
-	gap: 1rem;
-}
-
-/* Emoji inside gradient titles keep their own colors. */
 .slidev-layout h1 .emoji {
 	-webkit-text-fill-color: initial;
 	color: var(--jg-fg-strong);
+}
+
+.slidev-layout .success {
+	font-size: var(--jg-size-medium);
+	opacity: 0;
+	transition: opacity var(--jg-duration-medium) ease;
+}
+
+.slidev-layout .success.shown {
+	opacity: 1;
 }
 
 .funnel-caption {
@@ -267,7 +249,6 @@
 	justify-items: center;
 }
 
-/* Classic meme caption: white Impact with a black outline, over the image. */
 .captioned-gif > * {
 	grid-area: 1 / 1;
 }

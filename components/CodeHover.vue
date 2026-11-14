@@ -1,24 +1,20 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef } from "vue";
 
-const props = withDefaults(
-	defineProps<{
-		/** Zero-based column, in characters, counting each tab as two. */
-		col: number;
-		/** How many characters the squiggle spans. */
-		length: number;
-		/** Zero-based line in the code block. */
-		line: number;
-		message: string;
-		shown?: boolean;
-		/** Where the report came from, such as "ts(18047)" or "eslint(rule-name)". */
-		source: string;
-	}>(),
-	{ shown: true },
-);
+const props = defineProps<{
+	/** Zero-based column, in characters, counting each tab as two. */
+	column: number;
+	/** How many characters the squiggle spans. */
+	length: number;
+	/** Zero-based line in the code block. */
+	line: number;
+	message: string;
+	/** Whether the squiggle and tooltip are visible. */
+	shown: boolean;
+	/** Where the report came from, such as "ts(18047)" or "eslint(rule-name)". */
+	source: string;
+}>();
 
-// The squiggle is drawn as one wavy path with round caps, sized to the
-// element's layout width, so its ends are rounded instead of cut off.
 const squiggle = {
 	amplitude: 1.2,
 	halfPeriod: 4,
@@ -26,23 +22,24 @@ const squiggle = {
 	strokeWidth: 3,
 };
 
-const squiggleElement = useTemplateRef("squiggleElement");
-// Start from the code font's character width (0.602em at the deck's 15px code size), so
-// the squiggle renders without a browser too; the observer refines it once mounted.
-const squiggleWidth = ref(props.length * 0.602 * 15);
+// 0.602em per character at --slidev-code-font-size, from styles/tokens.css.
+const estimatedCharacterWidth = 0.602 * 15;
 
-const observer = new ResizeObserver(() => {
-	squiggleWidth.value = squiggleElement.value?.offsetWidth ?? 0;
-});
+const squiggleElement = useTemplateRef("squiggleElement");
+const squiggleWidth = ref(props.length * estimatedCharacterWidth);
 
 onMounted(() => {
+	const observer = new ResizeObserver(() => {
+		squiggleWidth.value = squiggleElement.value?.offsetWidth ?? 0;
+	});
+
 	if (squiggleElement.value) {
 		observer.observe(squiggleElement.value);
 	}
-});
 
-onBeforeUnmount(() => {
-	observer.disconnect();
+	onBeforeUnmount(() => {
+		observer.disconnect();
+	});
 });
 
 const squigglePath = computed(() => {
@@ -63,7 +60,7 @@ const squigglePath = computed(() => {
 	<div
 		class="code-hover"
 		:class="{ shown }"
-		:style="{ '--col': col, '--length': length, '--line': line }"
+		:style="{ '--column': column, '--length': length, '--line': line }"
 	>
 		<div ref="squiggleElement" class="squiggle">
 			<svg aria-hidden="true" :height="squiggle.height" :width="squiggleWidth">
@@ -87,7 +84,7 @@ const squigglePath = computed(() => {
 .code-hover {
 	font-family: var(--slidev-code-font-family);
 	font-size: var(--slidev-code-font-size);
-	left: calc(var(--code-origin-left) + var(--col) * 1ch);
+	left: calc(var(--code-origin-left) + var(--column) * 1ch);
 	line-height: var(--slidev-code-line-height);
 	pointer-events: none;
 	position: absolute;
@@ -97,7 +94,6 @@ const squigglePath = computed(() => {
 	z-index: 1;
 }
 
-/* The squiggle appears first, then the tooltip slides down into place. */
 .squiggle,
 .tooltip {
 	opacity: 0;
@@ -121,7 +117,7 @@ const squigglePath = computed(() => {
 }
 
 .squiggle {
-	height: 6px;
+	height: v-bind("`${squiggle.height}px`");
 	margin-top: -4px;
 	width: calc(var(--length) * 1ch);
 }
@@ -139,8 +135,8 @@ const squigglePath = computed(() => {
 	line-height: 1.4;
 	margin-top: 0.35rem;
 	padding: 0.45rem 0.7rem;
-	width: max-content;
 	max-width: 64ch;
+	width: max-content;
 }
 
 .hover-source {

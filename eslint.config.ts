@@ -2,6 +2,7 @@ import comments from "@eslint-community/eslint-plugin-eslint-comments/configs";
 import eslint from "@eslint/js";
 import markdown from "@eslint/markdown";
 import vitest from "@vitest/eslint-plugin";
+import prettier from "eslint-config-prettier/flat";
 import jsdoc from "eslint-plugin-jsdoc";
 import jsonc from "eslint-plugin-jsonc";
 import markdownLinks from "eslint-plugin-markdown-links";
@@ -9,6 +10,7 @@ import n from "eslint-plugin-n";
 import packageJson from "eslint-plugin-package-json";
 import perfectionist from "eslint-plugin-perfectionist";
 import * as regexp from "eslint-plugin-regexp";
+import vue from "eslint-plugin-vue";
 import yml from "eslint-plugin-yml";
 import { defineConfig, globalIgnores } from "eslint/config";
 import tseslint from "typescript-eslint";
@@ -38,10 +40,12 @@ export default defineConfig(
 			regexp.configs["flat/recommended"],
 			tseslint.configs.strictTypeChecked,
 			tseslint.configs.stylisticTypeChecked,
+			vue.configs["flat/recommended"],
 		],
-		files: ["**/*.{js,ts}"],
+		files: ["**/*.{js,ts,vue}"],
 		languageOptions: {
 			parserOptions: {
+				parser: tseslint.parser,
 				projectService: { allowDefaultProject: ["*.config.*s"] },
 			},
 		},
@@ -59,16 +63,20 @@ export default defineConfig(
 		settings: { perfectionist: { partitionByComment: true, type: "natural" } },
 	},
 	{
+		extends: [tseslint.configs.disableTypeChecked, prettier],
+		files: ["**/*.vue"],
+		rules: {
+			// As typescript-eslint does for .ts files, since these scripts are TypeScript too.
+			"no-undef": "off",
+		},
+	},
+	{
 		extends: [jsonc.configs["flat/recommended-with-json"]],
 		files: ["**/*.json"],
 	},
 	{
 		extends: [markdown.configs.recommended, markdownLinks.configs.recommended],
 		files: ["**/*.md"],
-		rules: {
-			// https://github.com/eslint/markdown/issues/294
-			"markdown/no-missing-label-refs": "off",
-		},
 	},
 	{
 		files: ["**/slides.md"],
@@ -78,22 +86,14 @@ export default defineConfig(
 		},
 	},
 	{
-		extends: [tseslint.configs.disableTypeChecked],
-		files: ["**/*.md/*.ts"],
-		rules: { "n/no-missing-import": "off" },
-	},
-	{
 		extends: [vitest.configs.recommended],
 		files: ["**/*.test.*"],
 		rules: {
+			// Asymmetric matchers such as expect.stringContaining() return any.
 			"@typescript-eslint/no-unsafe-assignment": "off",
 			"vitest/prefer-describe-function-title": "error",
 		},
 		settings: { vitest: { typecheck: true } },
-	},
-	{
-		files: ["**/*.test.*", "eslint.config.*"],
-		rules: { "n/no-unsupported-features/node-builtins": "off" },
 	},
 	{
 		extends: [yml.configs["flat/standard"], yml.configs["flat/prettier"]],

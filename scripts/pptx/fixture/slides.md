@@ -17,7 +17,7 @@ A dimmed background image
 
 # Lists
 
-<ol start="3">
+<ol start="3" style="list-style: decimal">
   <li>Third</li>
   <li>Fourth</li>
 </ol>
@@ -76,3 +76,35 @@ transition: none
 # After None
 
 The slide before this one plays no transition into it.
+
+---
+
+# Code and Shapes
+
+```ts
+const first = 1;
+
+const second = 2;
+```
+
+Read the [Slidev docs](https://sli.dev).
+
+<svg class="ring" width="60" height="60" viewBox="0 0 60 60"><circle cx="30" cy="30" r="20" fill="none" stroke="tomato" stroke-width="4" /></svg>
+
+<div class="gradient"></div>
+<div v-click class="faint"></div>
+<p class="invisible">Invisible text</p>
+<img class="rounded" src="/photo.png" alt="Rounded photo" />
+
+<!--
+Notes with *emphasis*, **bold**, and `code`.
+
+A second paragraph.
+-->
+
+---
+
+# Embeds
+
+<iframe src="https://example.com/embed"></iframe>
+<video src="/clip.mp4"></video>

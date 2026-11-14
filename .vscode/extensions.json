@@ -4,6 +4,7 @@
 		"esbenp.prettier-vscode",
 		"streetsidesoftware.code-spell-checker",
 		"vitest.explorer",
+		"vue.volar",
 		"webpro.vscode-knip"
 	]
 }

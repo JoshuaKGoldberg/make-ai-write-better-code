@@ -1,15 +1,21 @@
 import { parseSync } from "@slidev/parser";
 import * as fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { getContrastRatio } from "./contrast.ts";
 
+const slidesPath = fileURLToPath(new URL("../slides.md", import.meta.url));
 const slides = parseSync(
-	fs.readFileSync("slides.md", "utf8"),
-	"slides.md",
+	fs.readFileSync(slidesPath, "utf8"),
+	slidesPath,
 ).slides;
+const numberedSlides = slides.map((slide) => [slide.index + 1, slide] as const);
 
-const tokens = fs.readFileSync("styles/tokens.css", "utf8");
+const tokens = fs.readFileSync(
+	new URL("../styles/tokens.css", import.meta.url),
+	"utf8",
+);
 
 function getToken(name: string) {
 	const match = new RegExp(`--${name}: (#[\\da-f]{6});`, "i").exec(tokens);
@@ -21,23 +27,15 @@ function getToken(name: string) {
 }
 
 describe("slides.md", () => {
-	it.each(slides.map((slide) => [slide.index + 1, slide] as const))(
-		"slide %i has speaker notes",
-		(_, slide) => {
-			expect(slide.note?.trim()).toBeTruthy();
-		},
-	);
+	it.each(numberedSlides)("slide %i has speaker notes", (_, slide) => {
+		expect(slide.note?.trim()).toBeTruthy();
+	});
 
-	it.each(slides.map((slide) => [slide.index + 1, slide] as const))(
-		"slide %i gives every image alt text",
-		(_, slide) => {
-			const images = slide.content.match(/<img\b[^>]*>/g) ?? [];
+	it.each(numberedSlides)("slide %i gives every image alt text", (_, slide) => {
+		const images = slide.content.match(/<img\b[^>]*>/g) ?? [];
 
-			for (const image of images) {
-				expect(image).toMatch(/\balt="/);
-			}
-		},
-	);
+		expect(images.filter((image) => !/\balt="/.test(image))).toEqual([]);
+	});
 });
 
 describe("styles/tokens.css", () => {

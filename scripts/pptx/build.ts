@@ -2,11 +2,22 @@
  * Builds a native PowerPoint deck from a Slidev deck, with no browser:
  * render (Vite SSR) → lay out (takumi + a static cascade) → extract items → write .pptx.
  */
+import { Renderer } from "@takumi-rs/core";
 import { createHash } from "node:crypto";
-import fs from "node:fs";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
-import type { Canvas, Deck, Item, RasterItem } from "./model.ts";
+import type { Assets } from "./assets.ts";
+import type { FontBook } from "./fonts.ts";
+import type { Css, LayoutOptions, Prepared } from "./layout.ts";
+import type { Canvas, Deck, ImageItem, Item } from "./model.ts";
+import type { RenderedSlide } from "./render.ts";
+import type {
+	BuildPptxOptions,
+	BuildPptxProblem,
+	BuildPptxResult,
+} from "./types.ts";
 
 import { createAssets } from "./assets.ts";
 import { createCascade } from "./cascade.ts";
@@ -17,60 +28,52 @@ import { createSlideRenderer } from "./render.ts";
 import { transitionInto } from "./transitions.ts";
 import { writePptx } from "./write.ts";
 
-export interface BuildOptions {
-	/** The color scheme to export in; defaults to the deck's `colorSchema` (light unless it's "dark"). */
-	colorScheme?: "dark" | "light";
-	/** The Slidev entry, relative to `root`. */
-	entry?: string;
-	/** Output .pptx path. */
-	out: string;
-	/** Write one static slide per click state instead of animations, for fidelity checks. */
-	review?: boolean;
-	/** The deck's directory. */
-	root?: string;
-	/** Only these slide numbers (1-based). */
-	slides?: number[];
-	/** Directory for intermediate files: the model and rendered images. */
-	work?: string;
-}
+type Layout = ReturnType<typeof createLayout>;
 
-export interface BuildResult {
-	/** Layout trees that didn't line up with the DOM, which may mean missing content. */
-	problems: string[];
-	slides: number;
+/** A slide on its way to the model: rendered, styled, then prepared for layout. */
+interface PreparedSlide {
+	css: Css;
+	number: number;
+	options: LayoutOptions;
+	rendered: RenderedSlide;
+	states: Prepared[];
 }
 
 export async function buildPptx({
-	colorScheme,
-	entry = "slides.md",
-	out,
-	review = false,
-	root = process.cwd(),
-	slides: only,
-	work = path.join(path.dirname(out), ".pptx"),
-}: BuildOptions): Promise<BuildResult> {
-	fs.mkdirSync(path.join(work, "rasters"), { recursive: true });
+	work,
+	...options
+}: BuildPptxOptions): Promise<BuildPptxResult> {
+	if (work) {
+		return build(options, path.resolve(work), true);
+	}
 
+	const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "slidev-pptx-"));
+	try {
+		return await build(options, temporary, false);
+	} finally {
+		await fs.rm(temporary, { force: true, recursive: true });
+	}
+}
+
+async function build(
+	{
+		colorScheme,
+		entry = "slides.md",
+		out,
+		root = process.cwd(),
+		slidePerClick = false,
+		slides: selected,
+	}: Omit<BuildPptxOptions, "work">,
+	work: string,
+	keepModel: boolean,
+) {
+	await fs.mkdir(path.join(work, "rasters"), { recursive: true });
 	const renderer = await createSlideRenderer(path.resolve(root, entry));
 	try {
 		const { config } = renderer;
-		const invalid =
-			only?.filter(
-				(no) => !Number.isInteger(no) || no < 1 || no > renderer.count,
-			) ?? [];
-		if (only?.length === 0 || invalid.length) {
-			throw new Error(
-				`Slides must be numbers from 1 to ${String(renderer.count)}; got ${only?.length ? invalid.join(", ") : "none"}.`,
-			);
-		}
-
-		// Slidev lays slides out on a canvas of whole px; the page keeps the exact aspect ratio.
+		const numbers = slideNumbersOf(selected, renderer.count);
 		const canvas: Canvas = {
 			height: Math.ceil(config.canvasWidth / config.aspectRatio),
-			width: config.canvasWidth,
-		};
-		const page: Canvas = {
-			height: config.canvasWidth / config.aspectRatio,
 			width: config.canvasWidth,
 		};
 		const scheme =
@@ -81,178 +84,289 @@ export async function buildPptx({
 			work,
 		});
 
-		const numbers = Array.from(
-			{ length: renderer.count },
-			(_, i) => i + 1,
-		).filter((no) => !only || only.includes(no));
 		// Render every slide first, so UnoCSS has seen every class before its CSS is collected.
-		const rendered = new Map<
-			number,
-			Awaited<ReturnType<typeof renderer.renderSlide>>
-		>();
-		for (const no of numbers) {
-			rendered.set(no, await renderer.renderSlide(no));
+		const rendered: RenderedSlide[] = [];
+		for (const number of numbers) {
+			rendered.push(await renderer.renderSlide(number));
 		}
 
 		const globalCss = await renderer.globalCss();
-		const cssBySlide = new Map<
-			number,
-			{ rules: ReturnType<typeof createCascade>; sheets: string[] }
-		>();
-		for (const no of numbers) {
-			const sheets = [...globalCss, ...(await renderer.slideCss(no))];
-			cssBySlide.set(no, {
-				rules: createCascade(sheets, { colorScheme: scheme, viewport: canvas }),
-				sheets,
+		const styled = [];
+		for (const [index, number] of numbers.entries()) {
+			const sheets = [...globalCss, ...(await renderer.slideCss(number))];
+			styled.push({
+				css: {
+					rules: createCascade(sheets, {
+						colorScheme: scheme,
+						viewport: canvas,
+					}),
+					sheets,
+				},
+				number,
+				rendered: rendered[index],
 			});
 		}
 
 		const fonts = createFontBook({
 			assets,
 			fonts: config.fonts,
-			sheets: [...cssBySlide.values()].flatMap(({ sheets }) => sheets),
+			sheets: styled.flatMap(({ css }) => css.sheets),
 		});
 		const layout = createLayout({ assets, canvas, colorScheme: scheme });
 		const staticLayers = staticLayerIndexes(
-			[...rendered.values()].map((slide) => slide.globalBottom),
+			rendered.map(({ globalBottom }) => globalBottom),
 		);
 
 		// Style every state first, so the fonts their text uses load before any layout.
-		const prepared = new Map<number, ReturnType<typeof layout.prepare>[]>();
-		const stacks = new Set<string>();
-		for (const [no, slide] of rendered) {
-			const options = layerOptions(slide, staticLayers);
-			const states = slide.states.map((html) =>
-				layout.prepare(no, html, cssBySlide.get(no) ?? emptyCss, options),
-			);
-			for (const state of states) {
-				state.fontStacks.forEach((stack) => stacks.add(stack));
-			}
-
-			prepared.set(no, states);
-		}
-
-		await layout.registerFonts(await fonts.load(stacks));
-
-		const deck: Deck = { canvas, page, slides: {}, total: renderer.count };
-		const problems: string[] = [];
-		for (const [no, slide] of rendered) {
-			const css = cssBySlide.get(no) ?? emptyCss;
-			const options = layerOptions(slide, staticLayers);
-			const states = [];
-			for (const [clicks, html] of slide.states.entries()) {
-				const state = prepared.get(no)?.[clicks];
-				if (!state) {
-					continue;
-				}
-
-				const laidOut = await layout.layoutState(state, css);
-				for (const mismatch of laidOut.mismatches) {
-					const element = laidOut.byId.get(mismatch.id);
-					problems.push(
-						`Slide ${String(no)}, click ${String(clicks)}: <${element?.tagName.toLowerCase() ?? "?"}> has ${String(mismatch.children)} children but takumi measured ${String(mismatch.measured)}: ${(element?.textContent ?? "").trim().slice(0, 60)}`,
-					);
-				}
-
-				const extracted = extractState(laidOut, { assets, canvas, fonts, no });
-				let items = extracted.items;
-				for (const raster of extracted.rasters) {
-					const png = await layout.rasterize(no, html, css, raster, options);
-					const owns = (item: Item): item is RasterItem =>
-						item.kind === "raster" && item.rasterId === raster.id;
-					if (!png) {
-						problems.push(
-							`Slide ${String(no)}, click ${String(clicks)}: couldn't rasterize ${raster.selector}.`,
-						);
-						items = items.filter((item) => !owns(item));
-						continue;
-					}
-
-					const file = writeRaster(work, raster.id, png);
-					for (const item of items) {
-						if (owns(item)) {
-							item.file = file;
-						}
-					}
-				}
-
-				// PowerPoint can't show some formats (like SVG and WebP); they become PNGs.
-				for (const item of items) {
-					if (
-						item.kind !== "image" ||
-						isNativeImage(fs.readFileSync(item.file))
-					) {
-						continue;
-					}
-
-					const png = await layout.toPng(item.src);
-					if (png) {
-						item.file = writeRaster(work, "image", png);
-					} else {
-						problems.push(
-							`Slide ${String(no)}, click ${String(clicks)}: couldn't convert ${item.src} to PNG.`,
-						);
-					}
-				}
-
-				states.push({ clicks, items });
-			}
-
-			deck.slides[no] = {
-				clicksTotal: slide.total,
-				no,
-				states,
-				transition: transitionInto(no, renderer.slides, config),
-			};
-		}
-
-		const first = rendered.get(numbers[0]);
-		const background = path.join(work, "background.png");
-		fs.writeFileSync(
-			background,
-			await layout.renderBackground(cssBySlide.get(numbers[0]) ?? emptyCss, {
-				globalBottom: first?.globalBottom,
+		const slides: PreparedSlide[] = styled.map((slide) => {
+			const options = {
+				globalBottom: slide.rendered.globalBottom,
+				globalTop: slide.rendered.globalTop,
 				staticLayers,
-			}),
+				zoom: Number(slide.rendered.frontmatter.zoom ?? 1),
+			};
+			return {
+				...slide,
+				options,
+				states: slide.rendered.states.map((html) =>
+					layout.prepare(slide.number, html, slide.css, options),
+				),
+			};
+		});
+		await layout.registerFonts(
+			await fonts.load(
+				new Set(
+					slides.flatMap(({ states }) =>
+						states.flatMap((state) => [...state.fontStacks]),
+					),
+				),
+			),
 		);
-		fs.writeFileSync(path.join(work, "model.json"), JSON.stringify(deck));
 
-		const { slides } = await writePptx({
-			author: String(renderer.slides[0]?.frontmatter.author ?? ""),
-			background,
+		const exporter = createStateExporter({
+			assets,
+			canvas,
+			fonts,
+			layout,
+			work,
+		});
+		const deckSlides = [];
+		for (const slide of slides) {
+			const states = [];
+			for (const [clicks, state] of slide.states.entries()) {
+				states.push({
+					clicks,
+					items: await exporter.exportState(slide, clicks, state),
+				});
+			}
+
+			deckSlides.push({
+				notes: slide.rendered.note.trim(),
+				number: slide.number,
+				states,
+				transition: transitionInto(slide.number, renderer.slides, config),
+			});
+		}
+
+		const deck: Deck = {
+			aspectRatio: config.aspectRatio,
+			author: config.author,
+			background: await writeBackground(layout, slides[0], staticLayers, work),
+			canvas,
+			slides: deckSlides,
+			title: config.title,
+		};
+		if (keepModel) {
+			await fs.writeFile(path.join(work, "model.json"), JSON.stringify(deck));
+		}
+
+		const { slides: written } = await writePptx({
 			deck,
 			fonts,
-			notes: renderer.slides.map((s) => s.note?.trim() ?? ""),
 			out,
-			review,
-			title: String(renderer.slides[0]?.frontmatter.title ?? ""),
+			slidePerClick,
 		});
-		return { problems, slides };
+		return { problems: exporter.problems, slides: written };
 	} finally {
 		await renderer.close();
 	}
 }
 
-const emptyCss = { rules: [], sheets: [] };
+/** The slides to build, in deck order. */
+function slideNumbersOf(selected: number[] | undefined, count: number) {
+	const all = Array.from({ length: count }, (_, index) => index + 1);
+	if (!selected) {
+		return all;
+	}
 
-const layerOptions = (
-	slide: {
-		frontmatter: Record<string, unknown>;
-		globalBottom: string;
-		globalTop: string;
-	},
+	const invalid = selected.filter(
+		(number) => !Number.isInteger(number) || number < 1 || number > count,
+	);
+	if (!selected.length || invalid.length) {
+		throw new Error(
+			`Slides must be numbers from 1 to ${String(count)}; got ${selected.length ? invalid.join(", ") : "none"}.`,
+		);
+	}
+
+	return all.filter((number) => selected.includes(number));
+}
+
+/** Lays out and extracts slide states, rendering what PowerPoint can't draw, and collects their problems. */
+function createStateExporter({
+	assets,
+	canvas,
+	fonts,
+	layout,
+	work,
+}: {
+	assets: Assets;
+	canvas: Canvas;
+	fonts: FontBook;
+	layout: Layout;
+	work: string;
+}) {
+	const problems: BuildPptxProblem[] = [];
+	const report = (problem: BuildPptxProblem) => {
+		if (
+			!problems.some(
+				(existing) =>
+					existing.slide === problem.slide &&
+					existing.click === problem.click &&
+					existing.message === problem.message,
+			)
+		) {
+			problems.push(problem);
+		}
+	};
+
+	// PowerPoint can't show some formats (like SVG and WebP); they become PNGs.
+	const viewable = new Map<string, Promise<string | undefined>>();
+	const viewableFile = (image: ImageItem) => {
+		let file = viewable.get(image.src);
+		if (!file) {
+			file = (async () => {
+				if (isNativeImage(await fs.readFile(image.file))) {
+					return image.file;
+				}
+
+				const png = await layout.toPng(image.src);
+				return png && writePng(work, png);
+			})();
+			viewable.set(image.src, file);
+		}
+
+		return file;
+	};
+
+	async function exportState(
+		slide: PreparedSlide,
+		click: number,
+		state: Prepared,
+	) {
+		const laidOut = await layout.layoutState(state, slide.css);
+		for (const mismatch of laidOut.mismatches) {
+			const element = laidOut.byId.get(mismatch.id);
+			report({
+				click,
+				message: `<${element?.tagName.toLowerCase() ?? "?"}> has ${String(mismatch.children)} children but takumi measured ${String(mismatch.measured)}: ${(element?.textContent ?? "").trim().slice(0, 60)}`,
+				slide: slide.number,
+			});
+		}
+
+		const extracted = extractState(laidOut, { assets, canvas, fonts });
+		for (const message of extracted.problems) {
+			report({ message, slide: slide.number });
+		}
+
+		const items: Item[] = [];
+		for (const item of extracted.items) {
+			if (item.kind === "raster") {
+				const { selector, ...raster } = item;
+				const png = await layout.rasterize(
+					slide.number,
+					slide.rendered.states[click],
+					slide.css,
+					item,
+					slide.options,
+				);
+				if (png) {
+					items.push({ ...raster, file: await writePng(work, png) });
+				} else {
+					report({
+						click,
+						message: `Couldn't rasterize ${selector}.`,
+						slide: slide.number,
+					});
+				}
+			} else if (item.kind === "image") {
+				const file = await viewableFile(item);
+				if (file) {
+					items.push({ ...item, file });
+				} else {
+					report({
+						message: `Couldn't convert ${item.src} to PNG.`,
+						slide: slide.number,
+					});
+				}
+			} else {
+				items.push(item);
+			}
+		}
+
+		return items;
+	}
+
+	return { exportState, problems };
+}
+
+/** Renders the slide background, and finds its average color for the theme. */
+async function writeBackground(
+	layout: Layout,
+	first: PreparedSlide,
 	staticLayers: number[],
-) => ({
-	globalBottom: slide.globalBottom,
-	globalTop: slide.globalTop,
-	staticLayers,
-	zoom: Number(slide.frontmatter.zoom ?? 1),
-});
+	work: string,
+) {
+	const png = await layout.renderBackground(first.css, {
+		globalBottom: first.rendered.globalBottom,
+		staticLayers,
+	});
+	const file = path.join(work, "background.png");
+	await fs.writeFile(file, png);
+	return { color: await averageColor(png), file };
+}
+
+/** The average color of a PNG, over white where it's transparent. */
+async function averageColor(png: Buffer) {
+	const size = 8;
+	const pixels = await new Renderer().render(
+		`<img src="png" style="width:${String(size)}px;height:${String(size)}px">`,
+		{
+			format: "raw",
+			height: size,
+			images: [{ data: png, src: "png" }],
+			width: size,
+		},
+	);
+	const count = pixels.length / 4;
+	return [0, 1, 2]
+		.map((channel) => {
+			let sum = 0;
+			for (let index = 0; index < pixels.length; index += 4) {
+				const alpha = pixels[index + 3] / 255;
+				sum += pixels[index + channel] * alpha + 255 * (1 - alpha);
+			}
+
+			return Math.round(sum / count)
+				.toString(16)
+				.padStart(2, "0");
+		})
+		.join("");
+}
 
 /** Writes a rendered PNG, named by content so identical renders share one file (and one shape). */
-function writeRaster(work: string, id: string, png: Buffer) {
+async function writePng(work: string, png: Buffer) {
 	const hash = createHash("sha1").update(png).digest("hex").slice(0, 12);
-	const file = path.join(work, "rasters", `${id}-${hash}.png`);
-	fs.writeFileSync(file, png);
+	const file = path.join(work, "rasters", `${hash}.png`);
+	await fs.writeFile(file, png);
 	return file;
 }

@@ -3,7 +3,6 @@
  * text with styled runs and exact line breaks, lists, code, boxes, images, SVG
  * shapes, and rasters for anything PowerPoint can't represent natively.
  */
-import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { Assets } from "./assets.ts";
@@ -13,9 +12,9 @@ import type { LaidOutBox, LaidOutRun, LaidOutRuns, Layout } from "./layout.ts";
 import type {
 	Box,
 	Canvas,
+	ExtractedItem,
 	Fill,
 	Gradient,
-	Item,
 	ListParagraph,
 	Paragraph,
 	Point,
@@ -30,18 +29,11 @@ import { parseColor } from "./color.ts";
 import { ID, isBackgroundOnly } from "./layout.ts";
 import { truncate } from "./text.ts";
 
-export interface Raster {
-	/** The slide area to render, in slide px: the element and its descendants, with room for glows. */
-	box: Box;
-	id: string;
-	selector: string;
-}
-
 /** Room around a raster's element for strokes and antialiasing, beyond its shadows' reach. */
 const RASTER_MARGIN = 4;
 
-type ItemInput = Item extends infer T
-	? T extends Item
+type ItemInput = ExtractedItem extends infer T
+	? T extends ExtractedItem
 		? Omit<T, "order">
 		: never
 	: never;
@@ -84,26 +76,33 @@ const ALIGNMENTS: Record<string, TextStyle["align"]> = {
 /** Elements with more descendants than this render as one image instead of shapes. */
 const DENSE = 400;
 
+/** Elements that render only in a browser, which PowerPoint can't show. */
+const UNSUPPORTED_EMBEDS = [
+	[".mermaid", "a Mermaid diagram"],
+	[".slidev-tweet", "an embedded post"],
+	["iframe", "an embedded page"],
+	["video", "a video"],
+] as const;
+
 export interface ExtractOptions {
 	/** Loaded images, by the URLs pages use. */
 	assets: Assets;
 	canvas: Canvas;
 	fonts: FontBook;
-	no: number;
 }
 
 /** Whether PowerPoint can show an image file as-is. */
 export const isNativeImage = (data: Buffer) =>
 	NATIVE_FORMATS.has(imageFormat(data) ?? "");
 
-/** Turns a laid-out slide state into model items, plus the elements that need rasterizing. */
+/** Turns a laid-out slide state into model items, and descriptions of what it left out. */
 export function extractState(
 	layout: Layout,
-	{ assets, canvas, fonts, no }: ExtractOptions,
-): { items: Item[]; rasters: Raster[] } {
+	{ assets, canvas, fonts }: ExtractOptions,
+) {
 	const { boxes, byId, document, markers, runs, styles } = layout;
-	const items: Item[] = [];
-	const rasters: Raster[] = [];
+	const items: ExtractedItem[] = [];
+	const problems: string[] = [];
 	let order = 0;
 	const push = (item: ItemInput) => {
 		items.push({ ...item, order: order++ });
@@ -297,7 +296,11 @@ export function extractState(
 			font,
 			gradient: gradient && {
 				angle: gradient.angle,
-				stops: gradient.stops.map((stop) => ({ hex: stop.hex, pos: stop.pos })),
+				stops: gradient.stops.map((stop) => ({
+					hex: stop.hex,
+					position: stop.position,
+					transparency: 0,
+				})),
 			},
 			href: /^(?:https?|mailto):/i.test(href) ? href : undefined,
 			italic: s["font-style"] === "italic",
@@ -310,9 +313,9 @@ export function extractState(
 					? {
 							blur: Number(shadow[3]),
 							color: shadowColor.hex,
-							dx: Number(shadow[1]),
-							dy: Number(shadow[2]),
-							opacity: shadowColor.a,
+							offsetX: Number(shadow[1]),
+							offsetY: Number(shadow[2]),
+							transparency: (1 - shadowColor.a) * 100,
 						}
 					: undefined,
 			size: parseFloat(s["font-size"]) * zoom,
@@ -328,7 +331,7 @@ export function extractState(
 			superscript:
 				s["vertical-align"] === "super" || el.closest("sup") !== null,
 			text: "",
-			transparency: Math.round((1 - (color?.a ?? 1) * opacity) * 100),
+			transparency: (1 - (color?.a ?? 1) * opacity) * 100,
 			underline: s["text-decoration-line"].includes("underline"),
 			upper: s["text-transform"] === "uppercase",
 		};
@@ -530,7 +533,7 @@ export function extractState(
 			!(s["-webkit-background-clip"] ?? s["background-clip"]).includes("text")
 		) {
 			gradient = linearGradient(s["background-image"], opacity);
-			if (gradient?.stops.some((stop) => (stop.a ?? 1) > 0.004)) {
+			if (gradient?.stops.some((stop) => stop.transparency < 99.6)) {
 				fill = { a: 1, hex: gradient.stops[gradient.stops.length - 1].hex };
 			} else {
 				gradient = undefined;
@@ -549,7 +552,7 @@ export function extractState(
 							{
 								fill: {
 									color: color.hex,
-									transparency: Math.round((1 - color.a * opacity) * 100),
+									transparency: (1 - color.a * opacity) * 100,
 								},
 								side,
 								width,
@@ -577,9 +580,7 @@ export function extractState(
 			fill: visibleFill && {
 				color: visibleFill.hex,
 				gradient,
-				transparency: gradient
-					? 0
-					: Math.round((1 - visibleFill.a * opacity) * 100),
+				transparency: gradient ? 0 : (1 - visibleFill.a * opacity) * 100,
 			},
 			radius: px(el, "border-top-left-radius"),
 		};
@@ -602,6 +603,10 @@ export function extractState(
 					.join(""),
 			)
 			.join("¶");
+	const isInvisible = (paragraphs: Paragraph[]) =>
+		paragraphs.every(({ runs }) =>
+			runs.every((run) => run.transparency >= 100),
+		);
 
 	const textItem = (el: Element, entry: LaidOutRuns, opacity: number) => {
 		const { box: rawBox, rotation, scale } = geometry(entry.box);
@@ -611,13 +616,15 @@ export function extractState(
 			(owner) => (entry.anonymous ? opacity : opacityOf(owner)),
 			entry.anonymous ? undefined : el,
 		);
-		if (!paragraphs.some((p) => p.runs.length)) {
+		if (isInvisible(paragraphs)) {
 			return;
 		}
 
 		push({
 			baselines: rotation ? undefined : baselines,
 			box,
+			heading:
+				!entry.anonymous && /^h[1-6]$/i.test(el.tagName) ? true : undefined,
 			key: `${pathOf(el)}#${entry.anonymous ? "loose" : "text"}:${signatureOf(paragraphs)}`,
 			kind: "text",
 			paragraphs,
@@ -667,6 +674,10 @@ export function extractState(
 			!paragraphs[paragraphs.length - 1].runs.length
 		) {
 			paragraphs.pop();
+		}
+
+		if (isInvisible(paragraphs)) {
+			return;
 		}
 
 		const signature = paragraphs
@@ -724,29 +735,29 @@ export function extractState(
 			right = Math.max(right, converted.right);
 			wraps.push(converted.wrapRight !== undefined);
 
-			const liRuns = converted.paragraphs.flatMap((p) => p.runs);
 			return {
 				baselines: converted.baselines,
 				bullet:
 					styleOf(li)["list-style-type"] !== "none" && listStyle !== "none",
-				key: `${pathOf(li)}:${liRuns.map((r) => r.text).join("")}`,
 				number: numbers[index],
-				runs: liRuns,
+				runs: converted.paragraphs.flatMap((p) => p.runs),
 				visible: opacityOf(li) > 0.05,
 			};
 		});
+		if (isInvisible(paragraphs)) {
+			return;
+		}
+
 		const first = lis.at(0);
 		const marker = first ? markers.get(first) : undefined;
 		const box = contentBox(list, listBox, scale);
 		push({
 			box,
 			bulletColor: marker ? parseColor(marker.color)?.hex : undefined,
-			indent: px(list, "padding-left") * scale,
 			key: `${pathOf(list)}#list`,
 			kind: "list",
 			marker: (first && styleOf(first)["list-style-type"]) ?? listStyle,
 			paragraphs,
-			rotation: 0,
 			style: {
 				align: alignOf(first ?? list),
 				lineHeight: lineHeightOf(first ?? list) * scale,
@@ -816,7 +827,7 @@ export function extractState(
 				: decodeURIComponent(path.basename(src.replace(/[?#].*$/, ""))),
 			radius,
 			src,
-			transparency: Math.round((1 - opacity) * 100),
+			transparency: (1 - opacity) * 100,
 		});
 	};
 
@@ -883,11 +894,11 @@ export function extractState(
 					label: `background of ${labelOf(el) ?? "element"}`,
 					radius,
 					src: url,
-					transparency: Math.round((1 - opacity) * 100),
+					transparency: (1 - opacity) * 100,
 				});
 			} else if (layer.startsWith("linear-gradient")) {
 				const gradient = linearGradient(layer, opacity);
-				if (!gradient?.stops.some((stop) => (stop.a ?? 1) > 0.004)) {
+				if (!gradient?.stops.some((stop) => stop.transparency < 99.6)) {
 					return;
 				}
 
@@ -1047,23 +1058,19 @@ export function extractState(
 			}),
 		);
 
-	const rasterItem = (el: Element, reason: string) => {
-		// Identified by the element, so its renders in different click states line up.
-		const id = `r${String(no)}-${createHash("sha1").update(pathOf(el)).digest("hex").slice(0, 8)}`;
+	const rasterItem = (el: Element) => {
 		const box = rasterBox(el);
 		if (box.w <= 0 || box.h <= 0) {
 			return;
 		}
 
-		rasters.push({ box, id, selector: `[${ID}="${idOf(el)}"]` });
 		push({
 			alt: textOf(el),
 			box,
 			key: `${pathOf(el)}#raster`,
 			kind: "raster",
 			label: labelOf(el),
-			rasterId: id,
-			reason,
+			selector: `[${ID}="${idOf(el)}"]`,
 		});
 	};
 
@@ -1087,7 +1094,7 @@ export function extractState(
 				].includes(shape.tagName.toLowerCase()),
 			)
 		) {
-			rasterItem(svg, "svg");
+			rasterItem(svg);
 			return;
 		}
 
@@ -1127,6 +1134,23 @@ export function extractState(
 				: parseColor(value, styleOf(shape).color);
 		};
 
+		const strokeOf = (shape: Element, shapeOpacity: number) => {
+			const stroke = paint(shape, "stroke");
+			return stroke && stroke.a > 0.01
+				? {
+						color: stroke.hex,
+						transparency: (1 - stroke.a * shapeOpacity) * 100,
+						width:
+							toPx(
+								styleOf(shape)["stroke-width"] ??
+									shape.getAttribute("stroke-width") ??
+									"1",
+								16,
+							) * k,
+					}
+				: undefined;
+		};
+
 		for (const shape of shapes) {
 			const shapeOpacity =
 				opacityOf(shape) * Number(shape.getAttribute("opacity") ?? 1);
@@ -1146,39 +1170,29 @@ export function extractState(
 					points.push(toSlide(numbers[i], numbers[i + 1]));
 				}
 
+				const xs = points.map((point) => point.x);
+				const ys = points.map((point) => point.y);
+				const x = Math.min(...xs);
+				const y = Math.min(...ys);
 				const fill = paint(shape, "fill");
-				const stroke = paint(shape, "stroke");
-				const strokeWidth =
-					toPx(
-						styleOf(shape)["stroke-width"] ??
-							shape.getAttribute("stroke-width") ??
-							"1",
-						16,
-					) * k;
 				push({
-					border:
-						stroke && stroke.a > 0.01
-							? {
-									color: stroke.hex,
-									transparency: Math.round((1 - stroke.a * shapeOpacity) * 100),
-									width: strokeWidth,
-								}
-							: undefined,
+					border: strokeOf(shape, shapeOpacity),
+					box: { h: Math.max(...ys) - y, w: Math.max(...xs) - x, x, y },
 					fill: fill && {
 						color: fill.hex,
 						gradient: fill.gradient && {
 							...fill.gradient,
 							stops: fill.gradient.stops.map((stop) => ({
 								...stop,
-								a: (stop.a ?? 1) * shapeOpacity,
+								transparency: 100 - (100 - stop.transparency) * shapeOpacity,
 							})),
 						},
-						transparency: Math.round((1 - fill.a * shapeOpacity) * 100),
+						transparency: (1 - fill.a * shapeOpacity) * 100,
 					},
 					key: `${key}#polygon`,
 					kind: "polygon",
 					label: shapeLabelOf(shape),
-					points,
+					points: points.map((point) => ({ x: point.x - x, y: point.y - y })),
 				});
 			} else if (tag === "circle") {
 				const fill = paint(shape, "fill");
@@ -1188,10 +1202,11 @@ export function extractState(
 				);
 				const r = Number(shape.getAttribute("r")) * k;
 				push({
+					border: strokeOf(shape, shapeOpacity),
 					box: { h: r * 2, w: r * 2, x: center.x - r, y: center.y - r },
 					fill: fill && {
 						color: fill.hex,
-						transparency: Math.round((1 - fill.a * shapeOpacity) * 100),
+						transparency: (1 - fill.a * shapeOpacity) * 100,
 					},
 					key: `${key}#circle`,
 					kind: "ellipse",
@@ -1219,7 +1234,7 @@ export function extractState(
 					color: fill?.hex ?? "ffffff",
 					size,
 					text,
-					transparency: Math.round((1 - (fill?.a ?? 1) * shapeOpacity) * 100),
+					transparency: (1 - (fill?.a ?? 1) * shapeOpacity) * 100,
 				};
 				push({
 					baselines: [baseline],
@@ -1334,6 +1349,15 @@ export function extractState(
 			return;
 		}
 
+		const embed = UNSUPPORTED_EMBEDS.find(([selector]) => el.matches(selector));
+		if (embed) {
+			const source = el.getAttribute("src");
+			problems.push(
+				`Couldn't export ${embed[1]}${source ? ` (${source})` : ""}.`,
+			);
+			return;
+		}
+
 		const laidOut = boxOf(el);
 		if (!laidOut) {
 			return;
@@ -1384,7 +1408,7 @@ export function extractState(
 		} else if (tag === "pre") {
 			codeItem(el);
 		} else if (isDense(el) && [...el.children].filter(isDense).length !== 1) {
-			rasterItem(el, "dense");
+			rasterItem(el);
 		} else if (
 			(tag === "ul" || tag === "ol") &&
 			[...el.children].every(
@@ -1432,7 +1456,7 @@ export function extractState(
 		walk(child);
 	}
 
-	return { items, rasters };
+	return { items, problems };
 }
 
 /** The overlap of two boxes. */
@@ -1583,11 +1607,11 @@ function linearGradient(value: string, opacity: number): Gradient | undefined {
 				position ? part.slice(0, position.index) : part,
 			) ?? { a: 0, hex: "000000" };
 			return {
-				a: color.a * opacity,
 				hex: color.hex,
-				pos: position
+				position: position
 					? Number(position[1])
 					: (i / Math.max(1, parts.length - 1)) * 100,
+				transparency: (1 - color.a * opacity) * 100,
 			};
 		}),
 	};
@@ -1610,9 +1634,10 @@ function svgGradient(
 		) ?? { a: 1, hex: "000000" };
 		const offset = stop.getAttribute("offset") ?? "0";
 		return {
-			a: color.a * Number(stop.getAttribute("stop-opacity") ?? 1),
 			hex: color.hex,
-			pos: parseFloat(offset) * (offset.includes("%") ? 1 : 100),
+			position: parseFloat(offset) * (offset.includes("%") ? 1 : 100),
+			transparency:
+				(1 - color.a * Number(stop.getAttribute("stop-opacity") ?? 1)) * 100,
 		};
 	});
 	if (!stops.length) {
@@ -1644,7 +1669,11 @@ function svgGradient(
 			) / stops.length,
 		);
 	return {
-		a: stops.reduce((sum, stop) => sum + stop.a, 0) / stops.length,
+		a:
+			1 -
+			stops.reduce((sum, stop) => sum + stop.transparency, 0) /
+				stops.length /
+				100,
 		gradient: { angle, stops },
 		hex: [0, 2, 4]
 			.map((i) => average(i).toString(16).padStart(2, "0"))

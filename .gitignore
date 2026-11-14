@@ -1,5 +1,7 @@
+/*.pptx
 /coverage
 /dist
 /node_modules
 /research
 /scripts/pptx/fixture/node_modules
+~$*

@@ -1,6 +1,6 @@
 # Development
 
-After [forking the repo from GitHub](https://help.github.com/articles/fork-a-repo) and [installing pnpm](https://pnpm.io/installation):
+After [forking the repo from GitHub](https://help.github.com/articles/fork-a-repo), [installing pnpm](https://pnpm.io/installation), and switching to the Node.js version in [`.nvmrc`](../.nvmrc) (such as with [nvm](https://github.com/nvm-sh/nvm)'s `nvm use`):
 
 ```shell
 git clone https://github.com/(your-name-here)/make-ai-write-better-code
@@ -13,16 +13,10 @@ pnpm install
 
 ## Building
 
-Run [**tsdown**](https://tsdown.dev) locally to build source files from `src/` into output files in `dist/`:
+Run [Slidev](https://sli.dev) to build the deck into a static site in `dist/`:
 
 ```shell
 pnpm build
-```
-
-Add `--watch` to run the builder in a watch mode that continuously cleans and recreates `dist/` as you save files:
-
-```shell
-pnpm build --watch
 ```
 
 ## Formatting
@@ -41,7 +35,7 @@ pnpm format --write
 This package includes several forms of linting to enforce consistent code quality and styling.
 Each should be shown in VS Code, and can be run manually on the command-line:
 
-- `pnpm lint` ([ESLint](https://eslint.org) with [typescript-eslint](https://typescript-eslint.io)): Lints source files, including JavaScript, Markdown, and TypeScript
+- `pnpm lint` ([ESLint](https://eslint.org) with [typescript-eslint](https://typescript-eslint.io)): Lints source files, including JavaScript, Markdown, TypeScript, and Vue
 - `pnpm lint:knip` ([knip](https://github.com/webpro/knip)): Detects unused files, dependencies, and code exports
 - `pnpm lint:spelling` ([cspell](https://cspell.org)): Spell checks across all source files
 
@@ -52,8 +46,6 @@ For example, ESLint can be run with `--fix` to auto-fix some lint rule complaint
 ```shell
 pnpm run lint --fix
 ```
-
-Note that you'll need to run `pnpm build` before `pnpm lint` so that lint rules which check the file system can pick up on any built files.
 
 ## Testing
 
@@ -82,7 +74,7 @@ To launch it, open a test file, then run _Debug Current Test File_ from the VS C
 
 You should be able to see suggestions from [TypeScript](https://typescriptlang.org) in your editor for all open files.
 
-However, it can be useful to run the TypeScript command-line (`tsc`) to type check all files in `src/`:
+However, it can be useful to run the TypeScript command-line (`tsc`) to type check all TypeScript files:
 
 ```shell
 pnpm tsc

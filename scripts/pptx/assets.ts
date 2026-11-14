@@ -3,9 +3,13 @@
  * serves them: public files, Vite-served project and dependency files, data: URIs,
  * and remote URLs.
  */
+import * as csstree from "css-tree";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+
+import { resolveLength } from "./cascade.ts";
+import { unquote } from "./css.ts";
 
 export interface Assets {
 	/** A file already loaded by `load`. */
@@ -25,30 +29,21 @@ export interface AssetsOptions {
 	work: string;
 }
 
-export type ImageFormat =
-	"avif" | "bmp" | "gif" | "jpeg" | "png" | "svg" | "webp";
-
 export function createAssets({ publicDir, root, work }: AssetsOptions): Assets {
-	const loaded = new Map<string, Promise<Buffer | undefined>>();
-	const ready = new Map<string, Buffer | undefined>();
-	const saved = new Map<string, string>();
-
-	const read = async (url: string): Promise<Buffer | undefined> => {
+	const files = createCache(async (url: string) => {
 		const comma = url.indexOf(",");
 		if (url.startsWith("data:") && comma > 0) {
 			const body = url.slice(comma + 1);
 			return url.slice(0, comma).endsWith(";base64")
 				? Buffer.from(body, "base64")
-				: Buffer.from(decodeURIComponent(body));
+				: decodePercents(body);
 		}
 
 		if (/^(?:https?:)?\/\//i.test(url)) {
 			try {
 				const response = await fetch(
 					url.startsWith("//") ? `https:${url}` : url,
-					{
-						signal: AbortSignal.timeout(30_000),
-					},
+					{ signal: AbortSignal.timeout(30_000) },
 				);
 				return response.ok
 					? Buffer.from(await response.arrayBuffer())
@@ -59,27 +54,16 @@ export function createAssets({ publicDir, root, work }: AssetsOptions): Assets {
 		}
 
 		const file = localFile(url, { publicDir, root });
-		return file ? fs.readFileSync(file) : undefined;
-	};
+		return file ? fs.promises.readFile(file) : undefined;
+	});
+	const saved = new Map<string, string>();
 
 	return {
-		get: (url) => ready.get(unquote(url)),
-		load(url) {
-			const key = unquote(url);
-			let promise = loaded.get(key);
-			if (!promise) {
-				promise = read(key).then((buffer) => {
-					ready.set(key, buffer);
-					return buffer;
-				});
-				loaded.set(key, promise);
-			}
-
-			return promise;
-		},
+		get: (url) => files.get(unquote(url)),
+		load: (url) => files.load(unquote(url)),
 		save(url) {
 			const key = unquote(url);
-			const data = ready.get(key);
+			const data = files.get(key);
 			if (!data) {
 				return undefined;
 			}
@@ -101,8 +85,41 @@ export function createAssets({ publicDir, root, work }: AssetsOptions): Assets {
 	};
 }
 
+/** Memoizes an async loader, keeping each settled value for synchronous reads. */
+export function createCache<Key, Value>(load: (key: Key) => Promise<Value>) {
+	const promises = new Map<Key, Promise<Value>>();
+	const values = new Map<Key, Value>();
+	return {
+		get: (key: Key) => values.get(key),
+		load: (key: Key) => {
+			let promise = promises.get(key);
+			if (!promise) {
+				promise = load(key).then((value) => {
+					values.set(key, value);
+					return value;
+				});
+				promises.set(key, promise);
+			}
+
+			return promise;
+		},
+	};
+}
+
+/** The URLs in a CSS value's url() functions. */
+export function cssUrls(value: string) {
+	const urls: string[] = [];
+	csstree.walk(csstree.parse(value, { context: "value" }), {
+		enter(node) {
+			urls.push(node.value);
+		},
+		visit: "Url",
+	});
+	return urls;
+}
+
 /** Recognizes an image format by its leading bytes. */
-export function imageFormat(data: Buffer): ImageFormat | undefined {
+export function imageFormat(data: Buffer) {
 	if (data.length >= 4 && data.readUInt32BE(0) === 0x89504e47) {
 		return "png";
 	}
@@ -146,34 +163,27 @@ export function imageSize(data: Buffer): undefined | { h: number; w: number } {
 		case "gif":
 			return { h: data.readUInt16LE(8), w: data.readUInt16LE(6) };
 		case "jpeg":
-			for (let i = 2; i + 9 < data.length;) {
-				const marker = data[i + 1];
+			for (let offset = 2; offset + 9 < data.length;) {
+				const marker = data[offset + 1];
 				if (
 					marker >= 0xc0 &&
 					marker <= 0xcf &&
 					![0xc4, 0xc8, 0xcc].includes(marker)
 				) {
-					return { h: data.readUInt16BE(i + 5), w: data.readUInt16BE(i + 7) };
+					return {
+						h: data.readUInt16BE(offset + 5),
+						w: data.readUInt16BE(offset + 7),
+					};
 				}
 
-				i += 2 + data.readUInt16BE(i + 2);
+				offset += 2 + data.readUInt16BE(offset + 2);
 			}
 
 			return undefined;
 		case "png":
 			return { h: data.readUInt32BE(20), w: data.readUInt32BE(16) };
-		case "svg": {
-			const tag = /<svg\b[^>]*>/i.exec(data.toString("utf8"))?.[0] ?? "";
-			const attribute = (name: string) =>
-				new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(tag)?.[1];
-			const viewBox = attribute("viewBox")
-				?.trim()
-				.split(/[\s,]+/)
-				.map(Number);
-			const w = parseFloat(attribute("width") ?? "") || viewBox?.[2];
-			const h = parseFloat(attribute("height") ?? "") || viewBox?.[3];
-			return w && h ? { h, w } : undefined;
-		}
+		case "svg":
+			return svgSize(data.toString("utf8"));
 		case "webp": {
 			const chunk = data.toString("latin1", 12, 16);
 			if (chunk === "VP8X") {
@@ -198,33 +208,54 @@ export function imageSize(data: Buffer): undefined | { h: number; w: number } {
 	}
 }
 
+function decodePercents(text: string) {
+	return Buffer.concat(
+		text
+			.split(/(%[\da-f]{2})/i)
+			.map((part, index) =>
+				index % 2 ? Buffer.from(part.slice(1), "hex") : Buffer.from(part),
+			),
+	);
+}
+
 /** Where a page URL's file is on disk: public files first, then files Vite serves from the project or file system. */
 function localFile(
 	url: string,
 	{ publicDir, root }: Pick<AssetsOptions, "publicDir" | "root">,
 ) {
-	let pathname = url.replace(/[?#].*$/, "");
-	try {
-		pathname = decodeURIComponent(pathname);
-	} catch {
-		// Keep the path as written.
-	}
-
+	const pathname = decodePercents(url.replace(/[?#].*$/, "")).toString();
 	const candidates = pathname.startsWith("/@fs/")
-		? [pathname.slice("/@fs".length)]
-		: pathname.startsWith("/")
-			? [path.join(publicDir, pathname), path.join(root, pathname), pathname]
-			: [path.resolve(root, pathname)];
-	return candidates.find(
-		(candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile(),
+		? [pathname.slice("/@fs".length).replace(/^\/(?=[a-z]:)/i, "")]
+		: [path.join(publicDir, pathname), path.join(root, pathname)];
+	return candidates.find((candidate) =>
+		fs.statSync(candidate, { throwIfNoEntry: false })?.isFile(),
 	);
 }
 
-const unquote = (url: string) => url.trim().replace(/^(["'])(.*)\1$/s, "$2");
+function svgSize(svg: string) {
+	const tag = /<svg\b[^>]*>/i.exec(svg)?.[0] ?? "";
+	const attribute = (name: string) =>
+		new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(tag)?.[1];
+	const length = (name: string) => {
+		const value = attribute(name)?.trim();
+		return value && !value.endsWith("%")
+			? resolveLength(value, {
+					fontSize: 16,
+					rootFontSize: 16,
+					viewport: { height: 0, width: 0 },
+				}) || undefined
+			: undefined;
+	};
 
-/** The URLs in a CSS value's url() functions, unquoted. */
-export function cssUrls(value: string): string[] {
-	return [...value.matchAll(/url\(([^)]*)\)/g)].map(([, inner]) =>
-		unquote(inner),
-	);
+	const [, , viewWidth, viewHeight] =
+		attribute("viewBox")
+			?.trim()
+			.split(/[\s,]+/)
+			.map(Number) ?? [];
+	const ratio = viewWidth && viewHeight ? viewWidth / viewHeight : undefined;
+	const width = length("width");
+	const height = length("height");
+	const w = width ?? (height && ratio ? height * ratio : viewWidth);
+	const h = height ?? (width && ratio ? width / ratio : viewHeight);
+	return w && h ? { h, w } : undefined;
 }

@@ -11,6 +11,7 @@
 		"markdown",
 		"typescript",
 		"typescriptreact",
+		"vue",
 		"yaml"
 	],
 	"eslint.rules.customizations": [{ "rule": "*", "severity": "warn" }],

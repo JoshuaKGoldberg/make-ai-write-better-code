@@ -4,31 +4,42 @@
  */
 import type { SlidevConfig } from "@slidev/types";
 
+const PUSH_DIRECTIONS: Record<string, string> = {
+	down: "d",
+	left: "l",
+	right: "r",
+	up: "u",
+};
+
 /**
  * The transition into a slide, as Slidev plays it going forward: the previous slide's
  * `transition`, else the deck's, and a "forward | backward" pair's forward half.
  */
 export function transitionInto(
-	no: number,
+	slideNumber: number,
 	slides: { frontmatter: Record<string, unknown> }[],
 	config: { transition?: SlidevConfig["transition"] },
-): string | undefined {
-	if (no <= 1) {
+) {
+	if (slideNumber <= 1) {
 		return undefined;
 	}
 
-	const own: unknown = slides[no - 2]?.frontmatter.transition;
-	// Like Slidev, any falsy transition (like false or "") defers to the deck's.
-	const value: unknown = isFalsy(own) ? config.transition : own;
-	const name =
-		typeof value === "string"
-			? value
-			: typeof value === "object" && value && "name" in value
-				? String(value.name)
-				: undefined;
-	const forward = name?.split("|")[0].trim();
+	const forward = (
+		nameOf(slides[slideNumber - 2].frontmatter.transition) ??
+		nameOf(config.transition)
+	)
+		?.split("|")[0]
+		.trim();
 	return forward === "" ? undefined : forward;
 }
+
+/** A transition's name, if it has one: like Slidev, falsy transitions (like false or "") defer to the deck's. */
+const nameOf = (transition: unknown) =>
+	typeof transition === "object" && transition && "name" in transition
+		? String(transition.name)
+		: typeof transition === "string" && transition !== ""
+			? transition
+			: undefined;
 
 /**
  * PowerPoint's closest transition to a Slidev one: fades for fades (and view transitions),
@@ -41,16 +52,9 @@ export function transitionXml(name: string | undefined) {
 
 	const push = /^slide-(left|right|up|down)$/.exec(name)?.[1];
 	const effect = push
-		? `<p:push dir="${push === "left" ? "l" : push === "right" ? "r" : push === "up" ? "u" : "d"}"/>`
+		? `<p:push dir="${PUSH_DIRECTIONS[push]}"/>`
 		: name === "fade-out"
 			? '<p:fade thruBlk="1"/>'
 			: "<p:fade/>";
 	return `<p:transition spd="fast">${effect}</p:transition>`;
 }
-
-const isFalsy = (value: unknown) =>
-	value === undefined ||
-	value === null ||
-	value === false ||
-	value === "" ||
-	value === 0;

@@ -49,13 +49,13 @@ layout: cover
 .cover-name {
   color: var(--jg-fg-strong);
   font-size: var(--jg-size-large);
-  font-weight: 600;
+  font-weight: var(--jg-weight-bold);
 }
 
 .cover-handle {
   color: var(--jg-link);
   font-size: var(--jg-size-medium);
-  font-weight: 500;
+  font-weight: var(--jg-weight-medium);
   margin-top: 0.75rem;
 }
 </style>
@@ -122,7 +122,7 @@ layout: default
 .projects li {
   align-items: center;
   display: flex;
-  font-weight: 500;
+  font-weight: var(--jg-weight-medium);
   gap: 1rem;
 }
 
@@ -192,12 +192,7 @@ layout: center
 
 ## "The Bug Acquisition Funnel"
 
-<Funnel
-  :highlight="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-  :stages="['Core Systems', 'Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review', 'Telemetry', 'User Feedback']"
-  bottom="Some (never none)"
-  top="Many bugs"
-/>
+<BugFunnel bottom="Some (never none)" top="Many bugs" />
 
 <p class="muted funnel-caption">(not to scale)</p>
 
@@ -216,11 +211,7 @@ layout: center
 clicks: 4
 ---
 
-<Funnel
-  :highlight="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-  :questions="['What should it be?', 'Is it written right?', 'Does it match the spec?', 'Is the spec correct?']"
-  :stages="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-/>
+<BugFunnel development />
 
 <!--
 Today we're going to talk about the four parts of the funnel that happen while code is being written. These are the same four parts whether a human or an agent is writing it.
@@ -258,13 +249,7 @@ I'm ready!
 layout: center
 ---
 
-<div class="signpost-eyebrow"><div class="eyebrow">1/4</div></div>
-
-<Funnel
-  current="Design Thought"
-  :questions="['What should it be?', 'Is it written right?', 'Does it match the spec?', 'Is the spec correct?']"
-  :stages="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-/>
+<BugFunnel current="Design Thought" />
 
 <!--
 Part one of four: design thought. What should it be?
@@ -356,7 +341,7 @@ layout: default
 
 ## Precise Prompting
 
-<div class="principles">
+<div class="cards principles">
   <div v-click>
     <h3>Know the task ahead of time</h3>
     <p>Have it write a plan first. Read the plan before any code exists.</p>
@@ -438,7 +423,7 @@ layout: default
 
 <p class="big" v-click>At least once a week, take on a real code task <strong>without AI</strong>.</p>
 
-<div class="reasons" v-click>
+<div class="cards reasons" v-click>
   <div>
     <h3>Context</h3>
     <p>You stay current on how your codebase actually works.</p>
@@ -553,7 +538,7 @@ layout: default
 
 ## Where Should Context Go?
 
-<div class="context-grid">
+<div class="cards context-grid">
   <div v-click>
     <h3><code>AGENTS.md</code></h3>
     <p class="muted">Always true</p>
@@ -580,7 +565,6 @@ layout: default
   margin: 2rem 0;
 }
 
-/* Keep the AGENTS.md heading flush with the text below it. */
 .context-grid h3 code {
   padding-inline: 0;
 }
@@ -696,13 +680,7 @@ I put screenshots in the description of every frontend PR, and writing that desc
 layout: center
 ---
 
-<div class="signpost-eyebrow"><div class="eyebrow">2/4</div></div>
-
-<Funnel
-  current="Static Analysis"
-  :questions="['What should it be?', 'Is it written right?', 'Does it match the spec?', 'Is the spec correct?']"
-  :stages="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-/>
+<BugFunnel current="Static Analysis" />
 
 <!--
 Part two of four: static analysis. Is it written right?
@@ -784,7 +762,7 @@ try {
 console.log(`I have ${count * 2} items.`);
 ```
 
-<CodeHover :col="22" :length="5" :line="8" :shown="$clicks >= 1" message="'count' is possibly 'undefined'." source="ts(18048)" />
+<CodeHover :column="22" :length="5" :line="8" :shown="$clicks >= 1" message="'count' is possibly 'undefined'." source="ts(18048)" />
 
 </div>
 
@@ -816,7 +794,7 @@ function formatTalk(talk) {
 }
 ```
 
-<CodeHover :col="20" :length="4" :line="0" :shown="$clicks === 1" message="Parameter 'talk' implicitly has an 'any' type." source="ts(7006)" />
+<CodeHover :column="20" :length="4" :line="0" :shown="$clicks === 1" message="Parameter 'talk' implicitly has an 'any' type." source="ts(7006)" />
 
 </div>
 
@@ -904,7 +882,7 @@ function TalkCard({ talk }: TalkCardProps) {
 ```
 ````
 
-<CodeHover :col="4" :length="11" :line="4" :shown="$clicks === 1" message="Calling setState synchronously within an effect can trigger cascading renders" source="eslint(react-hooks/set-state-in-effect)" />
+<CodeHover :column="4" :length="11" :line="4" :shown="$clicks === 1" message="Calling setState synchronously within an effect can trigger cascading renders" source="eslint(react-hooks/set-state-in-effect)" />
 
 </div>
 
@@ -912,14 +890,7 @@ function TalkCard({ talk }: TalkCardProps) {
 
 <style>
 .success {
-  font-size: var(--jg-size-medium);
-  margin-top: 1rem !important;
-  opacity: 0;
-  transition: opacity var(--jg-duration-medium) ease;
-}
-
-.success.shown {
-  opacity: 1;
+  margin-top: 1rem;
 }
 </style>
 
@@ -1116,13 +1087,13 @@ function MyButton({ onClick }: { onClick: () => void }) {
 ```
 ````
 
-<CodeHover :col="4" :length="15" :line="5" :shown="$clicks === 1" message="Unexpected `await` of a non-Promise (non-&quot;Thenable&quot;) value." source="eslint(@typescript-eslint/await-thenable)" />
+<CodeHover :column="4" :length="15" :line="5" :shown="$clicks === 1" message="Unexpected `await` of a non-Promise (non-&quot;Thenable&quot;) value." source="eslint(@typescript-eslint/await-thenable)" />
 
-<CodeHover :col="39" :length="19" :line="10" :shown="$clicks === 2" message="Promise-returning function provided to attribute where a void return was expected." source="eslint(@typescript-eslint/no-misused-promises)" />
+<CodeHover :column="39" :length="19" :line="10" :shown="$clicks === 2" message="Promise-returning function provided to attribute where a void return was expected." source="eslint(@typescript-eslint/no-misused-promises)" />
 
-<CodeHover :col="2" :length="34" :line="3" :shown="$clicks === 4" message="Async function 'onClickAndDisable' has no 'await' expression." source="eslint(@typescript-eslint/require-await)" />
+<CodeHover :column="2" :length="34" :line="3" :shown="$clicks === 4" message="Async function 'onClickAndDisable' has no 'await' expression." source="eslint(@typescript-eslint/require-await)" />
 
-<CodeHover :col="18" :length="10" :line="1" :shown="$clicks === 6" message="'setRunning' is assigned a value but never used." source="eslint(@typescript-eslint/no-unused-vars)" />
+<CodeHover :column="18" :length="10" :line="1" :shown="$clicks === 6" message="'setRunning' is assigned a value but never used." source="eslint(@typescript-eslint/no-unused-vars)" />
 
 </div>
 
@@ -1130,14 +1101,7 @@ function MyButton({ onClick }: { onClick: () => void }) {
 
 <style>
 .success {
-  font-size: var(--jg-size-medium);
-  margin-top: 0.75rem !important;
-  opacity: 0;
-  transition: opacity var(--jg-duration-medium) ease;
-}
-
-.success.shown {
-  opacity: 1;
+  margin-top: 0.75rem;
 }
 </style>
 
@@ -1457,13 +1421,7 @@ Remember "copies of the design system"? This is how you stop them for good. If y
 layout: center
 ---
 
-<div class="signpost-eyebrow"><div class="eyebrow">3/4</div></div>
-
-<Funnel
-  current="Dynamic Analysis"
-  :questions="['What should it be?', 'Is it written right?', 'Does it match the spec?', 'Is the spec correct?']"
-  :stages="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-/>
+<BugFunnel current="Dynamic Analysis" />
 
 <!--
 Part three of four: dynamic analysis. Does it match the spec?
@@ -1479,7 +1437,7 @@ layout: default
 
 <p class="muted">Tooling that scrutinizes code by running it</p>
 
-<div class="layers">
+<div class="cards layers">
   <div v-click>
     <h3>Unit</h3>
     <p>Logic, in isolation</p>
@@ -1567,7 +1525,7 @@ layout: default
 
 ## Protip: Respect, Add To, and Use the Spec
 
-<div class="principles">
+<div class="cards principles">
   <div v-click>
     <h3>Respect</h3>
     <p>Editing or deleting a test changes the spec.</p>
@@ -1598,7 +1556,7 @@ layout: default
 
 ## Testing Strategies That Are Much Easier Now
 
-<div class="principles">
+<div class="cards principles">
   <div v-click>
     <h3>Test-driven development</h3>
     <p>Write the tests first, then the code that passes them.</p>
@@ -1674,7 +1632,7 @@ it("shows 'No results' when nothing matches", async () => {
 .aaa {
   display: flex;
   font-size: var(--jg-size-large);
-  font-weight: 600;
+  font-weight: var(--jg-weight-bold);
   gap: 2.5rem;
   justify-content: center;
 }
@@ -1711,7 +1669,7 @@ layout: default
 
 ## What Not to Test
 
-<div class="principles">
+<div class="cards principles">
   <div v-click>
     <h3>Features that are gone</h3>
     <p>Don't assert that removed code stays removed.</p>
@@ -1758,7 +1716,7 @@ layout: default
 
 ## Testing More Than One Piece
 
-<div class="principles test-scopes">
+<div class="cards principles test-scopes">
   <div>
     <h3>Unit</h3>
     <p>One piece, in isolation.</p>
@@ -1899,7 +1857,7 @@ layout: default
 
 <p class="big" v-click>Reasoning about code isn't running it.</p>
 
-<div class="principles" v-click>
+<div class="cards principles" v-click>
   <div>
     <h3>Ask for evidence</h3>
     <p>Screenshots, console output, and network requests from the running page.</p>
@@ -1938,7 +1896,7 @@ layout: default
 
 ## Protip: Watch What Users Actually Hit
 
-<div class="principles prod-signals">
+<div class="cards principles prod-signals">
   <div>
     <h3>Errors</h3>
     <p>Real exceptions, with stack traces and how many people hit them.</p>
@@ -1974,13 +1932,7 @@ Full disclosure: I work at Sentry, and this is the thing we build. Whatever you 
 layout: center
 ---
 
-<div class="signpost-eyebrow"><div class="eyebrow">4/4</div></div>
-
-<Funnel
-  current="Peer Review"
-  :questions="['What should it be?', 'Is it written right?', 'Does it match the spec?', 'Is the spec correct?']"
-  :stages="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-/>
+<BugFunnel current="Peer Review" />
 
 <!--
 Part four of four: peer review. Is the spec correct?
@@ -2017,8 +1969,8 @@ layout: default
 <style>
 .cta {
   font-size: var(--jg-size-subtitle);
-  font-weight: 600;
-  margin-top: 1.5rem !important;
+  font-weight: var(--jg-weight-bold);
+  margin-top: 1.5rem;
   white-space: nowrap;
 }
 </style>
@@ -2055,7 +2007,7 @@ layout: default
 
 <p class="big">Do something often? Have an agent distill it into a skill.</p>
 
-<div class="principles">
+<div class="cards principles">
   <div v-click>
     <h3>Gather</h3>
     <p>Point it at your past work: reviews, PRs, docs.</p>
@@ -2096,8 +2048,11 @@ layout: default
 
 <style>
 .protip {
+  background: var(--jg-card-bg);
   border: 1px solid var(--jg-hairline);
-  margin-top: 2rem !important;
+  border-radius: var(--jg-card-radius);
+  box-shadow: var(--jg-glow);
+  margin-top: 2rem;
   padding: 1rem 1.5rem;
 }
 </style>
@@ -2245,12 +2200,12 @@ clicks: 4
   color: rgb(119 187 255 / 0%);
   display: grid;
   font-size: 1.6rem;
-  font-weight: 700;
+  font-weight: var(--jg-weight-bolder);
   gap: 0.35rem;
   inset: -4rem;
   position: absolute;
   transform: rotate(-8deg);
-  transition: color 700ms ease;
+  transition: color var(--jg-duration-slowest) ease;
   white-space: nowrap;
 }
 
@@ -2259,15 +2214,17 @@ clicks: 4
 }
 
 .never-text {
-  font-size: var(--jg-size-title) !important;
+  font-size: var(--jg-size-title);
   position: relative;
   text-shadow: var(--jg-text-shadow);
-  transition: font-size 700ms ease, line-height 700ms ease;
+  transition:
+    font-size var(--jg-duration-slowest) ease,
+    line-height var(--jg-duration-slowest) ease;
 }
 
 .step-1 .never-text,
 .step-2 .never-text {
-  font-size: 5.5rem !important;
+  font-size: 5.5rem;
   text-transform: uppercase;
 }
 
@@ -2277,8 +2234,8 @@ clicks: 4
 
 .step-3 .never-text,
 .step-4 .never-text {
-  font-size: 10.5rem !important;
-  line-height: 0.9 !important;
+  font-size: 10.5rem;
+  line-height: 0.9;
   text-transform: uppercase;
 }
 
@@ -2291,12 +2248,12 @@ clicks: 4
   background: var(--jg-bg-bottom);
   bottom: 1.25rem;
   color: var(--jg-fg);
-  font-size: 1rem !important;
-  padding: 0.35rem 0.75rem;
+  font-size: 1rem;
   opacity: 0;
+  padding: 0.35rem 0.75rem;
   position: absolute;
   right: 2rem;
-  transition: opacity 280ms ease;
+  transition: opacity var(--jg-duration-medium) ease;
 }
 
 .step-4 .never-footnote {
@@ -2338,10 +2295,7 @@ layout: center
 
 ## "The Bug Acquisition Funnel"
 
-<Funnel
-  :highlight="['Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review']"
-  :stages="['Core Systems', 'Design Thought', 'Static Analysis', 'Dynamic Analysis', 'Peer Review', 'Telemetry', 'User Feedback']"
-/>
+<BugFunnel />
 
 <!--
 None of this gets you to zero bugs. Nothing does. The best you can do is get asymptotically close.
@@ -2399,7 +2353,7 @@ layout: default
 
 ## 🔗
 
-<div class="links">
+<div class="cards links">
   <div>
     <h3>Skills</h3>
     <p><a href="https://agentskills.io">agentskills.io</a></p>

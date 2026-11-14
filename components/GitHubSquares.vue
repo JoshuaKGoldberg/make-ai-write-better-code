@@ -1,10 +1,6 @@
 <script setup lang="ts">
 import contributions from "./github-contributions.json";
 
-// Snapshot of github.com/JoshuaKGoldberg's last 574 weeks (eleven years) of
-// contributions, from GitHub's GraphQL API. Each day is one character: a 0-4
-// contribution level, or "-" for days that hadn't happened yet. Weeks start on
-// Sunday and wrap into bands so the grid fills a 16:9 slide.
 const bandCount = 7;
 const daysPerWeek = 7;
 const weeksPerBand = contributions.levels.length / daysPerWeek / bandCount;
@@ -36,7 +32,7 @@ const bands = Array.from({ length: bandCount }, (_, band) =>
 .github-squares {
 	display: grid;
 	gap: 3px;
-	grid-template-rows: repeat(7, 1fr);
+	grid-template-rows: repeat(v-bind(bandCount), 1fr);
 	inset: 0;
 	padding: 3px;
 	position: absolute;
@@ -45,10 +41,10 @@ const bands = Array.from({ length: bandCount }, (_, band) =>
 .band {
 	column-gap: 3.7px;
 	display: grid;
-	row-gap: 3px;
 	grid-auto-columns: 1fr;
 	grid-auto-flow: column;
-	grid-template-rows: repeat(7, 1fr);
+	grid-template-rows: repeat(v-bind(daysPerWeek), 1fr);
+	row-gap: 3px;
 }
 
 .day {
