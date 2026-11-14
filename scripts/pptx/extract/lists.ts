@@ -1,10 +1,9 @@
 import type { ListParagraph } from "../model.ts";
 import type { ExtractContext, TextRuns } from "./context.ts";
 
-import { lineHeightOf } from "../cascade.ts";
+import { hasMarker, lineHeightOf } from "../cascade.ts";
 import { parseColor } from "../color.ts";
-import { hasMarker } from "../layout.ts";
-import { availableWidthOf } from "./boxes.ts";
+import { availableSpanOf } from "./boxes.ts";
 import { MIN_OPACITY, pathOf } from "./context.ts";
 import { geometryOf, insetBox } from "./geometry.ts";
 import {
@@ -65,7 +64,7 @@ export function listItem(
 		paragraphs,
 		style: {
 			align: alignOf(context, styled),
-			availableWidth: availableWidthOf(context, list, box.x),
+			available: availableSpanOf(context, list),
 			lineHeight: lineHeightOf(context.styleOf(styled)) * scale,
 			nowrap: false,
 			rtl: isRightToLeft(context, styled),

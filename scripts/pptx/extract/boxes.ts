@@ -35,12 +35,8 @@ const gradientFill = (gradient: Gradient): Fill => ({
 	transparency: 0,
 });
 
-export function availableWidthOf(
-	context: ExtractContext,
-	element: Element,
-	x: number,
-) {
-	const contentRight = (current: Element) => {
+export function availableSpanOf(context: ExtractContext, element: Element) {
+	const contentSpan = (current: Element) => {
 		const laidOut = context.boxOf(current);
 		if (!laidOut) {
 			return undefined;
@@ -48,7 +44,7 @@ export function availableWidthOf(
 
 		const { box, scale } = geometryOf(laidOut);
 		const content = insetBox(box, context.contentInsets(current), scale);
-		return content.x + content.width;
+		return { left: content.x, right: content.x + content.width };
 	};
 
 	for (
@@ -56,19 +52,22 @@ export function availableWidthOf(
 		current;
 		current = current.parentElement
 	) {
-		const right =
+		const span =
 			!context.isInline(current) && boxStyle(context, current, 1)
-				? contentRight(current)
+				? contentSpan(current)
 				: undefined;
-		if (right !== undefined) {
-			return Math.max(0, right - x);
+		if (span) {
+			return span;
 		}
 	}
 
 	const layoutRoot = element.closest(".slidev-layout");
-	const right =
-		(layoutRoot && contentRight(layoutRoot)) ?? context.canvas.width;
-	return Math.max(0, right - x);
+	return (
+		(layoutRoot && contentSpan(layoutRoot)) ?? {
+			left: 0,
+			right: context.canvas.width,
+		}
+	);
 }
 
 export function boxItems(

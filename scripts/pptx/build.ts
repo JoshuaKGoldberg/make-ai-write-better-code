@@ -286,11 +286,10 @@ function createStateExtractor({
 
 	async function extract(slide: PreparedSlide, click: number, state: Prepared) {
 		const laidOut = await layout.layoutState(state, slide.css);
-		for (const mismatch of laidOut.mismatches) {
-			const element = laidOut.byId.get(mismatch.id);
+		for (const { children, element, measured } of laidOut.mismatches) {
 			report({
 				click,
-				message: `<${element?.tagName.toLowerCase() ?? "?"}> has ${String(mismatch.children)} children but takumi measured ${String(mismatch.measured)}: ${(element?.textContent ?? "").trim().slice(0, 60)}`,
+				message: `<${element.tagName.toLowerCase()}> has ${String(children)} children but takumi measured ${String(measured)}: ${element.textContent.trim().slice(0, 60)}`,
 				severity: "warning",
 				slide: slide.number,
 			});

@@ -4,13 +4,14 @@ import type { LaidOutRuns, Layout } from "../layout.ts";
 import type { Canvas, ExtractedItem } from "../model.ts";
 import type { Insets, Side } from "./geometry.ts";
 
-import { INITIAL_STYLE, isOutOfFlow, resolveLength } from "../cascade.ts";
 import {
-	GENERATED_ELEMENTS,
-	ID,
+	INITIAL_STYLE,
 	isAtomicInline,
+	isOutOfFlow,
 	laysOutApart,
-} from "../layout.ts";
+	resolveLength,
+} from "../cascade.ts";
+import { GENERATED_ELEMENTS, ID } from "../layout.ts";
 import { scaleOf, SIDES } from "./geometry.ts";
 
 export type ExtractContext = ReturnType<typeof createExtractContext>;

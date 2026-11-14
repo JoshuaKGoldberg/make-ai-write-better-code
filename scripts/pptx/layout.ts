@@ -11,7 +11,12 @@ import type { CascadeRule, ComputedStyle, ComputedStyles } from "./cascade.ts";
 import type { Box, Canvas } from "./model.ts";
 
 import { cssUrls, imageSize } from "./assets.ts";
-import { computeStyles, isOutOfFlow } from "./cascade.ts";
+import {
+	computeStyles,
+	hasMarker,
+	isOutOfFlow,
+	laysOutApart,
+} from "./cascade.ts";
 import { parseDeclarations } from "./css.ts";
 
 /** The attribute that ties takumi's nodes back to DOM elements. */
@@ -21,13 +26,6 @@ export const ID = "data-pptx-id";
 const STATIC = "data-pptx-static";
 
 export const ZERO_WIDTH_SPACE = "\u200B";
-
-const ATOMIC_INLINE_DISPLAYS = new Set([
-	"inline-block",
-	"inline-flex",
-	"inline-grid",
-	"inline-table",
-]);
 
 /** The elements ::before and ::after content becomes. */
 export const GENERATED_ELEMENTS = {
@@ -54,6 +52,10 @@ const STATIC_EQUIVALENTS: Partial<
 	position: { sticky: "relative" },
 };
 
+/** Whether a run starts past the rest of a text node: past its white space, unless the run is white space too and the text's isn't a line break, which takumi doesn't lay out as a run. */
+const startsPast = (rest: string, runText: string) =>
+	!rest.trim() && (Boolean(runText.trim()) || rest.includes("\n"));
+
 /** Entities for the characters takumi's HTML parser needs escaped in attribute values: it ends a tag at the first `>`, even inside quotes. */
 const ATTRIBUTE_ENTITIES: Record<string, string> = {
 	'"': "&quot;",
@@ -61,16 +63,6 @@ const ATTRIBUTE_ENTITIES: Record<string, string> = {
 	"<": "&lt;",
 	">": "&gt;",
 };
-
-export const hasMarker = (style: ComputedStyle) =>
-	style.display === "list-item" && style["list-style-type"] !== "none";
-
-export const isAtomicInline = (style: ComputedStyle) =>
-	ATOMIC_INLINE_DISPLAYS.has(style.display);
-
-/** Whether an element in a line lays out apart from its text: an atomic inline, or a block-level box (out of flow, floated, or a block inside an inline). */
-export const laysOutApart = (style: ComputedStyle) =>
-	isAtomicInline(style) || !style.display.startsWith("inline");
 
 export interface Css {
 	rules: CascadeRule[];
@@ -767,7 +759,10 @@ function zipLayout(
 		let index = 0;
 		let offset = 0;
 		for (const run of measuredRuns) {
-			while (index < texts.length && !texts[index].text.slice(offset).trim()) {
+			while (
+				index < texts.length &&
+				startsPast(texts[index].text.slice(offset), run.text)
+			) {
 				index++;
 				offset = 0;
 			}

@@ -2,17 +2,17 @@ import type { ComputedStyle } from "../cascade.ts";
 import type { Color } from "../color.ts";
 import type { FontBook } from "../fonts.ts";
 import type { LaidOutRun } from "../layout.ts";
-import type { Paragraph, Point, Run, TextStyle } from "../model.ts";
+import type { Paragraph, Point, Run, TextStyle, Underline } from "../model.ts";
 import type { ExtractContext, TextRuns } from "./context.ts";
 
-import { isOutOfFlow } from "../cascade.ts";
+import { isAtomicInline, isOutOfFlow } from "../cascade.ts";
 import {
 	parseColor,
 	parseLinearGradient,
 	parseShadow,
 	transparencyOf,
 } from "../color.ts";
-import { isAtomicInline, ZERO_WIDTH_SPACE } from "../layout.ts";
+import { ZERO_WIDTH_SPACE } from "../layout.ts";
 import { clipsToText, paintedSizeOf } from "./boxes.ts";
 import { scaleOf } from "./geometry.ts";
 
@@ -41,6 +41,14 @@ const PRESERVED_NEWLINES = /^(?:pre|pre-wrap|pre-line|break-spaces)$/;
 
 const PRESERVED_SPACES = /^(?:pre|pre-wrap|break-spaces)$/;
 
+const UNDERLINE_STYLES: Partial<Record<string, Underline["style"]>> = {
+	dashed: "dashed",
+	dotted: "dotted",
+	double: "double",
+	solid: "single",
+	wavy: "wavy",
+};
+
 export function alignOf(context: ExtractContext, element: Element) {
 	const rtl = isRightToLeft(context, element);
 	const logical: Partial<Record<string, string>> = {
@@ -68,21 +76,8 @@ export const baselineOf = (
 
 export const isLineFeed = (run: LaidOutRun) => /^\n+$/.test(run.text);
 
-export const isRightToLeft = (context: ExtractContext, element: Element) => {
-	for (
-		let current: Element | null = element;
-		current;
-		current = current.parentElement
-	) {
-		const direction =
-			context.styleOf(current).direction ?? current.getAttribute("dir");
-		if (direction) {
-			return direction === "rtl";
-		}
-	}
-
-	return false;
-};
+export const isRightToLeft = (context: ExtractContext, element: Element) =>
+	context.styleOf(element).direction === "rtl";
 
 export const isInvisible = (paragraphs: Paragraph[]) =>
 	paragraphs.every(({ runs }) => runs.every((run) => run.transparency >= 100));
@@ -207,7 +202,7 @@ export function runsToParagraph(
 					lineBreak: "forced",
 					strike: false,
 					text: " ",
-					underline: false,
+					underline: undefined,
 				});
 			}
 
@@ -260,7 +255,7 @@ export function runStyle(
 		(length) => context.resolve(element, length),
 		style.color,
 	);
-	const decorations = decorationLinesOf(context, element);
+	const decorating = decoratingStylesOf(context, element);
 	return {
 		bold,
 		color: visible?.hex ?? "ffffff",
@@ -276,7 +271,9 @@ export function runStyle(
 		script: scriptOf(style, element),
 		shadow,
 		size: parseFloat(style["font-size"]) * zoom,
-		strike: decorations.some((lines) => lines.includes("line-through")),
+		strike: decorating.some(({ "text-decoration-line": lines }) =>
+			lines.includes("line-through"),
+		),
 		stroke: stroke
 			? {
 					color:
@@ -286,7 +283,12 @@ export function runStyle(
 				}
 			: undefined,
 		transparency: visible ? transparencyOf(visible.alpha, opacity) : 100,
-		underline: decorations.some((lines) => lines.includes("underline")),
+		underline: underlineOf(
+			decorating.find(({ "text-decoration-line": lines }) =>
+				lines.includes("underline"),
+			),
+			visible?.hex,
+		),
 		upper: style["text-transform"] === "uppercase",
 	};
 }
@@ -320,21 +322,21 @@ function breakBefore(
 	};
 }
 
-function decorationLinesOf(context: ExtractContext, element: Element) {
-	const lines: string[] = [];
+function decoratingStylesOf(context: ExtractContext, element: Element) {
+	const styles: ComputedStyle[] = [];
 	for (
 		let current: Element | null = element;
 		current && current.localName !== "html";
 		current = current.parentElement
 	) {
 		const style = context.styleOf(current);
-		lines.push(style["text-decoration-line"]);
+		styles.push(style);
 		if (isAtomicInline(style) || isOutOfFlow(style)) {
 			break;
 		}
 	}
 
-	return lines;
+	return styles;
 }
 
 function gradientTextOf(context: ExtractContext, element: Element) {
@@ -468,4 +470,19 @@ function trimRuns(runs: Run[]) {
 	return runs
 		.map((run) => ({ ...run, text: run.text.replaceAll(ZERO_WIDTH_SPACE, "") }))
 		.filter((run) => run.text.length);
+}
+
+function underlineOf(
+	style: ComputedStyle | undefined,
+	textColor: string | undefined,
+) {
+	if (!style) {
+		return undefined;
+	}
+
+	const color = parseColor(style["text-decoration-color"], style.color)?.hex;
+	return {
+		color: color === textColor ? undefined : color,
+		style: UNDERLINE_STYLES[style["text-decoration-style"]] ?? "single",
+	};
 }

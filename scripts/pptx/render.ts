@@ -99,7 +99,12 @@ const popperStandIn = defineComponent({
 	setup:
 		(props, { slots }) =>
 		() =>
-			props.shown ? [slots.default?.(), slots.popper?.({})] : slots.default?.(),
+			props.shown
+				? h("span", { class: "twoslash-query-persisted" }, [
+						slots.default?.(),
+						slots.popper?.({}),
+					])
+				: slots.default?.(),
 });
 
 const standIn = (file: string) =>

@@ -372,7 +372,7 @@ describe(buildPptx, () => {
 
 	it("exports generated content when elements have ::before or ::after", async () => {
 		expect(await slide(4)).toMatch(
-			/<a:srgbClr val="DAA520"\/>.*<a:t>★<\/a:t>.*<a:ln w="45720"><a:solidFill><a:srgbClr val="FF6347"\/>/s,
+			/<a:srgbClr val="DAA520"\/>.*<a:t>★ <\/a:t>.*<a:ln w="45720"><a:solidFill><a:srgbClr val="FF6347"\/>/s,
 		);
 	});
 
@@ -544,6 +544,12 @@ describe(buildPptx, () => {
 
 	it("exports Monaco and twoslash code as text when a slide has them", async () => {
 		expect(await slide(15)).toMatch(/edited.*hovered/s);
+	});
+
+	it("shows a twoslash query's type when a slide has one", async () => {
+		expect(await slide(15)).toMatch(
+			/<a:srgbClr val="[\dA-F]{6}"\/><\/a:solidFill>(?:(?!<\/a:r>).)*<a:t>: <\/a:t>/s,
+		);
 	});
 
 	it("fills text with its gradient when its background is clipped to the text", async () => {

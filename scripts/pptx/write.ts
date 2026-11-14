@@ -21,6 +21,7 @@ import type {
 	Stroke,
 	TextItem,
 	TextStyle,
+	Underline,
 } from "./model.ts";
 import type {
 	Gradients,
@@ -174,6 +175,14 @@ const KEYWORD_MARKERS: Partial<Record<string, string>> = {
 	disc: "25CF",
 	square: "25A0",
 };
+
+const UNDERLINE_STYLES = {
+	dashed: "dash",
+	dotted: "dotted",
+	double: "dbl",
+	single: "sng",
+	wavy: "wavy",
+} as const satisfies Record<Underline["style"], string>;
 
 /** How many roman numerals each decimal digit takes, as in IV or VIII. */
 const ROMAN_LENGTHS = [0, 1, 2, 3, 2, 1, 2, 3, 4, 2];
@@ -396,7 +405,7 @@ function createItemWriter({
 		paragraphs.flatMap((paragraph, paragraphIndex) => {
 			const last = paragraphIndex === paragraphs.length - 1;
 			const pieces = paragraph.runs.length
-				? mergeRuns(withoutLinkedEdgeSpaces(paragraph.runs), wrap)
+				? mergeRuns(paragraph.runs, wrap)
 				: [blankRun(firstRun)];
 			const baseSize = baseSizeOf(pieces);
 			const multiple = lineSpacingOf(lineHeight, baseSize);
@@ -437,7 +446,10 @@ function createItemWriter({
 					superscript: run.script === "super" || undefined,
 					transparency: run.transparency || undefined,
 					underline: run.underline
-						? { style: "sng" }
+						? {
+								color: run.underline.color,
+								style: UNDERLINE_STYLES[run.underline.style],
+							}
 						: hyperlink && { style: "none" },
 				};
 				return {
@@ -847,8 +859,8 @@ export function horizontalPlacement(
 		style.wrapWidth !== undefined && style.align === "left" && !rotation
 			? Math.min(box.width, style.wrapWidth)
 			: box.width;
-	const roomLeft = Math.max(0, box.x);
-	const roomRight = Math.max(0, style.availableWidth - box.width);
+	const roomLeft = Math.max(0, box.x - style.available.left);
+	const roomRight = Math.max(0, style.available.right - (box.x + box.width));
 	const room =
 		style.align === "center"
 			? 2 * Math.min(roomLeft, roomRight)
@@ -962,7 +974,7 @@ const blankRun = (style: Run): Run => ({
 	href: undefined,
 	lineBreak: undefined,
 	text: "",
-	underline: false,
+	underline: undefined,
 });
 
 function firstRunOf(paragraphs: Paragraph[]) {
@@ -991,21 +1003,6 @@ const spacingPercent = (multiple: number | undefined) =>
 
 const breaksBefore = (run: Run, wrap: boolean) =>
 	run.lineBreak === "forced" || (!wrap && run.lineBreak === "wrap");
-
-/** Runs without the link at whitespace on a link's edges, as takumi can lay out the space before a link inside it. */
-function withoutLinkedEdgeSpaces(runs: Run[]) {
-	const texts = runs.filter((run) => !run.pad);
-	return runs.map((run) => {
-		const index = texts.indexOf(run);
-		const linked = (neighbor: Run | undefined) => neighbor?.href === run.href;
-		return run.href &&
-			!run.pad &&
-			!run.text.trim() &&
-			!(linked(texts[index - 1]) && linked(texts[index + 1]))
-			? { ...run, href: undefined }
-			: run;
-	});
-}
 
 /** Joins neighboring runs that look alike (as takumi splits text per line) into one run to edit, except where a line break is kept. */
 function mergeRuns(runs: Run[], wrap: boolean) {

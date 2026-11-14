@@ -4,7 +4,7 @@ import type { ExtractContext } from "./context.ts";
 import type { Size } from "./geometry.ts";
 
 import { MIN_VISIBLE_ALPHA, parseColor, transparencyOf } from "../color.ts";
-import { availableWidthOf } from "./boxes.ts";
+import { availableSpanOf } from "./boxes.ts";
 import { MIN_OPACITY, pathOf } from "./context.ts";
 import { geometryOf } from "./geometry.ts";
 import { rasterItem } from "./images.ts";
@@ -194,7 +194,7 @@ export function svgItems(context: ExtractContext, svg: Element) {
 					rotation: 0,
 					style: {
 						align,
-						availableWidth: availableWidthOf(context, shape, x),
+						available: availableSpanOf(context, shape),
 						lineHeight: size * SVG_TEXT.lineHeight,
 						nowrap: true,
 						rtl: isRightToLeft(context, shape),

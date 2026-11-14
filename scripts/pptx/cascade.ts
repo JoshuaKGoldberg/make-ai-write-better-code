@@ -62,12 +62,20 @@ type KnownProperty = keyof typeof INITIAL;
 
 type PseudoElementName = "after" | "before" | "marker";
 
+const ATOMIC_INLINE_DISPLAYS = new Set([
+	"inline-block",
+	"inline-flex",
+	"inline-grid",
+	"inline-table",
+]);
+
 const INHERITED = new Set([
 	"-webkit-text-fill-color",
 	"-webkit-text-stroke-color",
 	"-webkit-text-stroke-width",
 	"color",
 	"color-scheme",
+	"direction",
 	"dominant-baseline",
 	"fill",
 	"font-family",
@@ -76,6 +84,7 @@ const INHERITED = new Set([
 	"font-weight",
 	"letter-spacing",
 	"line-height",
+	"list-style-position",
 	"list-style-type",
 	"stroke",
 	"stroke-width",
@@ -109,6 +118,7 @@ const INITIAL = {
 	"border-top-style": "none",
 	"border-top-width": "0px",
 	color: "#000000",
+	direction: "ltr",
 	display: "inline",
 	fill: "black",
 	filter: "none",
@@ -118,6 +128,7 @@ const INITIAL = {
 	"font-weight": "400",
 	"letter-spacing": "normal",
 	"line-height": "normal",
+	"list-style-position": "outside",
 	"list-style-type": "disc",
 	"margin-bottom": "0px",
 	"margin-top": "0px",
@@ -131,7 +142,9 @@ const INITIAL = {
 	stroke: "none",
 	"text-align": "start",
 	"text-anchor": "start",
+	"text-decoration-color": "currentcolor",
 	"text-decoration-line": "none",
+	"text-decoration-style": "solid",
 	"text-shadow": "none",
 	"text-transform": "none",
 	transform: "none",
@@ -192,6 +205,8 @@ mark { background-color: yellow; color: black }
 ul, menu { list-style-type: disc }
 ol { list-style-type: decimal }
 img, svg, video, canvas { display: inline-block }
+[dir=ltr i] { direction: ltr }
+[dir=rtl i] { direction: rtl }
 `;
 
 const USER_AGENT_LAYER = "<user agent>";
@@ -217,6 +232,7 @@ const CSS_WIDE_KEYWORDS = new Set([
 	"revert-layer",
 	"unset",
 ]);
+const LIST_STYLE_POSITIONS = new Set(["inside", "outside"]);
 const KEYWORD_SIZES: Partial<Record<string, number>> = {
 	large: 18,
 	medium: 16,
@@ -240,6 +256,14 @@ const TEXT_DECORATION_LINES = new Set([
 	"overline",
 	"underline",
 ]);
+const TEXT_DECORATION_STYLES = new Set([
+	"dashed",
+	"dotted",
+	"double",
+	"solid",
+	"wavy",
+]);
+const TEXT_DECORATION_THICKNESSES = new Set(["auto", "from-font"]);
 const UNITLESS = /^[\d.]+$/;
 const MAX_VAR_DEPTH = 20;
 
@@ -373,8 +397,18 @@ const pixels = (value: number) => `${String(value)}px`;
 /** The computed style of an element no rule applies to. */
 export const INITIAL_STYLE: ComputedStyle = INITIAL;
 
+export const hasMarker = (style: ComputedStyle) =>
+	style.display === "list-item" && style["list-style-type"] !== "none";
+
+export const isAtomicInline = (style: ComputedStyle) =>
+	ATOMIC_INLINE_DISPLAYS.has(style.display);
+
 export const isOutOfFlow = (style: ComputedStyle) =>
 	/^(?:absolute|fixed)$/.test(style.position ?? "");
+
+/** Whether an element in a line lays out apart from its text: an atomic inline, or a block-level box (out of flow, floated, or a block inside an inline). */
+export const laysOutApart = (style: ComputedStyle) =>
+	isAtomicInline(style) || !style.display.startsWith("inline");
 
 /** Parses stylesheets (after the user-agent defaults) into an ordered rule list. */
 export function createCascade(sheets: string[], environment: CascadeOptions) {
@@ -976,25 +1010,12 @@ function expand(property: string, value: string) {
 		case "inset":
 			return expandSides("*", value);
 		case "list-style":
-			return {
-				"list-style-type":
-					splitTopLevel(value, " ").find(
-						(part) => !/^(?:inside|outside|url\()/.test(part),
-					) ?? "disc",
-			};
+			return expandListStyle(value);
 		case "margin":
 		case "padding":
 			return expandSides(`${property}-*`, value);
 		case "text-decoration":
-			return {
-				"text-decoration-line":
-					splitTopLevel(value, " ")
-						.filter(
-							(part) =>
-								TEXT_DECORATION_LINES.has(part) || CSS_WIDE_KEYWORDS.has(part),
-						)
-						.join(" ") || "none",
-			};
+			return expandTextDecoration(value);
 		default:
 			return expandLogical(property, value) ?? { [property]: value };
 	}
@@ -1106,6 +1127,18 @@ function expandFont(value: string) {
 	};
 }
 
+function expandListStyle(value: string) {
+	const parts = splitTopLevel(value, " ");
+	return {
+		"list-style-position":
+			parts.find((part) => LIST_STYLE_POSITIONS.has(part)) ?? "outside",
+		"list-style-type":
+			parts.find(
+				(part) => !LIST_STYLE_POSITIONS.has(part) && !part.startsWith("url("),
+			) ?? "disc",
+	};
+}
+
 function expandLogical(property: string, value: string) {
 	const [, box, axis, edge] =
 		/^(margin|padding|inset)-(block|inline)(?:-(start|end))?$/.exec(property) ??
@@ -1135,6 +1168,25 @@ function expandSides(pattern: string, value: string) {
 			side,
 		]),
 	);
+}
+
+function expandTextDecoration(value: string) {
+	const lines: string[] = [];
+	const longhands: StyleMap = {
+		"text-decoration-color": "currentcolor",
+		"text-decoration-style": "solid",
+	};
+	for (const part of splitTopLevel(value, " ")) {
+		if (TEXT_DECORATION_LINES.has(part) || CSS_WIDE_KEYWORDS.has(part)) {
+			lines.push(part);
+		} else if (TEXT_DECORATION_STYLES.has(part)) {
+			longhands["text-decoration-style"] = part;
+		} else if (!isLength(part) && !TEXT_DECORATION_THICKNESSES.has(part)) {
+			longhands["text-decoration-color"] = part;
+		}
+	}
+
+	return { ...longhands, "text-decoration-line": lines.join(" ") || "none" };
 }
 
 function featureMatches(

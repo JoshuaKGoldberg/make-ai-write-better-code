@@ -387,7 +387,76 @@ describe(extractState, () => {
 				paragraphs: [
 					{
 						runs: [
-							expect.objectContaining({ text: "linked", underline: true }),
+							expect.objectContaining({
+								text: "linked",
+								underline: { style: "single" },
+							}),
+						],
+					},
+				],
+			}),
+		]);
+	});
+
+	it("underlines text in its decoration's style and color when they're set", async () => {
+		const { items } = await extract(
+			`<p style="color: #0000ff"><u style="text-decoration: underline wavy #ff0000">wavy</u></p>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({
+								text: "wavy",
+								underline: { color: "ff0000", style: "wavy" },
+							}),
+						],
+					},
+				],
+			}),
+		]);
+	});
+
+	it("colors an underline as its decorating element's text when the text inside is another color", async () => {
+		const { items } = await extract(
+			`<p><a href="https://sli.dev" style="color: #0000ff"><span style="color: #ff0000">red</span></a></p>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({
+								color: "ff0000",
+								text: "red",
+								underline: { color: "0000ff", style: "single" },
+							}),
+						],
+					},
+				],
+			}),
+		]);
+	});
+
+	it("leaves the space before a link out of the link when an element precedes it", async () => {
+		const { items } = await extract(
+			`<p><b>bold</b> <a href="https://sli.dev">link</a></p>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ href: undefined, text: "bold" }),
+							expect.objectContaining({ href: undefined, text: " " }),
+							expect.objectContaining({
+								href: "https://sli.dev",
+								text: "link",
+							}),
 						],
 					},
 				],
@@ -406,7 +475,10 @@ describe(extractState, () => {
 					paragraphs: [
 						{
 							runs: [
-								expect.objectContaining({ text: "apart", underline: false }),
+								expect.objectContaining({
+									text: "apart",
+									underline: undefined,
+								}),
 							],
 						},
 					],
@@ -427,7 +499,7 @@ describe(extractState, () => {
 		]);
 	});
 
-	it("measures the width available to text up to its nearest visible box's content edge", async () => {
+	it("measures the span available to text as its nearest visible box's content box", async () => {
 		const { items } = await extract(
 			`<div style="box-sizing: border-box; width: 200px; padding: 10px; border: 1px solid black"><div><p style="width: 50px">card</p></div></div><p style="margin-left: 100px; width: 50px">page</p>`,
 		);
@@ -435,10 +507,10 @@ describe(extractState, () => {
 		expect(items).toEqual([
 			expect.objectContaining({ kind: "box" }),
 			expect.objectContaining({
-				style: expect.objectContaining({ availableWidth: 178 }),
+				style: expect.objectContaining({ available: { left: 11, right: 189 } }),
 			}),
 			expect.objectContaining({
-				style: expect.objectContaining({ availableWidth: 300 }),
+				style: expect.objectContaining({ available: { left: 0, right: 400 } }),
 			}),
 		]);
 	});
@@ -698,14 +770,14 @@ describe(extractState, () => {
 		]);
 	});
 
-	it("measures the width available to text up to the slide layout's content edge when no box encloses it", async () => {
+	it("measures the span available to text as the slide layout's content box when no box encloses it", async () => {
 		const { items } = await extract(
 			`<div class="slidev-layout" style="padding: 0 40px"><p style="width: 50px">text</p></div>`,
 		);
 
 		expect(items).toEqual([
 			expect.objectContaining({
-				style: expect.objectContaining({ availableWidth: 320 }),
+				style: expect.objectContaining({ available: { left: 40, right: 360 } }),
 			}),
 		]);
 	});

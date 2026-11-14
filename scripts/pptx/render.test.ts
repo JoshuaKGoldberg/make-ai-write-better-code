@@ -140,7 +140,7 @@ describe(createSlideRenderer, () => {
 
 	it("renders a twoslash query's type when a slide has one", async () => {
 		expect((await renderSlideTitled("Code Blocks")).states[0]).toMatch(
-			/<span>hovered<\/span><!--\]--><!--\[--><span class="twoslash-popup-container[^"]*">.*>hovered<\/span>.*>: <\/span>.*> ?1<\/span><\/code><\/span>/s,
+			/<span class="twoslash-query-persisted"><!--\[--><span>hovered<\/span><!--\]--><!--\[--><span class="twoslash-popup-container[^"]*">.*>hovered<\/span>.*>: <\/span>.*> ?1<\/span><\/code><\/span>/s,
 		);
 	});
 

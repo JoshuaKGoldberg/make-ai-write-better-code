@@ -3,7 +3,7 @@ import type { Paragraph } from "../model.ts";
 import type { ExtractContext, TextRuns } from "./context.ts";
 
 import { lineHeightOf } from "../cascade.ts";
-import { availableWidthOf, boxItems, boxStyle } from "./boxes.ts";
+import { availableSpanOf, boxItems, boxStyle } from "./boxes.ts";
 import { pathOf } from "./context.ts";
 import { geometryOf, insetBox, SIDES } from "./geometry.ts";
 import {
@@ -81,7 +81,7 @@ export function codeItem(context: ExtractContext, pre: Element) {
 		paragraphs,
 		style: {
 			align: "left",
-			availableWidth: availableWidthOf(context, pre, content.x),
+			available: availableSpanOf(context, pre),
 			lineHeight: lineHeight * scale,
 			nowrap: true,
 			rtl: false,
@@ -193,7 +193,7 @@ export function textItem(
 		rotation,
 		style: {
 			align: alignOf(context, element),
-			availableWidth: availableWidthOf(context, element, box.x),
+			available: availableSpanOf(context, element),
 			lineHeight: lineHeightOf(style) * scale,
 			nowrap:
 				/^(?:nowrap|pre)$/.test(style["white-space"]) || Boolean(rotation),

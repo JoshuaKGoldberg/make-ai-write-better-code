@@ -40,7 +40,7 @@ const photo = fileURLToPath(
 
 const style = {
 	align: "left",
-	availableWidth: 880,
+	available: { left: 0, right: 920 },
 	lineHeight: 36,
 	rtl: false,
 } as const;
@@ -56,7 +56,6 @@ const run = (text: string, overrides: Partial<Run> = {}): Run => ({
 	strike: false,
 	text,
 	transparency: 0,
-	underline: false,
 	upper: false,
 	...overrides,
 });
@@ -312,25 +311,21 @@ describe(writePptx, () => {
 
 	it("underlines a run when it's underlined", async () => {
 		expect(
-			await slideXml([textItem([[run("Under", { underline: true })]])]),
+			await slideXml([
+				textItem([[run("Under", { underline: { style: "single" } })]]),
+			]),
 		).toContain('<a:rPr lang="en-US" kern="100" sz="2400" u="sng" dirty="0">');
 	});
 
-	it("leaves the space before a link out of the link when the link's run starts with it", async () => {
-		const href = "https://sli.dev";
-
+	it("underlines a run in its underline's style and color when it has them", async () => {
 		expect(
 			await slideXml([
 				textItem([
-					[
-						run("code", { font: "Mono" }),
-						run(" ", { href }),
-						run("link", { href }),
-					],
+					[run("Wavy", { underline: { color: "ff0000", style: "wavy" } })],
 				]),
 			]),
 		).toContain(
-			'<a:rPr lang="en-US" kern="100" sz="2400" dirty="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:rPr><a:t> </a:t>',
+			'<a:rPr lang="en-US" kern="100" sz="2400" u="wavy" dirty="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:uFill><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:uFill>',
 		);
 	});
 
@@ -608,7 +603,11 @@ describe(writePptx, () => {
 		expect(
 			await slideXml([
 				textItem([[run("Tight")]], {
-					style: { ...style, availableWidth: 410, nowrap: false },
+					style: {
+						...style,
+						available: { left: 0, right: 450 },
+						nowrap: false,
+					},
 				}),
 			]),
 		).toContain('<a:off x="508000" y="165100"/><a:ext cx="5207000"');
@@ -1260,27 +1259,42 @@ describe(horizontalPlacement, () => {
 		expect(
 			horizontalPlacement(
 				box,
-				{ ...style, align: "center", availableWidth: 204, nowrap: false },
+				{
+					...style,
+					align: "center",
+					available: { left: 0, right: 304 },
+					nowrap: false,
+				},
 				0,
 			),
 		).toEqual({ left: 96, width: 208 });
 	});
 
-	it("grows right-aligned text leftward only as far as the slide's edge", () => {
+	it("grows right-aligned text leftward only as far as its container's left edge", () => {
 		expect(
 			horizontalPlacement(
-				{ ...box, x: 5 },
-				{ ...style, align: "right", nowrap: false },
+				box,
+				{
+					...style,
+					align: "right",
+					available: { left: 95, right: 300 },
+					nowrap: false,
+				},
 				0,
 			),
-		).toEqual({ left: 0, width: 205 });
+		).toEqual({ left: 95, width: 205 });
 	});
 
 	it("grows wrapped text only by its rounding slack when it wraps", () => {
 		expect(
 			horizontalPlacement(
 				box,
-				{ ...style, availableWidth: 200, nowrap: false, wrapWidth: 150 },
+				{
+					...style,
+					available: { left: 0, right: 300 },
+					nowrap: false,
+					wrapWidth: 150,
+				},
 				0,
 			),
 		).toEqual({ left: 100, width: 152 });

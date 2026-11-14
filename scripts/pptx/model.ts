@@ -136,7 +136,7 @@ export interface Run {
 	text: string;
 	/** 0-100 */
 	transparency: number;
-	underline: boolean;
+	underline?: Underline;
 	/** Whether the text shows capitalized (CSS text-transform: uppercase); the text keeps its source casing. */
 	upper: boolean;
 }
@@ -185,8 +185,8 @@ export interface TextItem extends ItemBase {
 
 export interface TextStyle {
 	align: "center" | "justify" | "left" | "right";
-	/** px from the item's box.x to the content right edge of its nearest block ancestor with a visible box (fill or border), else of the slide's layout (`.slidev-layout`), else the slide edge. */
-	availableWidth: number;
+	/** The horizontal span, in slide px, the text may grow within: the content box of its nearest block ancestor with a visible box (fill or border), else of the slide's layout (`.slidev-layout`), else the slide. */
+	available: { left: number; right: number };
 	/** px */
 	lineHeight: number;
 	/** Whether the text can't wrap, as with white-space: nowrap or pre, so PowerPoint mustn't wrap it either. */
@@ -199,6 +199,13 @@ export interface TextStyle {
 	 * text a little differently, so wrapping at this width keeps the browser's line breaks.
 	 */
 	wrapWidth?: number;
+}
+
+/** A text underline, as CSS text-decoration draws it. */
+export interface Underline {
+	/** The line's color, when it isn't the text's own. */
+	color?: string;
+	style: "dashed" | "dotted" | "double" | "single" | "wavy";
 }
 
 /** The slide background: the canvas and its static decoration, rendered. */

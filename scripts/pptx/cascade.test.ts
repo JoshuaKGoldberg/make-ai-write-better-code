@@ -458,12 +458,55 @@ describe(computeStyles, () => {
 	});
 
 	it.each([
-		["red underline", "underline"],
-		["underline line-through wavy", "underline line-through"],
-		["none", "none"],
-	])("expands text-decoration: %s", (value, line) => {
+		[
+			"red underline",
+			{
+				"text-decoration-color": "red",
+				"text-decoration-line": "underline",
+				"text-decoration-style": "solid",
+			},
+		],
+		[
+			"underline line-through wavy 2px",
+			{
+				"text-decoration-color": "currentcolor",
+				"text-decoration-line": "underline line-through",
+				"text-decoration-style": "wavy",
+			},
+		],
+		[
+			"none",
+			{
+				"text-decoration-color": "currentcolor",
+				"text-decoration-line": "none",
+				"text-decoration-style": "solid",
+			},
+		],
+	])("expands text-decoration: %s", (value, expected) => {
 		const { of } = stylesOf(`<p>a</p>`, `p { text-decoration: ${value} }`);
-		expect(of("p")?.["text-decoration-line"]).toBe(line);
+		expect(of("p")).toMatchObject(expected);
+	});
+
+	it("inherits a list's list-style-position when its shorthand sets it", () => {
+		const { of } = stylesOf(
+			`<ul><li>a</li></ul>`,
+			`ul { list-style: square inside }`,
+		);
+		expect(of("li")).toMatchObject({
+			"list-style-position": "inside",
+			"list-style-type": "square",
+		});
+	});
+
+	it("inherits direction from the nearest dir attribute", () => {
+		const { of } = stylesOf(
+			`<div dir="rtl"><p class="inherited">a</p><p class="reset" dir="ltr">b</p></div>`,
+			"",
+		);
+		expect({
+			inherited: of(".inherited")?.direction,
+			reset: of(".reset")?.direction,
+		}).toEqual({ inherited: "rtl", reset: "ltr" });
 	});
 
 	it("reads a corner's horizontal radius when it has two", () => {

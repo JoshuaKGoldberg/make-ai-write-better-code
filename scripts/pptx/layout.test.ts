@@ -147,6 +147,31 @@ describe(createLayout, () => {
 		});
 	});
 
+	it("gives white space to the text it's in when takumi lays it out as a run of its own", async () => {
+		const { document, runs } = await layOut(
+			`<p><b>bold</b> <a href="https://sli.dev">link</a></p><p style="white-space: pre"><i>{</i>\n<u>\tcount</u></p>`,
+		);
+		const idOf = (selector: string) =>
+			document.querySelector(selector)?.getAttribute(ID);
+
+		expect([...runs.values()]).toEqual([
+			expect.objectContaining({
+				runs: [
+					expect.objectContaining({ owner: idOf("b"), text: "bold" }),
+					expect.objectContaining({ owner: idOf("p"), text: " " }),
+					expect.objectContaining({ owner: idOf("a"), text: "link" }),
+				],
+			}),
+			expect.objectContaining({
+				runs: [
+					expect.objectContaining({ owner: idOf("i"), text: "{" }),
+					expect.objectContaining({ owner: idOf("u"), text: "\t" }),
+					expect.objectContaining({ owner: idOf("u"), text: "count" }),
+				],
+			}),
+		]);
+	});
+
 	it("lays out a table's rows when they aren't in a row group", async () => {
 		const { looseRuns, mismatches } = await layOut(
 			`<p style="display: inline-table"><span style="display: table-row">a</span><span style="display: table-row">b</span></p>`,
