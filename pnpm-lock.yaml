@@ -221,8 +221,8 @@ importers:
         specifier: 3.2.1
         version: 3.2.1
       es-module-lexer:
-        specifier: 2.3.2
-        version: 2.3.2
+        specifier: 3.0.4
+        version: 3.0.4
       eslint:
         specifier: 10.14.0
         version: 10.14.0(jiti@2.7.0)
@@ -2912,6 +2912,9 @@ packages:
 
   es-module-lexer@2.3.2:
     resolution: {integrity: sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==}
+
+  es-module-lexer@3.0.4:
+    resolution: {integrity: sha512-BldNY5mwkVu+cQ5Ymn3e6hB9Sx8XHx4ZevWbiUyZbfKxJxYO27Hf0wfzkxIaD5CAJMaGl3YspKELj0ff/7nCMA==}
 
   es-toolkit@1.53.2:
     resolution: {integrity: sha512-iUqZ+NlwH4jUgRmXZUxFBsV/9762TQEa1O4IXLFBmDEjVHScBytKuseX23I0+v9ShZ5MYxEx6WKNzm6IPnex8g==}
@@ -8055,6 +8058,8 @@ snapshots:
     optional: true
 
   es-module-lexer@2.3.2: {}
+
+  es-module-lexer@3.0.4: {}
 
   es-toolkit@1.53.2: {}
 
