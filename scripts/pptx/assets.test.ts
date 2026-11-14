@@ -3,14 +3,21 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 
-import { createAssets, cssUrls, imageFormat, imageSize } from "./assets.ts";
+import {
+	createAssets,
+	cssUrls,
+	imageFormat,
+	imageSize,
+	isNativeImage,
+} from "./assets.ts";
 
 const svg = Buffer.from(
 	`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"/>`,
 );
 
 const png = Buffer.alloc(24);
-png.writeUInt32BE(0x89504e47, 0);
+png.write("\x89PNG\r\n\x1a\n", 0, "latin1");
+png.write("IHDR", 12, "latin1");
 png.writeUInt32BE(512, 16);
 png.writeUInt32BE(256, 20);
 
@@ -33,9 +40,29 @@ webp.write("VP8X", 12, "latin1");
 webp.writeUIntLE(99, 24, 3);
 webp.writeUIntLE(49, 27, 3);
 
-const avif = Buffer.alloc(16);
-avif.write("ftyp", 4, "latin1");
-avif.write("avif", 8, "latin1");
+const uint32 = (value: number) => {
+	const buffer = Buffer.alloc(4);
+	buffer.writeUInt32BE(value);
+	return buffer;
+};
+
+const box = (type: string, ...contents: Buffer[]) => {
+	const body = Buffer.concat(contents);
+	return Buffer.concat([
+		uint32(8 + body.length),
+		Buffer.from(type, "latin1"),
+		body,
+	]);
+};
+
+const avif = Buffer.concat([
+	box("ftyp", Buffer.from("avif", "latin1"), uint32(0)),
+	box(
+		"meta",
+		uint32(0),
+		box("iprp", box("ipco", box("ispe", uint32(0), uint32(70), uint32(35)))),
+	),
+]);
 
 const svgOf = (attributes: string) =>
 	Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" ${attributes}/>`);
@@ -73,33 +100,67 @@ describe(imageFormat, () => {
 	])("recognizes %s", (format, data) => {
 		expect(imageFormat(data)).toBe(format);
 	});
+
+	it.each([
+		["a text file that starts like a BMP", Buffer.from("BMW notes")],
+		["a text file that starts like a GIF", Buffer.from("GIFs I like")],
+		["a truncated PNG", png.subarray(0, 8)],
+	])("recognizes nothing in %s", (_, data) => {
+		expect(imageFormat(data)).toBeUndefined();
+	});
+});
+
+describe(isNativeImage, () => {
+	it.each([
+		["a PNG", png, true],
+		["a JPEG", jpeg, true],
+		["a WebP", webp, false],
+		["an SVG", svg, false],
+	])("returns whether %s is native", (_, data, native) => {
+		expect(isNativeImage(data)).toBe(native);
+	});
 });
 
 describe(imageSize, () => {
 	it.each([
-		["a PNG", png, { h: 256, w: 512 }],
-		["a GIF", gif, { h: 32, w: 64 }],
-		["a bottom-up BMP", bmp, { h: 20, w: 30 }],
-		["a JPEG", jpeg, { h: 48, w: 64 }],
-		["a WebP", webp, { h: 50, w: 100 }],
-		["an SVG's view box", svg, { h: 80, w: 120 }],
+		["a PNG", png, { height: 256, width: 512 }],
+		["a GIF", gif, { height: 32, width: 64 }],
+		["a bottom-up BMP", bmp, { height: 20, width: 30 }],
+		["a JPEG", jpeg, { height: 48, width: 64 }],
+		["a WebP", webp, { height: 50, width: 100 }],
+		["an SVG's view box", svg, { height: 80, width: 120 }],
 		[
 			"an SVG's width and height",
 			svgOf(`width="2em" height="16"`),
-			{ h: 16, w: 32 },
+			{ height: 16, width: 32 },
 		],
 		[
 			"an SVG's view box when its size is a percentage",
 			svgOf(`width="100%" viewBox="0 0 120 80"`),
-			{ h: 80, w: 120 },
+			{ height: 80, width: 120 },
 		],
 		[
 			"an SVG's width and view box's aspect ratio",
 			svgOf(`width="60" viewBox="0 0 120 80"`),
-			{ h: 40, w: 60 },
+			{ height: 40, width: 60 },
 		],
+		[
+			"an SVG's fractional width and height",
+			svgOf(`width="12.5" height="10"`),
+			{ height: 10, width: 12.5 },
+		],
+		["an AVIF", avif, { height: 35, width: 70 }],
 	])("reads the size of %s", (_, data, size) => {
 		expect(imageSize(data)).toEqual(size);
+	});
+
+	it.each([
+		["a truncated PNG", png.subarray(0, 8)],
+		["a truncated GIF", gif.subarray(0, 4)],
+		["a truncated BMP", Buffer.from("BM")],
+		["a truncated JPEG", jpeg.subarray(0, 4)],
+	])("returns undefined for %s", (_, data) => {
+		expect(imageSize(data)).toBeUndefined();
 	});
 });
 
@@ -153,6 +214,26 @@ describe(createAssets, () => {
 		expect((await assets.load("//example.com/a.css"))?.toString()).toBe(
 			"remote",
 		);
+	});
+
+	it.each([
+		[
+			"responds with an error",
+			() => Promise.resolve(new Response("", { status: 404 })),
+		],
+		["rejects", () => Promise.reject(new Error("offline"))],
+	])("returns undefined when a remote URL's fetch %s", async (_, respond) => {
+		const { assets } = createTestAssets();
+		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(respond);
+		onTestFinished(() => {
+			fetch.mockRestore();
+		});
+		expect(await assets.load("https://example.com/a.png")).toBeUndefined();
+	});
+
+	it("saves nothing when a file isn't loaded", () => {
+		const { assets } = createTestAssets();
+		expect(assets.save("/a.svg")).toBeUndefined();
 	});
 
 	it("saves a loaded file named by its content and format", async () => {

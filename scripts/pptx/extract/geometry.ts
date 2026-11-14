@@ -19,7 +19,9 @@ export interface Insets {
 
 export type Side = keyof Insets;
 
-export type Size = Pick<Box, "h" | "w">;
+export type Size = Pick<Box, "height" | "width">;
+
+export const SIDES: Side[] = ["top", "right", "bottom", "left"];
 
 /** How far along its free space each position keyword puts an image. */
 const POSITION_KEYWORDS: Partial<Record<string, number>> = {
@@ -44,42 +46,46 @@ export function edgeBox(
 	rotation: number,
 ) {
 	const vertical = side === "left" || side === "right";
-	const inset = Math.min(radius, (vertical ? box.h : box.w) / 2);
+	const inset = Math.min(radius, (vertical ? box.height : box.width) / 2);
 	const local: Box = vertical
 		? {
-				h: box.h - inset * 2,
-				w: width,
-				x: side === "right" ? box.x + box.w - width : box.x,
+				height: box.height - inset * 2,
+				width,
+				x: side === "right" ? box.x + box.width - width : box.x,
 				y: box.y + inset,
 			}
 		: {
-				h: width,
-				w: box.w - inset * 2,
+				height: width,
+				width: box.width - inset * 2,
 				x: box.x + inset,
-				y: side === "bottom" ? box.y + box.h - width : box.y,
+				y: side === "bottom" ? box.y + box.height - width : box.y,
 			};
 	if (!rotation) {
 		return { box: local, rotation: 0 };
 	}
 
 	const angle = (rotation * Math.PI) / 180;
-	const dx = local.x + local.w / 2 - (box.x + box.w / 2);
-	const dy = local.y + local.h / 2 - (box.y + box.h / 2);
+	const dx = local.x + local.width / 2 - (box.x + box.width / 2);
+	const dy = local.y + local.height / 2 - (box.y + box.height / 2);
 	const centerX =
-		box.x + box.w / 2 + dx * Math.cos(angle) - dy * Math.sin(angle);
+		box.x + box.width / 2 + dx * Math.cos(angle) - dy * Math.sin(angle);
 	const centerY =
-		box.y + box.h / 2 + dx * Math.sin(angle) + dy * Math.cos(angle);
+		box.y + box.height / 2 + dx * Math.sin(angle) + dy * Math.cos(angle);
 	return {
-		box: { ...local, x: centerX - local.w / 2, y: centerY - local.h / 2 },
+		box: {
+			...local,
+			x: centerX - local.width / 2,
+			y: centerY - local.height / 2,
+		},
 		rotation,
 	};
 }
 
 /** The size an image of `ratio` (width over height) draws at to contain or cover `area`. */
 export function fitSize(fit: "contain" | "cover", area: Size, ratio: number) {
-	return area.w / area.h > ratio === (fit === "contain")
-		? { h: area.h, w: area.h * ratio }
-		: { h: area.w / ratio, w: area.w };
+	return area.width / area.height > ratio === (fit === "contain")
+		? { height: area.height, width: area.height * ratio }
+		: { height: area.width / ratio, width: area.width };
 }
 
 /** The unrotated box, rotation (degrees), and scale of a node from takumi's absolute transform. */
@@ -87,38 +93,48 @@ export function geometryOf(laidOut: LaidOutBox) {
 	const [a, b, c, d] = laidOut.matrix;
 	const rotation = (Math.atan2(b, a) * 180) / Math.PI;
 	const scale = scaleOf(laidOut);
-	const w = laidOut.w * scale;
-	const h = laidOut.h * Math.hypot(c, d);
+	const width = laidOut.width * scale;
+	const height = laidOut.height * Math.hypot(c, d);
 	if (Math.abs(rotation) < MIN_ROTATION) {
-		return { box: { h, w, x: laidOut.x, y: laidOut.y }, rotation: 0, scale };
+		return {
+			box: { height, width, x: laidOut.x, y: laidOut.y },
+			rotation: 0,
+			scale,
+		};
 	}
 
-	const centerX = laidOut.x + a * (laidOut.w / 2) + c * (laidOut.h / 2);
-	const centerY = laidOut.y + b * (laidOut.w / 2) + d * (laidOut.h / 2);
+	const centerX =
+		laidOut.x + a * (laidOut.width / 2) + c * (laidOut.height / 2);
+	const centerY =
+		laidOut.y + b * (laidOut.width / 2) + d * (laidOut.height / 2);
 	return {
-		box: { h, w, x: centerX - w / 2, y: centerY - h / 2 },
+		box: { height, width, x: centerX - width / 2, y: centerY - height / 2 },
 		rotation,
 		scale,
 	};
 }
 
-/** A box shrunk by insets in local px, scaled to slide px. */
 export function insetBox(box: Box, insets: Insets, scale: number) {
 	return {
-		h: box.h - (insets.top + insets.bottom) * scale,
-		w: box.w - (insets.left + insets.right) * scale,
+		height: box.height - (insets.top + insets.bottom) * scale,
+		width: box.width - (insets.left + insets.right) * scale,
 		x: box.x + insets.left * scale,
 		y: box.y + insets.top * scale,
 	};
 }
 
-/** The overlap of two boxes. */
 export function intersect(first: Box, second: Box) {
 	const x = Math.max(first.x, second.x);
 	const y = Math.max(first.y, second.y);
 	return {
-		h: Math.max(0, Math.min(first.y + first.h, second.y + second.h) - y),
-		w: Math.max(0, Math.min(first.x + first.w, second.x + second.w) - x),
+		height: Math.max(
+			0,
+			Math.min(first.y + first.height, second.y + second.height) - y,
+		),
+		width: Math.max(
+			0,
+			Math.min(first.x + first.width, second.x + second.width) - x,
+		),
 		x,
 		y,
 	};
@@ -146,18 +162,17 @@ export function positionIn(
 	};
 
 	return {
-		h: size.h,
-		w: size.w,
-		x: area.x + offset(horizontal, area.w - size.w),
-		y: area.y + offset(vertical, area.h - size.h),
+		height: size.height,
+		width: size.width,
+		x: area.x + offset(horizontal, area.width - size.width),
+		y: area.y + offset(vertical, area.height - size.height),
 	};
 }
 
 export const sameBox = (first: Box, second: Box) =>
-	(["h", "w", "x", "y"] as const).every(
-		(side) => Math.abs(first[side] - second[side]) < 0.01,
+	(["height", "width", "x", "y"] as const).every(
+		(dimension) => Math.abs(first[dimension] - second[dimension]) < 0.01,
 	);
 
-/** The scale of a node's absolute transform. */
 export const scaleOf = ({ matrix }: LaidOutBox) =>
 	Math.hypot(matrix[0], matrix[1]);

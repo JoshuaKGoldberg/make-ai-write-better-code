@@ -1,8 +1,3 @@
-/**
- * Renders Slidev slides to static HTML for any click state, with no browser:
- * Vite (with Slidev's own plugins) compiles each slide module for SSR, and Vue's
- * server renderer renders it inside a Slidev-like click context.
- */
 import type {
 	ClicksContext,
 	RawAtValue,
@@ -11,29 +6,29 @@ import type {
 import type { Component, ObjectDirective, Ref } from "vue";
 
 import { createServer, resolveOptions } from "@slidev/cli";
-import { parseRangeString } from "@slidev/parser/core";
 import { ImportType, init, parse } from "es-module-lexer";
 import { parseHTML } from "linkedom";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, h, reactive, ref } from "vue";
+import { createSSRApp, defineComponent, Fragment, h, reactive, ref } from "vue";
 import { renderToString } from "vue/server-renderer";
 
+import type * as ClicksStandIn from "./ssr/clicks.ts";
+import type { ClickTarget } from "./ssr/clicks.ts";
 import type * as NavStandIn from "./ssr/useNav.ts";
 
 export interface RenderedSlide {
-	frontmatter: Record<string, unknown>;
-	/** The global-bottom layers (the deck's, its theme's, and its addons') for this slide. */
+	clicksStart: number;
 	globalBottom: string;
-	/** The global-top layers for this slide. */
 	globalTop: string;
-	/** The slide's speaker notes, in Markdown. */
-	note: string;
-	/** HTML for each click state, from the slide's `clicksStart` to its last click, inside its slide-bottom and slide-top layers. */
+	problems: string[];
 	states: string[];
+	zoom: number;
 }
 
 type Constants = Record<
+	| "CLASS_VCLICK_ANIMATION_PREFIX"
 	| "CLASS_VCLICK_CURRENT"
 	| "CLASS_VCLICK_HIDDEN"
 	| "CLASS_VCLICK_HIDDEN_EXP"
@@ -43,15 +38,17 @@ type Constants = Record<
 	| "injectionCurrentPage"
 	| "injectionFrontmatter"
 	| "injectionRenderContext"
+	| "injectionRoute"
 	| "injectionSlidevContext"
 	| "injectionSlideZoom",
 	string
 >;
 
 interface Frontmatter {
+	clickAnimation?: string;
 	clicks?: number;
 	clicksStart?: number;
-	dragPos?: Record<string, string>;
+	dragPos?: Partial<Record<string, string>>;
 	zoom?: number;
 }
 
@@ -62,22 +59,22 @@ type Layers = Record<
 
 type Server = Awaited<ReturnType<typeof createServer>>;
 
-/** Slidev's virtual module of the deck's, theme's, and addons' layer components. */
-const LAYERS = "/@slidev/global-layers";
+const GLOBAL_LAYERS_MODULE = "/@slidev/global-layers";
 
-/** Stand-ins in ./ssr for Slidev client files that do their work in onMounted or need the router, neither of which exists on the server. */
+/** Stand-ins in ./ssr for Slidev client files that need a browser: they work in onMounted, use the router, or mount an editor. */
 const STAND_INS = {
 	"builtin/CodeBlockWrapper.vue": "CodeBlockWrapper.vue",
+	"builtin/CodeGroup.vue": "CodeGroup.vue",
 	"builtin/KaTexBlockWrapper.vue": "KaTexBlockWrapper.vue",
+	"builtin/Monaco.vue": "MonacoEditor.vue",
 	"builtin/ShikiMagicMove.vue": "ShikiMagicMove.vue",
 	"builtin/VClickGap.vue": "VClickGap.vue",
 	"builtin/VSwitch.ts": "VSwitch.vue",
 	"composables/useNav.ts": "useNav.ts",
 };
 
-/** Modules whose imports can lead to CSS: sources, styles, and Slidev's and UnoCSS's virtual modules. */
-const STYLED =
-	/\.(?:css|vue|ts|js|mjs|md)(?:$|\?)|uno:|__uno|type=style|\/@slidev\//;
+const MAY_IMPORT_CSS =
+	/\.(?:css|less|sass|scss|styl|stylus|pcss|postcss|sss|vue|[cm]?[jt]sx?|md)(?:$|\?)|uno:|__uno|type=style|\/@slidev\//;
 
 /** The compiled CSS in a CSS module as Vite's dev server serves it. */
 const VITE_CSS = /const __vite__css = ("(?:[^"\\]|\\.)*")/;
@@ -85,16 +82,29 @@ const VITE_CSS = /const __vite__css = ("(?:[^"\\]|\\.)*")/;
 const standIn = (file: string) =>
 	fileURLToPath(new URL(`./ssr/${file}`, import.meta.url));
 
-/** Starts a Slidev server for the deck at `entry` (an absolute path, or relative to the working directory). */
-export async function createSlideRenderer(entry: string) {
-	const options = await resolveOptions({ entry }, "dev");
+export const resolveDeck = (entry: string) => resolveOptions({ entry }, "dev");
+
+export async function createSlideRenderer(
+	deck: ResolvedSlidevOptions,
+	cacheDir: string,
+) {
+	const missing = Object.keys(STAND_INS).filter(
+		(client) => !existsSync(path.join(deck.clientRoot, client)),
+	);
+	if (missing.length) {
+		throw new Error(
+			`This version of Slidev isn't supported: its client has no ${missing.join(", ")} to stand in for.`,
+		);
+	}
+
 	const standIns = new Map(
 		Object.entries(STAND_INS).map(([client, file]) => [
-			path.join(options.clientRoot, client),
+			path.join(deck.clientRoot, client),
 			standIn(file),
 		]),
 	);
-	const server = await createServer(options, {
+	const server = await createServer(deck, {
+		cacheDir,
 		logLevel: "warn",
 		plugins: [
 			{
@@ -111,59 +121,90 @@ export async function createSlideRenderer(entry: string) {
 		ssr: { noExternal: ["@slidev/client"] },
 	});
 	try {
-		return await createRenderer(server, options);
+		return await createRenderer(server, deck);
 	} catch (error) {
 		await server.close();
 		throw error;
 	}
 }
 
+export function staticGlobalBottomLayers(globalBottoms: string[]) {
+	const [first = [], ...others] = globalBottoms.map((html) =>
+		[
+			...parseHTML(`<html><body>${html}</body></html>`).document.body.children,
+		].map((element) => element.outerHTML),
+	);
+	return first.flatMap((html, index) =>
+		others.every(
+			(other) => other.length === first.length && other[index] === html,
+		)
+			? [index]
+			: [],
+	);
+}
+
+function* childrenFirst(element: Element): Generator<Element> {
+	for (const child of [...element.children]) {
+		yield* childrenFirst(child);
+	}
+
+	yield element;
+}
+
 function clickDirective(
+	{ clickTargetProps }: typeof ClicksStandIn,
 	constants: Constants,
-	clicksContext: ClicksContext,
+	targets: ClickTarget[],
 	kind: "after" | "click" | "hide",
+	defaultAnimations: string[],
 ): ObjectDirective<Element, RawAtValue> {
-	let registered = 0;
 	return {
-		getSSRProps({ modifiers, value }) {
-			const info = clicksContext.calculate(kind === "after" ? "+0" : value);
-			if (!info) {
-				return {};
-			}
+		getSSRProps: ({ modifiers, value }) =>
+			clickTargetProps(targets, (clicks, element) => {
+				const info = clicks.calculate(kind === "after" ? "+0" : value);
+				if (!info) {
+					return;
+				}
 
-			clicksContext.register(`v-${kind}-${String(registered++)}`, info);
-			const hide = kind === "hide" || Boolean(modifiers.hide);
-			const active = info.isActive.value;
-			const current = info.isCurrent.value;
-			const classes = [constants.CLASS_VCLICK_TARGET];
-			if (hide ? active : !active) {
-				classes.push(constants.CLASS_VCLICK_HIDDEN);
-			}
+				clicks.register(element, info);
+				element.classList.add(constants.CLASS_VCLICK_TARGET);
+				if (kind === "click") {
+					element.setAttribute("data-slidev-clicks-start", String(info.start));
+					if (Number.isFinite(info.end)) {
+						element.setAttribute("data-slidev-clicks-end", String(info.end));
+					}
+				}
 
-			if (hide && active) {
-				classes.push(constants.CLASS_VCLICK_HIDDEN_EXP);
-			}
+				const active = info.isActive.value;
+				const current = info.isCurrent.value;
+				if (kind === "hide" || modifiers.hide) {
+					element.classList.toggle(constants.CLASS_VCLICK_HIDDEN, active);
+					element.classList.toggle(constants.CLASS_VCLICK_HIDDEN_EXP, active);
+				} else {
+					element.classList.toggle(constants.CLASS_VCLICK_HIDDEN, !active);
+				}
 
-			if (current) {
-				classes.push(constants.CLASS_VCLICK_CURRENT);
-			}
+				const animations = Object.keys(modifiers).filter(
+					(modifier) => modifier !== "hide",
+				);
+				for (const animation of animations.length
+					? animations
+					: defaultAnimations) {
+					element.classList.add(
+						constants.CLASS_VCLICK_ANIMATION_PREFIX + animation,
+					);
+				}
 
-			if (active && !current) {
-				classes.push(constants.CLASS_VCLICK_PRIOR);
-			}
-
-			return {
-				class: classes.join(" "),
-				"data-slidev-clicks-start": String(info.start),
-				...(Number.isFinite(info.end)
-					? { "data-slidev-clicks-end": String(info.end) }
-					: {}),
-			};
-		},
+				element.classList.toggle(constants.CLASS_VCLICK_CURRENT, current);
+				element.classList.toggle(
+					constants.CLASS_VCLICK_PRIOR,
+					active && !current,
+				);
+			}),
 	};
 }
 
-async function createRenderer(server: Server, options: ResolvedSlidevOptions) {
+async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 	const load = async <T>(id: string) => (await server.ssrLoadModule(id)) as T;
 	const { createClicksContextBase } = await load<{
 		createClicksContextBase: (
@@ -171,22 +212,20 @@ async function createRenderer(server: Server, options: ResolvedSlidevOptions) {
 			clicksStart?: number,
 			clicksTotalOverrides?: number,
 		) => ClicksContext;
-	}>(`${options.clientRoot}/composables/useClicks.ts`);
-	const constants = await load<Constants>(`${options.clientRoot}/constants.ts`);
-	const { collectKatexEquationLines } = await load<{
-		collectKatexEquationLines: (element: Element) => Element[][];
-	}>(`${options.clientRoot}/builtin/katex-lines.ts`);
-	const { createNav, navKey } = await load<typeof NavStandIn>(
+	}>(`${deck.clientRoot}/composables/useClicks.ts`);
+	const constants = await load<Constants>(`${deck.clientRoot}/constants.ts`);
+	const clicksStandIn = await load<typeof ClicksStandIn>(standIn("clicks.ts"));
+	const { createSlideContext } = await load<typeof NavStandIn>(
 		standIn("useNav.ts"),
 	);
-	const layers = await load<Layers>(LAYERS);
-	const { config, slides } = options.data;
+	const layers = await load<Layers>(GLOBAL_LAYERS_MODULE);
+	const { config, slides } = deck.data;
 	const { client } = server.environments;
 	await init;
 	const slideModule = (slideNumber: number) =>
-		`${options.entry}__slidev_${String(slideNumber)}.md`;
+		`${deck.entry}__slidev_${String(slideNumber)}.md`;
 
-	function createApp(
+	async function renderApp(
 		slideNumber: number,
 		component: Component,
 		clicks: number,
@@ -198,92 +237,111 @@ async function createRenderer(server: Server, options: ResolvedSlidevOptions) {
 			frontmatter.clicksStart,
 			totalClicks ?? frontmatter.clicks,
 		);
-		const nav = createNav(slideNumber, clicksContext);
+		const { nav, route } = createSlideContext(slideNumber, clicksContext);
+		const problems: string[] = [];
+		const targets: ClickTarget[] = [];
+		const click = (kind: "after" | "click" | "hide") =>
+			clickDirective(
+				clicksStandIn,
+				constants,
+				targets,
+				kind,
+				(frontmatter.clickAnimation ?? config.clickAnimation)
+					.split(/[\s,]+/)
+					.filter(Boolean),
+			);
 		const app = createSSRApp({ render: () => h(component) });
 		app.provide(constants.injectionClicksContext, ref(clicksContext));
 		app.provide(constants.injectionCurrentPage, ref(slideNumber));
 		app.provide(constants.injectionFrontmatter, frontmatter);
 		app.provide(constants.injectionRenderContext, ref("slide"));
+		app.provide(constants.injectionRoute, route);
 		app.provide(
 			constants.injectionSlidevContext,
 			reactive({ configs: config, nav, themeConfigs: config.themeConfig }),
 		);
 		app.provide(constants.injectionSlideZoom, ref(frontmatter.zoom ?? 1));
-		app.provide(navKey, nav);
-		app.directive("after", clickDirective(constants, clicksContext, "after"));
-		app.directive("click", clickDirective(constants, clicksContext, "click"));
-		app.directive(
-			"click-hide",
-			clickDirective(constants, clicksContext, "hide"),
+		app.provide(clicksStandIn.injectionClickTargets, targets);
+		app.component(
+			"VMenu",
+			defineComponent({
+				inheritAttrs: false,
+				setup:
+					(_, { slots }) =>
+					() =>
+						slots.default?.(),
+			}),
 		);
+		app.directive("after", click("after"));
+		app.directive("click", click("click"));
+		app.directive("click-hide", click("hide"));
 		app.directive("drag", {
 			getSSRProps: ({ value }) => ({
-				style: dragStyle(value, frontmatter.dragPos),
+				style: dragStyle(dragPosition(value, frontmatter.dragPos)),
 			}),
 		});
-		app.directive("mark", markDirective(clicksContext));
+		app.directive("mark", markDirective(clicksStandIn, targets, problems));
 		app.directive("motion", {});
-		return { app, clicksContext };
+
+		const html = await renderToString(app);
+		return {
+			clicksContext,
+			html: targets.length
+				? resolveClickTargets(html, targets, clicksContext)
+				: html,
+			problems,
+		};
 	}
 
-	const render = async (
-		slideNumber: number,
-		component: Component,
-		clicks: number,
-		totalClicks?: number,
-	) =>
-		renderToString(createApp(slideNumber, component, clicks, totalClicks).app);
+	function resolveClickTargets(
+		html: string,
+		targets: ClickTarget[],
+		clicksContext: ClicksContext,
+	) {
+		const { document } = parseHTML(
+			`<!doctype html><html><body>${html}</body></html>`,
+		);
+		for (const element of childrenFirst(document.body)) {
+			for (const name of element.getAttributeNames()) {
+				if (name.startsWith(clicksStandIn.CLICK_TARGET_ATTRIBUTE)) {
+					element.removeAttribute(name);
+					targets[
+						Number(name.slice(clicksStandIn.CLICK_TARGET_ATTRIBUTE.length))
+					](clicksContext, element);
+				}
+			}
+		}
 
-	const renderGlobalBottom = (slideNumber: number) =>
-		render(slideNumber, layers.GlobalBottom, 0);
-
-	async function staticGlobalBottomLayers() {
-		const renders = await Promise.all(
-			slides.map((_, index) => renderGlobalBottom(index + 1)),
-		);
-		const [first, ...others] = renders.map((html) =>
-			[
-				...parseHTML(`<html><body>${html}</body></html>`).document.body
-					.children,
-			].map((element) => element.outerHTML),
-		);
-		return first.flatMap((html, index) =>
-			others.every(
-				(other) => other.length === first.length && other[index] === html,
-			)
-				? [index]
-				: [],
-		);
+		return document.body.innerHTML;
 	}
 
 	async function renderSlide(slideNumber: number): Promise<RenderedSlide> {
-		const { frontmatter, note = "" } = slides[slideNumber - 1];
-		const { clicks, clicksStart = 0 }: Frontmatter = frontmatter;
+		const { frontmatter } = slides[slideNumber - 1];
+		const { clicks, clicksStart = 0, zoom = 1 }: Frontmatter = frontmatter;
 		const { default: content } = await load<{ default: Component }>(
 			slideModule(slideNumber),
 		);
-		const counted = createApp(slideNumber, content, clicksStart);
-		await renderToString(counted.app);
+		const slide = {
+			render: () =>
+				h(Fragment, [h(layers.SlideBottom), h(content), h(layers.SlideTop)]),
+		};
+		const counted = await renderApp(slideNumber, slide, clicksStart);
 		const totalClicks =
 			clicks ?? Math.max(0, ...counted.clicksContext.maxMap.values());
 		const states = [];
 		for (let click = clicksStart; click <= totalClicks; click++) {
-			const html = await Promise.all(
-				[layers.SlideBottom, content, layers.SlideTop].map((component) =>
-					render(slideNumber, component, click, totalClicks),
-				),
-			);
 			states.push(
-				highlightLines(html.join(""), constants, collectKatexEquationLines),
+				(await renderApp(slideNumber, slide, click, totalClicks)).html,
 			);
 		}
 
 		return {
-			frontmatter,
-			globalBottom: await renderGlobalBottom(slideNumber),
-			globalTop: await render(slideNumber, layers.GlobalTop, 0),
-			note,
+			clicksStart,
+			globalBottom: (await renderApp(slideNumber, layers.GlobalBottom, 0)).html,
+			globalTop: (await renderApp(slideNumber, layers.GlobalTop, 0)).html,
+			problems: counted.problems,
 			states,
+			zoom,
 		};
 	}
 
@@ -291,7 +349,7 @@ async function createRenderer(server: Server, options: ResolvedSlidevOptions) {
 		const visited = new Set<string>();
 		const sheets: string[] = [];
 		const visit = async (url: string) => {
-			if (visited.has(url) || !STYLED.test(url)) {
+			if (visited.has(url) || !MAY_IMPORT_CSS.test(url)) {
 				return;
 			}
 
@@ -323,109 +381,69 @@ async function createRenderer(server: Server, options: ResolvedSlidevOptions) {
 
 	return {
 		close: () => server.close(),
-		/** Slidev's resolved deck configuration. */
-		config,
-		/** CSS shared by every slide: Slidev's styles, the deck's styles, and UnoCSS utilities. */
-		globalCss: () => collectCss([`${options.clientRoot}/styles/index.ts`]),
-		/** The directory Vite serves at the root as-is. */
+		globalCss: () => collectCss([`${deck.clientRoot}/styles/index.ts`]),
 		publicDir: server.config.publicDir,
 		renderSlide,
-		/** The deck's directory. */
-		root: options.userRoot,
-		/** CSS a slide's module pulls in: its scoped &lt;style> blocks and its components' styles. */
+		root: deck.userRoot,
 		slideCss: (slideNumber: number) =>
-			collectCss([slideModule(slideNumber), LAYERS]),
-		slides,
-		/** Indexes of the global-bottom layers' top-level elements that are the same on every slide. */
-		staticGlobalBottomLayers,
+			collectCss([slideModule(slideNumber), GLOBAL_LAYERS_MODULE]),
 	};
 }
 
-function dragStyle(value: unknown, dragPos: Record<string, string> = {}) {
-	const position =
-		typeof value === "string" && !value.includes(",") ? dragPos[value] : value;
-	const [left, top, width, height, rotation = 0] = (
-		Array.isArray(position) ? position : String(position).split(",")
-	).map(Number);
-	return Number.isFinite(left)
-		? {
-				height: Number.isFinite(height) ? `${String(height)}px` : undefined,
-				left: `${String(left)}px`,
-				position: "absolute",
-				top: `${String(top)}px`,
-				transform: `rotate(${String(rotation)}deg)`,
-				transformOrigin: "center center",
-				width: `${String(width)}px`,
-				zIndex: 100,
-			}
-		: { position: "absolute", zIndex: 100 };
+function dragPosition(
+	value: unknown,
+	dragPos: Partial<Record<string, string>> = {},
+) {
+	if (Array.isArray(value)) {
+		return value.map(Number);
+	}
+
+	if (typeof value === "string" && value.includes(",")) {
+		return value.split(",").map(Number);
+	}
+
+	return typeof value === "number" || typeof value === "string"
+		? dragPos[String(value)]?.split(",").map(Number)
+		: undefined;
 }
 
-function highlightLines(
-	html: string,
-	constants: Constants,
-	collectKatexEquationLines: (element: Element) => Element[][],
-) {
-	if (!html.includes("data-highlight-range")) {
-		return html;
+function dragStyle(position: number[] | undefined) {
+	if (!position || !Number.isFinite(position[0])) {
+		return { position: "absolute", zIndex: 100 };
 	}
 
-	const { document } = parseHTML(
-		`<!doctype html><html><body>${html}</body></html>`,
-	);
-	for (const wrapper of document.querySelectorAll(
-		".slidev-code-wrapper, .slidev-katex-wrapper",
-	)) {
-		const range = wrapper.getAttribute("data-highlight-range");
-		if (!range) {
-			continue;
-		}
-
-		if (range === "hide") {
-			wrapper.classList.add(constants.CLASS_VCLICK_HIDDEN);
-			continue;
-		}
-
-		const katex = wrapper.classList.contains("slidev-katex-wrapper");
-		const lines = katex
-			? collectKatexEquationLines(wrapper)
-			: [...wrapper.querySelectorAll(".shiki code > .line")].map((line) => [
-					line,
-				]);
-		const startLine = Number(wrapper.getAttribute("data-start-line"));
-		const highlighted = new Set(
-			parseRangeString(lines.length + startLine - 1, range),
-		);
-		for (const [index, line] of lines.entries()) {
-			const on = highlighted.has(index + startLine);
-			for (const element of line) {
-				if (!katex) {
-					element.classList.toggle("slidev-code-highlighted", on);
-					element.classList.toggle("slidev-code-dishonored", !on);
-				}
-
-				element.classList.toggle("highlighted", on);
-				element.classList.toggle("dishonored", !on);
-			}
-		}
-	}
-
-	return document.body.innerHTML;
+	const [left, top, width, height, rotation = 0] = position;
+	return {
+		height: Number.isFinite(height) ? `${String(height)}px` : undefined,
+		left: `${String(left)}px`,
+		position: "absolute",
+		top: `${String(top)}px`,
+		transform: `rotate(${String(rotation)}deg)`,
+		transformOrigin: "center center",
+		width: `${String(width)}px`,
+		zIndex: 100,
+	};
 }
 
 function markDirective(
-	clicksContext: ClicksContext,
+	{ clickTargetProps }: typeof ClicksStandIn,
+	targets: ClickTarget[],
+	problems: string[],
 ): ObjectDirective<Element, RawAtValue | { at?: RawAtValue }> {
-	let registered = 0;
 	return {
-		getSSRProps({ value }) {
-			const at =
-				typeof value === "object" && !Array.isArray(value) ? value?.at : value;
-			clicksContext.register(
-				`v-mark-${String(registered++)}`,
-				clicksContext.calculate(at),
-			);
-			return {};
-		},
+		getSSRProps: ({ value }) =>
+			clickTargetProps(targets, (clicks, element) => {
+				clicks.register(
+					element,
+					clicks.calculate(
+						typeof value === "object" && !Array.isArray(value)
+							? value?.at
+							: value,
+					),
+				);
+				problems.push(
+					`Couldn't draw a v-mark: ${element.textContent.trim().slice(0, 60)}`,
+				);
+			}),
 	};
 }

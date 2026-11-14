@@ -1,15 +1,10 @@
-/**
- * Loads the files a deck's pages refer to (images, fonts) the way its dev server
- * serves them: public files, Vite-served project and dependency files, data: URIs,
- * and remote URLs.
- */
 import * as csstree from "css-tree";
+import { imageSize as measureImage } from "image-size";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { resolveLength } from "./cascade.ts";
-import { unquote } from "./css.ts";
+import { resolveInitialLength } from "./cascade.ts";
 
 export interface Assets {
 	/** A file already loaded by `load`. */
@@ -28,6 +23,10 @@ export interface AssetsOptions {
 	/** Where `save` writes files. */
 	work: string;
 }
+
+const NATIVE_FORMATS = new Set(["bmp", "gif", "jpeg", "png"]);
+const SVG =
+	/^\s*(?:<\?xml[^>]*>\s*)?(?:<!--.*?-->\s*)*(?:<!DOCTYPE[^>]*>\s*)?<svg\b/is;
 
 export function createAssets({ publicDir, root, work }: AssetsOptions): Assets {
 	const files = createCache(async (url: string) => {
@@ -59,25 +58,24 @@ export function createAssets({ publicDir, root, work }: AssetsOptions): Assets {
 	const saved = new Map<string, string>();
 
 	return {
-		get: (url) => files.get(unquote(url)),
-		load: (url) => files.load(unquote(url)),
+		get: files.get,
+		load: files.load,
 		save(url) {
-			const key = unquote(url);
-			const data = files.get(key);
+			const data = files.get(url);
 			if (!data) {
 				return undefined;
 			}
 
-			let file = saved.get(key);
+			let file = saved.get(url);
 			if (!file) {
 				const hash = createHash("sha1").update(data).digest("hex").slice(0, 12);
 				const extension =
 					imageFormat(data) ??
-					(path.extname(key.replace(/[?#].*$/, "")).slice(1) || "bin");
+					(path.extname(withoutQuery(url)).slice(1) || "bin");
 				file = path.join(work, "assets", `${hash}.${extension}`);
 				fs.mkdirSync(path.dirname(file), { recursive: true });
 				fs.writeFileSync(file, data);
-				saved.set(key, file);
+				saved.set(url, file);
 			}
 
 			return file;
@@ -118,94 +116,27 @@ export function cssUrls(value: string) {
 	return urls;
 }
 
-/** Recognizes an image format by its leading bytes. */
+/** Recognizes an image format by its contents. */
 export function imageFormat(data: Buffer) {
-	if (data.length >= 4 && data.readUInt32BE(0) === 0x89504e47) {
-		return "png";
-	}
-
-	if (data[0] === 0xff && data[1] === 0xd8) {
-		return "jpeg";
-	}
-
-	const head = data.toString("latin1", 0, 12);
-	if (head.startsWith("GIF")) {
-		return "gif";
-	}
-
-	if (head.startsWith("BM")) {
-		return "bmp";
-	}
-
-	if (head.startsWith("RIFF") && head.slice(8) === "WEBP") {
-		return "webp";
-	}
-
-	if (
-		head.slice(4, 8) === "ftyp" &&
-		/avi[fs]/.test(data.toString("latin1", 8, 32))
-	) {
-		return "avif";
-	}
-
-	return /^\s*(?:<\?xml[^>]*>\s*)?(?:<!--.*?-->\s*)*(?:<!DOCTYPE[^>]*>\s*)?<svg\b/is.test(
-		data.toString("utf8", 0, 1024),
-	)
-		? "svg"
-		: undefined;
+	return isSvg(data) ? "svg" : rasterOf(data)?.format;
 }
 
-/** Reads an image's natural size from its header (PNG, GIF, JPEG, WebP, BMP, or SVG). */
-export function imageSize(data: Buffer): undefined | { h: number; w: number } {
-	switch (imageFormat(data)) {
-		case "bmp":
-			return { h: Math.abs(data.readInt32LE(22)), w: data.readInt32LE(18) };
-		case "gif":
-			return { h: data.readUInt16LE(8), w: data.readUInt16LE(6) };
-		case "jpeg":
-			for (let offset = 2; offset + 9 < data.length;) {
-				const marker = data[offset + 1];
-				if (
-					marker >= 0xc0 &&
-					marker <= 0xcf &&
-					![0xc4, 0xc8, 0xcc].includes(marker)
-				) {
-					return {
-						h: data.readUInt16BE(offset + 5),
-						w: data.readUInt16BE(offset + 7),
-					};
-				}
-
-				offset += 2 + data.readUInt16BE(offset + 2);
-			}
-
-			return undefined;
-		case "png":
-			return { h: data.readUInt32BE(20), w: data.readUInt32BE(16) };
-		case "svg":
-			return svgSize(data.toString("utf8"));
-		case "webp": {
-			const chunk = data.toString("latin1", 12, 16);
-			if (chunk === "VP8X") {
-				return {
-					h: 1 + data.readUIntLE(27, 3),
-					w: 1 + data.readUIntLE(24, 3),
-				};
-			}
-
-			if (chunk === "VP8L") {
-				const bits = data.readUInt32LE(21);
-				return { h: 1 + ((bits >> 14) & 0x3fff), w: 1 + (bits & 0x3fff) };
-			}
-
-			return {
-				h: data.readUInt16LE(28) & 0x3fff,
-				w: data.readUInt16LE(26) & 0x3fff,
-			};
-		}
-		default:
-			return undefined;
+/** Reads an image's natural size, or undefined when it isn't a whole image. */
+export function imageSize(data: Buffer) {
+	if (isSvg(data)) {
+		return svgSize(data.toString("utf8"));
 	}
+
+	const raster = rasterOf(data);
+	return raster && { height: raster.height, width: raster.width };
+}
+
+/** Whether PowerPoint displays an image's format natively. */
+export const isNativeImage = (data: Buffer) =>
+	NATIVE_FORMATS.has(imageFormat(data) ?? "");
+
+export function withoutQuery(url: string) {
+	return url.replace(/[?#].*$/, "");
 }
 
 function decodePercents(text: string) {
@@ -218,18 +149,31 @@ function decodePercents(text: string) {
 	);
 }
 
-/** Where a page URL's file is on disk: public files first, then files Vite serves from the project or file system. */
+function isSvg(data: Buffer) {
+	return SVG.test(data.toString("utf8", 0, 1024));
+}
+
 function localFile(
 	url: string,
 	{ publicDir, root }: Pick<AssetsOptions, "publicDir" | "root">,
 ) {
-	const pathname = decodePercents(url.replace(/[?#].*$/, "")).toString();
+	const pathname = decodePercents(withoutQuery(url)).toString();
 	const candidates = pathname.startsWith("/@fs/")
 		? [pathname.slice("/@fs".length).replace(/^\/(?=[a-z]:)/i, "")]
 		: [path.join(publicDir, pathname), path.join(root, pathname)];
 	return candidates.find((candidate) =>
 		fs.statSync(candidate, { throwIfNoEntry: false })?.isFile(),
 	);
+}
+
+function rasterOf(data: Buffer) {
+	try {
+		// image-size reads past the end of a Buffer that shares Node's pool, so measure a copy.
+		const { height, type, width } = measureImage(Uint8Array.from(data));
+		return { format: type === "jpg" ? "jpeg" : type, height, width };
+	} catch {
+		return undefined;
+	}
 }
 
 function svgSize(svg: string) {
@@ -239,11 +183,7 @@ function svgSize(svg: string) {
 	const length = (name: string) => {
 		const value = attribute(name)?.trim();
 		return value && !value.endsWith("%")
-			? resolveLength(value, {
-					fontSize: 16,
-					rootFontSize: 16,
-					viewport: { height: 0, width: 0 },
-				}) || undefined
+			? resolveInitialLength(value, { height: 0, width: 0 }) || undefined
 			: undefined;
 	};
 
@@ -253,9 +193,13 @@ function svgSize(svg: string) {
 			.split(/[\s,]+/)
 			.map(Number) ?? [];
 	const ratio = viewWidth && viewHeight ? viewWidth / viewHeight : undefined;
-	const width = length("width");
-	const height = length("height");
-	const w = width ?? (height && ratio ? height * ratio : viewWidth);
-	const h = height ?? (width && ratio ? width / ratio : viewHeight);
-	return w && h ? { h, w } : undefined;
+	const attributeWidth = length("width");
+	const attributeHeight = length("height");
+	const width =
+		attributeWidth ??
+		(attributeHeight && ratio ? attributeHeight * ratio : viewWidth);
+	const height =
+		attributeHeight ??
+		(attributeWidth && ratio ? attributeWidth / ratio : viewHeight);
+	return width && height ? { height, width } : undefined;
 }

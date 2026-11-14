@@ -1,27 +1,36 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import { buildPptx } from "./build.ts";
+import packageJson from "../../package.json" with { type: "json" };
+import { buildPptx, BuildPptxError } from "./build.ts";
 import { cli } from "./cli.ts";
 
-vi.mock("./build.ts");
+vi.mock(import("./build.ts"), async (importOriginal) => ({
+	...(await importOriginal()),
+	buildPptx: vi.fn(),
+}));
 
 const mockBuildPptx = vi.mocked(buildPptx);
 
 describe(cli, () => {
-	it("fails when given both --dark and --light", async () => {
-		const error = vi
-			.spyOn(console, "error")
-			.mockImplementation(() => undefined);
+	it("prints usage and succeeds when given --help", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-		expect(await cli(["--dark", "--light"])).toBe(1);
-		expect(error).toHaveBeenCalledWith(
-			"Failed building PowerPoint: Pass at most one of --dark and --light.",
+		expect(await cli(["--help"])).toBe(0);
+		expect(log).toHaveBeenCalledWith(
+			expect.stringContaining("Usage: slidev-pptx [entry] [options]"),
 		);
 		expect(mockBuildPptx).not.toHaveBeenCalled();
 	});
 
-	it("fails when given an unknown option", async () => {
+	it("prints the version and succeeds when given --version", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+		expect(await cli(["--version"])).toBe(0);
+		expect(log).toHaveBeenCalledWith(packageJson.version);
+	});
+
+	it("points to --help and fails when given an unknown option", async () => {
 		const error = vi
 			.spyOn(console, "error")
 			.mockImplementation(() => undefined);
@@ -29,21 +38,47 @@ describe(cli, () => {
 		expect(await cli(["--review"])).toBe(1);
 		expect(error).toHaveBeenCalledWith(
 			expect.stringMatching(
-				/^Failed building PowerPoint: Unknown option '--review'/,
+				/^Unknown option '--review'.*\nRun with --help for usage\.$/s,
 			),
 		);
+		expect(mockBuildPptx).not.toHaveBeenCalled();
 	});
 
-	it("fails with the build's message when the build throws", async () => {
+	it("points to --help and fails when given more than one entry", async () => {
 		const error = vi
 			.spyOn(console, "error")
 			.mockImplementation(() => undefined);
-		mockBuildPptx.mockRejectedValueOnce(new Error("Slides must be numbers."));
 
-		expect(await cli(["--slides", "two"])).toBe(1);
+		expect(await cli(["one.md", "two.md"])).toBe(1);
 		expect(error).toHaveBeenCalledWith(
-			"Failed building PowerPoint: Slides must be numbers.",
+			"Expected at most one entry; got one.md, two.md.\nRun with --help for usage.",
 		);
+	});
+
+	it("prints only the message when the build rejects its options", async () => {
+		const error = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+		mockBuildPptx.mockRejectedValueOnce(
+			new BuildPptxError('Range "two" must select slides from 1 to 3.'),
+		);
+
+		expect(await cli([])).toBe(1);
+		expect(error).toHaveBeenCalledWith(
+			"Failed building PowerPoint:",
+			'Range "two" must select slides from 1 to 3.',
+		);
+	});
+
+	it("prints the whole error when the build fails unexpectedly", async () => {
+		const error = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+		const failure = new TypeError("Cannot read properties of undefined");
+		mockBuildPptx.mockRejectedValueOnce(failure);
+
+		expect(await cli([])).toBe(1);
+		expect(error).toHaveBeenCalledWith("Failed building PowerPoint:", failure);
 	});
 
 	it("passes options to the build when given them", async () => {
@@ -51,47 +86,100 @@ describe(cli, () => {
 		mockBuildPptx.mockResolvedValueOnce({ problems: [], slides: 2 });
 
 		await cli([
-			"--entry",
 			"deck.md",
-			"--light",
-			"--out",
+			"--dark",
+			"--output",
 			"deck.pptx",
-			"--slide-per-click",
-			"--slides",
-			"1,3",
+			"--range",
+			"1,3-4",
+			"--with-clicks",
 			"--work",
 			"work",
 		]);
 
 		expect(mockBuildPptx).toHaveBeenCalledWith({
-			colorScheme: "light",
+			dark: true,
 			entry: "deck.md",
-			out: path.resolve("deck.pptx"),
-			slidePerClick: true,
-			slides: [1, 3],
+			output: path.resolve("deck.pptx"),
+			range: "1,3-4",
+			withClicks: true,
 			work: "work",
 		});
 	});
 
-	it("prints problems and fails when the deck has them", async () => {
+	it("names the output after the entry when given no --output", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => undefined);
+		mockBuildPptx.mockResolvedValueOnce({ problems: [], slides: 2 });
+
+		await cli(["talk.md"]);
+
+		expect(mockBuildPptx).toHaveBeenCalledWith(
+			expect.objectContaining({
+				entry: "talk.md",
+				output: path.resolve("talk-export.pptx"),
+			}),
+		);
+	});
+
+	it("prints problems and fails when the deck has errors", async () => {
+		const error = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
 		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 		mockBuildPptx.mockResolvedValueOnce({
 			problems: [
-				{ message: "Couldn't export a video.", slide: 8 },
-				{ click: 2, message: "Couldn't rasterize [x].", slide: 3 },
+				{ message: "Couldn't export a video.", severity: "error", slide: 8 },
+				{
+					click: 2,
+					message: "Couldn't draw a v-mark: x",
+					severity: "warning",
+					slide: 3,
+				},
 			],
 			slides: 8,
 		});
 
-		expect(await cli(["--out", "deck.pptx"])).toBe(1);
-		expect({ log: log.mock.calls, warn: warn.mock.calls }).toEqual({
+		expect(await cli(["--output", "deck.pptx"])).toBe(1);
+		expect({
+			error: error.mock.calls,
+			log: log.mock.calls,
+			warn: warn.mock.calls,
+		}).toEqual({
+			error: [["Error on slide 8: Couldn't export a video."]],
 			log: [[expect.stringMatching(/^Wrote 8 slides to .*deck\.pptx in /)]],
-			warn: [
-				["Slide 8: Couldn't export a video."],
-				["Slide 3, click 2: Couldn't rasterize [x]."],
-			],
+			warn: [["Warning on slide 3, click 2: Couldn't draw a v-mark: x"]],
 		});
+	});
+
+	it("prints a problem without a slide when it's about the whole deck", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		mockBuildPptx.mockResolvedValueOnce({
+			problems: [{ message: "Couldn't find a font.", severity: "warning" }],
+			slides: 1,
+		});
+
+		await cli([]);
+
+		expect(warn.mock.calls).toEqual([["Warning: Couldn't find a font."]]);
+	});
+
+	it("succeeds when the deck has only warnings", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => undefined);
+		vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		mockBuildPptx.mockResolvedValueOnce({
+			problems: [
+				{
+					message: "Couldn't draw a v-mark: x",
+					severity: "warning",
+					slide: 3,
+				},
+			],
+			slides: 3,
+		});
+
+		expect(await cli([])).toBe(0);
 	});
 
 	it("succeeds when the deck has no problems", async () => {

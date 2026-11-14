@@ -6,7 +6,7 @@ import type { Insets, Side } from "./geometry.ts";
 
 import { INITIAL_STYLE, resolveLength } from "../cascade.ts";
 import { ID } from "../layout.ts";
-import { scaleOf } from "./geometry.ts";
+import { scaleOf, SIDES } from "./geometry.ts";
 
 export type ExtractContext = ReturnType<typeof createExtractContext>;
 
@@ -17,16 +17,15 @@ export interface ExtractOptions {
 	fonts: FontBook;
 }
 
-export type ItemInput = ExtractedItem extends infer Item
-	? Item extends ExtractedItem
-		? Omit<Item, "order">
-		: never
+export type ItemInput = WithoutDerived<ExtractedItem>;
+
+type WithoutDerived<Item> = Item extends unknown
+	? Omit<Item, "decorative">
 	: never;
 
-/** Below this opacity, elements can't be seen. */
 export const MIN_OPACITY = 0.05;
 
-const SIDES: Side[] = ["top", "right", "bottom", "left"];
+const GENERATED_CONTENT = new Set(["pptx-after", "pptx-before"]);
 
 const insetsOf = (widthOf: (side: Side) => number): Insets => ({
 	bottom: widthOf("bottom"),
@@ -38,7 +37,9 @@ const insetsOf = (widthOf: (side: Side) => number): Insets => ({
 const isElement = (node: Node): node is Element =>
 	node.nodeType === node.ELEMENT_NODE;
 
-/** What extracting a slide state's items needs: its layout, styles, and where items go. */
+const isDecoration = (item: ItemInput) =>
+	!("paragraphs" in item) && !("alt" in item && item.alt.trim());
+
 export function createExtractContext(
 	layout: Layout,
 	{ assets, canvas, fonts }: ExtractOptions,
@@ -56,8 +57,6 @@ export function createExtractContext(
 		}
 	}
 
-	const descendantCounts = new Map<Element, number>();
-
 	const styleOf = (element: Element) => styles.get(element) ?? INITIAL_STYLE;
 	const idOf = (element: Element) => element.getAttribute(ID) ?? "";
 	const boxOf = (element: Element) => boxes.get(idOf(element));
@@ -65,7 +64,6 @@ export function createExtractContext(
 		styleOf(document.documentElement)["font-size"],
 	);
 
-	/** Resolves a length to px in an element's font size, with percentages of `percentBase`. */
 	const resolve = (
 		element: Element,
 		length: string | undefined,
@@ -81,20 +79,18 @@ export function createExtractContext(
 	const lengthOf = (element: Element, property: string, percentBase = 0) =>
 		resolve(element, styleOf(element)[property], percentBase);
 
-	/** An element's corner radius in local px, with percentages of its smaller side. */
 	const radiusOf = (element: Element) => {
 		const box = boxOf(element);
 		return lengthOf(
 			element,
 			"border-top-left-radius",
-			box && Math.min(box.w, box.h),
+			box && Math.min(box.width, box.height),
 		);
 	};
 
 	const borderInsets = (element: Element) =>
 		insetsOf((side) => lengthOf(element, `border-${side}-width`));
 
-	/** How far an element's content sits inside its border box: its borders and padding. */
 	const contentInsets = (element: Element): Insets => {
 		const style = styleOf(element);
 		const percentBase = SIDES.some((side) =>
@@ -118,7 +114,7 @@ export function createExtractContext(
 		}
 
 		const { left, right } = contentInsets(parent);
-		return box.w - left - right;
+		return box.width - left - right;
 	};
 
 	/** The scale (like Slidev's per-slide zoom) of an element's nearest laid-out ancestor. */
@@ -158,115 +154,84 @@ export function createExtractContext(
 	const isInline = (element: Element) =>
 		styleOf(element).display.startsWith("inline");
 
-	/** An element's text, with spaces between its blocks. */
-	const textOf = (element: Element) => {
-		const visit = (parent: Element): string =>
-			[...parent.childNodes]
-				.map((node) =>
-					node.nodeType === node.TEXT_NODE
-						? (node.textContent ?? "")
-						: isElement(node)
-							? isInline(node)
-								? visit(node)
-								: ` ${visit(node)} `
-							: "",
-				)
-				.join("");
-		return visit(element).replace(/\s+/g, " ").trim();
-	};
-
-	/** An element's first block of text, like a card's heading. */
-	const firstBlockTextOf = (element: Element) => {
-		let text = "";
-		const visit = (node: Node): boolean => {
-			if (node.nodeType === node.TEXT_NODE) {
-				text += node.textContent ?? "";
-				return false;
+	const blocksOf = (element: Element) => {
+		const blocks = [""];
+		const visit = (parent: Element) => {
+			for (const node of parent.childNodes) {
+				if (node.nodeType === node.TEXT_NODE) {
+					blocks[blocks.length - 1] += node.textContent ?? "";
+				} else if (isElement(node) && isInline(node)) {
+					visit(node);
+				} else if (isElement(node)) {
+					blocks.push("");
+					visit(node);
+					blocks.push("");
+				}
 			}
-
-			if (!isElement(node)) {
-				return false;
-			}
-
-			const block = node !== element && !isInline(node);
-			if (block && text.trim()) {
-				return true;
-			}
-
-			return [...node.childNodes].some(visit) || (block && text.trim() !== "");
 		};
 
 		visit(element);
-		return text.replace(/\s+/g, " ").trim();
-	};
-
-	/** A short description of an element: its first block of text, else its accessible name, first class, or tag. */
-	const labelOf = (element: Element) =>
-		[
-			firstBlockTextOf(element),
-			element.getAttribute("aria-label")?.trim(),
-			[...(element.closest("[class]")?.classList ?? [])].at(0),
-		].find(Boolean) ?? element.localName;
-
-	/** Where an element sits in its slide, as tags and child indexes, so states can match it. */
-	const pathOf = (element: Element) => {
-		const parts: string[] = [];
-		for (
-			let current = element;
-			current.parentElement && !current.classList.contains("slidev-page");
-			current = current.parentElement
-		) {
-			parts.unshift(
-				`${current.localName}${String([...current.parentElement.children].indexOf(current))}`,
-			);
-		}
-
-		return parts.join("/");
-	};
-
-	const descendantCountOf = (element: Element) => {
-		let count = descendantCounts.get(element);
-		if (count === undefined) {
-			count = element.querySelectorAll("*").length;
-			descendantCounts.set(element, count);
-		}
-
-		return count;
-	};
-
-	const ascentRatio = (font: string) => {
-		const { ascent, descent } = fonts.metrics(font);
-		return ascent / (ascent + descent);
+		return blocks
+			.map((block) => block.replace(/\s+/g, " ").trim())
+			.filter(Boolean);
 	};
 
 	return {
-		ascentRatio,
 		assets,
 		borderInsets,
 		boxOf,
 		byId,
 		canvas,
 		contentInsets,
-		descendantCountOf,
 		fonts,
 		idOf,
 		isInline,
 		items,
-		labelOf,
+		labelOf: (element: Element) =>
+			[
+				blocksOf(element).at(0),
+				element.getAttribute("aria-label")?.trim(),
+				[...(element.closest("[class]")?.classList ?? [])].at(0),
+			].find(Boolean) ?? element.localName,
 		lengthOf,
 		looseRunsOf: (element: Element) => looseRuns.get(idOf(element)) ?? [],
 		markers,
 		opacityOf,
 		ownRunsOf: (element: Element) => runs.get(idOf(element)),
-		pathOf,
 		problems,
-		push: (item: ItemInput) => {
-			items.push({ ...item, order: items.length });
+		push: (element: Element, item: ItemInput) => {
+			items.push({
+				...item,
+				decorative:
+					element.closest('[aria-hidden="true"]') !== null ||
+					isDecoration(item),
+			});
 		},
 		radiusOf,
 		resolve,
 		scaleAt,
 		styleOf,
-		textOf,
+		textOf: (element: Element) => blocksOf(element).join(" "),
 	};
+}
+
+export function pathOf(element: Element) {
+	const parts: string[] = [];
+	for (
+		let current = element;
+		current.parentElement && !current.classList.contains("slidev-page");
+		current = current.parentElement
+	) {
+		parts.unshift(
+			GENERATED_CONTENT.has(current.localName)
+				? current.localName
+				: `${current.localName}${String(
+						[...current.parentElement.children]
+							.filter((sibling) => !GENERATED_CONTENT.has(sibling.localName))
+							.indexOf(current),
+					)}`,
+		);
+	}
+
+	return parts.join("/");
 }

@@ -22,11 +22,13 @@ const squiggle = {
 	strokeWidth: 3,
 };
 
-// 0.602em per character at --slidev-code-font-size, from styles/tokens.css.
-const estimatedCharacterWidth = 0.602 * 15;
+const codeFontSize = 15;
+const monospaceCharacterWidthInEm = 0.602;
 
 const squiggleElement = useTemplateRef("squiggleElement");
-const squiggleWidth = ref(props.length * estimatedCharacterWidth);
+const squiggleWidth = ref(
+	props.length * (monospaceCharacterWidthInEm * codeFontSize),
+);
 
 onMounted(() => {
 	const observer = new ResizeObserver(() => {

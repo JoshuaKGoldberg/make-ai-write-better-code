@@ -5,8 +5,8 @@
  */
 
 export interface Box {
-	h: number;
-	w: number;
+	height: number;
+	width: number;
 	x: number;
 	y: number;
 }
@@ -56,7 +56,6 @@ export interface ImageItem extends ItemBase {
 	alt: string;
 	/** The visible frame. */
 	box: Box;
-	circle: boolean;
 	/** Where the whole image is drawn, when the frame shows only part of it (object-fit: cover, background images). */
 	crop?: Box;
 	/** The image file. */
@@ -99,6 +98,7 @@ export interface ListParagraph extends Paragraph {
 	marker: string;
 	/** The item's ordinal, for numbered markers. */
 	number: number;
+	/** Whether the paragraph's list item shows, rather than being hidden in this click state, as before its v-click. */
 	visible: boolean;
 }
 
@@ -121,23 +121,23 @@ export interface Run {
 	italic: boolean;
 	/** px */
 	letterSpacing: number;
-	/** Starts a new line within its paragraph where the source forced one, as a line break does. */
-	lineBreak?: boolean;
-	/** A spacer run standing in for padding, margins, or borders between runs. */
-	pad?: boolean;
+	/** Starts a new line within its paragraph: "forced" where the source forced one, as a br element does, or "wrap" where the browser wrapped, which only boxes that can't wrap break at. */
+	lineBreak?: "forced" | "wrap";
+	/** Whether the run is a spacer standing in for padding, margins, or borders between runs. */
+	pad: boolean;
 	/** Raised or lowered, as superscript or subscript. */
 	script?: "sub" | "super";
 	shadow?: Shadow;
 	/** px */
 	size: number;
-	/** Starts a new line within its paragraph, where the browser wrapped; only boxes that can't wrap break there. */
-	softBreak?: boolean;
+	/** Whether the text is struck through (CSS text-decoration-line: line-through). */
+	strike: boolean;
 	stroke?: Pick<Stroke, "color" | "width">;
 	text: string;
 	/** 0-100 */
 	transparency: number;
 	underline: boolean;
-	/** Shown capitalized (CSS text-transform: uppercase); the text keeps its source casing. */
+	/** Whether the text shows capitalized (CSS text-transform: uppercase); the text keeps its source casing. */
 	upper: boolean;
 }
 
@@ -176,7 +176,7 @@ export interface TextItem extends ItemBase {
 	baselines?: number[];
 	box: Box;
 	/** Whether the text is a heading (h1-h6). */
-	heading?: boolean;
+	heading: boolean;
 	kind: "text";
 	paragraphs: Paragraph[];
 	rotation: number;
@@ -185,8 +185,11 @@ export interface TextItem extends ItemBase {
 
 export interface TextStyle {
 	align: "center" | "justify" | "left" | "right";
+	/** px from the item's box.x to the content right edge of its nearest block ancestor with a visible box (fill or border), else the slide edge. */
+	availableWidth: number;
 	/** px */
 	lineHeight: number;
+	/** Whether the text can't wrap, as with white-space: nowrap or pre, so PowerPoint mustn't wrap it either. */
 	nowrap: boolean;
 
 	/**
@@ -221,7 +224,7 @@ interface EllipseItem extends ItemBase {
 }
 
 interface GradientStop {
-	hex: string;
+	color: string;
 	/** Position along the gradient, 0-100. */
 	position: number;
 	/** 0-100 */
@@ -229,12 +232,12 @@ interface GradientStop {
 }
 
 interface ItemBase {
+	/** Whether the item is decoration screen readers should skip: inside an aria-hidden subtree, or a shape with no text or alt. */
+	decorative: boolean;
 	/** Identity across click states: same key in (nearly) the same place is the same object. */
 	key: string;
 	/** What the item is part of, for its name in PowerPoint's Selection Pane when its own content doesn't say. */
 	label?: string;
-	/** Paint order within a state. */
-	order: number;
 }
 
 interface PolygonItem extends ItemBase {
@@ -264,5 +267,6 @@ interface RasterRequest extends Omit<RasterItem, "file"> {
 
 interface SlideState {
 	clicks: number;
+	/** In paint order, from the bottom. */
 	items: Item[];
 }

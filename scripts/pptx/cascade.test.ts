@@ -21,8 +21,15 @@ function stylesOf(
 		createCascade([css], { colorScheme, viewport }),
 		{ viewport },
 	);
-	const element = (selector: string) =>
-		document.querySelector(selector) ?? document.documentElement;
+	const element = (selector: string) => {
+		const found = document.querySelector(selector);
+		if (!found) {
+			throw new Error(`No element matches ${selector}.`);
+		}
+
+		return found;
+	};
+
 	const of = (selector: string) => computed.styles.get(element(selector));
 	const pseudosOf = (selector: string) =>
 		computed.pseudos.get(element(selector));
@@ -120,13 +127,60 @@ describe(createCascade, () => {
 		["(600px < width <= 900px)", "lime"],
 		["(orientation: portrait)", "red"],
 		["(prefers-reduced-motion: reduce)", "red"],
-		["not all and (monochrome)", "red"],
+		["(prefers-reduced-motion)", "red"],
+		["(forced-colors: active)", "red"],
+		["(prefers-contrast: more)", "red"],
+		["(hover: none)", "red"],
+		["(hover: hover)", "lime"],
+		["(monochrome)", "red"],
+		["(color)", "lime"],
+		["(min-aspect-ratio: 1/1)", "lime"],
+		["(unknown-feature)", "red"],
+		["not all and (monochrome)", "lime"],
 	])("evaluates @media %s against the canvas", (query, color) => {
 		const { of } = stylesOf(
 			`<p>a</p>`,
 			`p { color: red } @media ${query} { p { color: lime } }`,
 		);
 		expect(of("p")?.color).toBe(color);
+	});
+
+	it.each([
+		["(display: grid)", "lime"],
+		["not (display: grid)", "red"],
+		["(display: nonsense)", "red"],
+		["(display: grid) and (not (display: nonsense))", "lime"],
+		["(display: nonsense) or (color: red)", "lime"],
+		["(--anything: 1)", "lime"],
+		["selector(a > b)", "lime"],
+	])("evaluates @supports %s as a modern browser", (condition, color) => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`p { color: red } @supports ${condition} { p { color: lime } }`,
+		);
+		expect(of("p")?.color).toBe(color);
+	});
+
+	it.each([
+		["(min-width: 1px)", "lime"],
+		["card (max-width: 0px)", "red"],
+	])("evaluates @container %s against the canvas", (condition, color) => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`p { color: red } @container ${condition} { p { color: lime } }`,
+		);
+		expect(of("p")?.color).toBe(color);
+	});
+
+	it("ranks user-agent defaults below layered rules", () => {
+		const { of } = stylesOf(
+			`<div><h1>a</h1></div>`,
+			`@layer base { h1 { font-size: 16px; font-weight: 400 } div { display: flex } }`,
+		);
+		expect([of("div"), of("h1")]).toEqual([
+			expect.objectContaining({ display: "flex" }),
+			expect.objectContaining({ "font-size": "16px", "font-weight": "400" }),
+		]);
 	});
 
 	it("scopes rules in @scope to their root", () => {
@@ -216,16 +270,72 @@ describe(computeStyles, () => {
 		expect(of("p")?.color).toBe("lime");
 	});
 
-	it("resolves inherit, initial, and unset", () => {
+	it.each([
+		["padding-left: inherit", { color: "blue", "padding-left": "4px" }],
+		["color: initial", { color: "#000000", "padding-left": "0px" }],
+		["color: unset", { color: "red", "padding-left": "0px" }],
+		["color: revert-layer", { color: "red", "padding-left": "0px" }],
+		["padding-left: unset", { color: "blue", "padding-left": "0px" }],
+	])("resolves %s", (declaration, expected) => {
 		const { of } = stylesOf(
-			`<div><p class="a">a</p><p class="b">b</p><p class="c">c</p></div>`,
-			`div { color: red; padding-left: 4px } p { color: blue } .a { padding-left: inherit } .b { color: initial } .c { color: unset }`,
+			`<div><p>a</p></div>`,
+			`div { color: red; padding-left: 4px } p { color: blue; ${declaration} }`,
 		);
-		expect([
-			of(".a")?.["padding-left"],
-			of(".b")?.color,
-			of(".c")?.color,
-		]).toEqual(["4px", "#000000", "red"]);
+		expect(of("p")).toMatchObject(expected);
+	});
+
+	it.each([
+		["", "red"],
+		["html { color-scheme: dark }", "blue"],
+		["html { color-scheme: light dark }", "red"],
+	])(
+		"resolves light-dark() by the element's color-scheme when the sheet is %j",
+		(sheet, color) => {
+			const { of } = stylesOf(
+				`<p>a</p>`,
+				`${sheet} :root { --c: blue } p { color: light-dark(red, var(--c)) }`,
+			);
+			expect(of("p")?.color).toBe(color);
+		},
+	);
+
+	it("resolves custom properties when their names have capitals", () => {
+		const { of } = stylesOf(
+			`<p style="--accentColor: teal; background-color: var(--accentColor)">a</p>`,
+			`:root { --myColor: lime } p { color: var(--myColor) }`,
+		);
+		expect(of("p")).toMatchObject({
+			"background-color": "teal",
+			color: "lime",
+		});
+	});
+
+	it("uses a var()'s value when its unused fallback refers to a missing property", () => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`:root { --a: lime } p { color: var(--a, calc(var(--b) + 1px)) }`,
+		);
+		expect(of("p")?.color).toBe("lime");
+	});
+
+	it("treats custom properties as missing when they refer to each other", () => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`p { --a: var(--b); --b: var(--a); color: var(--a, lime) }`,
+		);
+		expect(of("p")?.color).toBe("lime");
+	});
+
+	it("substitutes every var() when a value has many", () => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`:root { --x: 1px } p { padding: var(--x) var(--x) var(--x) var(--x); margin-top: calc(var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x) + var(--x)) }`,
+		);
+		expect(of("p")).toMatchObject({
+			"margin-top": "21px",
+			"padding-bottom": "1px",
+			"padding-left": "1px",
+		});
 	});
 
 	it.each([
@@ -245,6 +355,122 @@ describe(computeStyles, () => {
 			expect(of("p")?.["font-weight"]).toBe(weight);
 		},
 	);
+
+	it("reads a font shorthand's numeric weight as a weight, not a size", () => {
+		const { of } = stylesOf(`<p>a</p>`, `p { font: 300 12px serif }`);
+		expect(of("p")).toMatchObject({
+			"font-family": "serif",
+			"font-size": "12px",
+			"font-weight": "300",
+		});
+	});
+
+	it.each([
+		["xx-small", "9px"],
+		["xxx-large", "48px"],
+	])("computes a font size of %s", (keyword, size) => {
+		const { of } = stylesOf(`<p>a</p>`, `p { font-size: ${keyword} }`);
+		expect(of("p")?.["font-size"]).toBe(size);
+	});
+
+	it.each([
+		["h4", { "font-size": "16px", "font-weight": "700" }],
+		["h5", { "font-size": "13.28px", "font-weight": "700" }],
+		["h6", { "font-size": "10.72px", "font-weight": "700" }],
+		["th", { "font-weight": "700", "text-align": "center" }],
+		["u", { "text-decoration-line": "underline" }],
+		["ins", { "text-decoration-line": "underline" }],
+		["s", { "text-decoration-line": "line-through" }],
+		["del", { "text-decoration-line": "line-through" }],
+		["mark", { "background-color": "yellow", color: "black" }],
+		["small", { "font-size": "13.328px" }],
+		["aside", { display: "block" }],
+	])("applies user-agent defaults to %s", (tag, expected) => {
+		const { of } = stylesOf(`<table><tr><${tag}>a</${tag}></tr></table>`, "");
+		expect(of(tag)).toMatchObject(expected);
+	});
+
+	it("displays table parts as tables when they're in a table", () => {
+		const { of } = stylesOf(
+			`<table><caption>c</caption><colgroup><col></colgroup><thead><tr><th>h</th></tr></thead><tbody><tr><td>d</td></tr></tbody><tfoot><tr><td>f</td></tr></tfoot></table>`,
+			"",
+		);
+		expect({
+			caption: of("caption")?.display,
+			col: of("col")?.display,
+			colgroup: of("colgroup")?.display,
+			table: of("table")?.display,
+			tbody: of("tbody")?.display,
+			td: of("td")?.display,
+			tfoot: of("tfoot")?.display,
+			th: of("th")?.display,
+			thead: of("thead")?.display,
+			tr: of("tr")?.display,
+		}).toEqual({
+			caption: "table-caption",
+			col: "table-column",
+			colgroup: "table-column-group",
+			table: "table",
+			tbody: "table-row-group",
+			td: "table-cell",
+			tfoot: "table-footer-group",
+			th: "table-cell",
+			thead: "table-header-group",
+			tr: "table-row",
+		});
+	});
+
+	it("keeps a length for later when it's partly a percentage", () => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`p { padding-left: calc(10% + 4px); margin-top: calc(50% - 10px) }`,
+		);
+		expect(of("p")).toMatchObject({
+			"margin-top": "calc(50% - 10px)",
+			"padding-left": "calc(10% + 4px)",
+		});
+	});
+
+	it.each([
+		["padding-inline: 8px", { "padding-left": "8px", "padding-right": "8px" }],
+		["margin-block: 1px 2px", { "margin-bottom": "2px", "margin-top": "1px" }],
+		["padding-inline-start: 3px", { "padding-left": "3px" }],
+		["padding-block-end: 3px", { "padding-bottom": "3px" }],
+		["inset-inline: 4px", { left: "4px", right: "4px" }],
+	])("expands the logical property %s", (declaration, expected) => {
+		const { of } = stylesOf(`<p>a</p>`, `p { ${declaration} }`);
+		expect(of("p")).toMatchObject(expected);
+	});
+
+	it.each([
+		["red underline", "underline"],
+		["underline line-through wavy", "underline line-through"],
+		["none", "none"],
+	])("expands text-decoration: %s", (value, line) => {
+		const { of } = stylesOf(`<p>a</p>`, `p { text-decoration: ${value} }`);
+		expect(of("p")?.["text-decoration-line"]).toBe(line);
+	});
+
+	it("reads a corner's horizontal radius when it has two", () => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`p { border-top-left-radius: 10px 5px }`,
+		);
+		expect(of("p")?.["border-top-left-radius"]).toBe("10px");
+	});
+
+	it.each([
+		["red", "border-box"],
+		["url(/a.png) padding-box", "padding-box"],
+		["url(/a.png) padding-box content-box", "content-box"],
+		["linear-gradient(red, blue) text", "text"],
+	])("resets background-clip when background is %s", (value, clip) => {
+		const { of } = stylesOf(
+			`<p>a</p>`,
+			`p { background-clip: text; background: ${value} }`,
+		);
+		expect(of("p")?.["background-clip"]).toBe(clip);
+	});
 
 	it("expands the font shorthand, resetting what it leaves out", () => {
 		const { of } = stylesOf(
@@ -284,20 +510,22 @@ describe(computeStyles, () => {
 		});
 	});
 
-	it("expands inset, columns, and -webkit-text-stroke", () => {
-		const { of } = stylesOf(
-			`<p>a</p>`,
-			`p { inset: 1px 2px; columns: 12em 3; -webkit-text-stroke: 2px red }`,
-		);
-		expect(of("p")).toMatchObject({
-			"-webkit-text-stroke-color": "red",
-			"-webkit-text-stroke-width": "2px",
-			bottom: "1px",
-			"column-count": "3",
-			left: "2px",
-			right: "2px",
-			top: "1px",
-		});
+	it.each([
+		[
+			"inset: 1px 2px",
+			{ bottom: "1px", left: "2px", right: "2px", top: "1px" },
+		],
+		["columns: 12em 3", { "column-count": "3" }],
+		[
+			"-webkit-text-stroke: 2px red",
+			{
+				"-webkit-text-stroke-color": "red",
+				"-webkit-text-stroke-width": "2px",
+			},
+		],
+	])("expands %s", (declaration, expected) => {
+		const { of } = stylesOf(`<p>a</p>`, `p { ${declaration} }`);
+		expect(of("p")).toMatchObject(expected);
 	});
 
 	it.each([
@@ -355,6 +583,8 @@ describe(computeStyles, () => {
 		[`open-quote "x" close-quote`, "“x”"],
 		[`"icon" / "alt text"`, "icon"],
 		[`""`, ""],
+		[`"\\FFFFFF"`, "\uFFFD"],
+		[`counter(item) "."`, "."],
 	])("generates %s as content", (content, text) => {
 		const { pseudosOf } = stylesOf(
 			`<p title="hi">a</p>`,
@@ -373,6 +603,22 @@ describe(computeStyles, () => {
 			expect(pseudosOf("p")).toBeUndefined();
 		},
 	);
+
+	it("generates no content when the element isn't displayed", () => {
+		const { pseudosOf } = stylesOf(
+			`<p>a</p>`,
+			`p { display: none } p::before { content: "a" }`,
+		);
+		expect(pseudosOf("p")).toBeUndefined();
+	});
+
+	it("generates no content when the pseudo-element isn't displayed", () => {
+		const { pseudosOf } = stylesOf(
+			`<p>a</p>`,
+			`p::before { content: "a"; display: none }`,
+		);
+		expect(pseudosOf("p")).toBeUndefined();
+	});
 
 	it.each(["img", "svg"])(
 		"generates no ::before content when the element is a replaced %s",

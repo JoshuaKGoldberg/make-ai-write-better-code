@@ -1,14 +1,10 @@
-/**
- * Lays out a server-rendered slide state without a browser: takumi computes
- * boxes and line runs, the static cascade computes visual styles, and both are
- * keyed back to the same DOM elements through a data attribute.
- */
 import type { Font, MeasuredNode, MeasuredTextRun } from "@takumi-rs/core";
 import type { Node as TakumiNode } from "@takumi-rs/helpers";
 
 import { Renderer } from "@takumi-rs/core";
 import { image } from "@takumi-rs/helpers";
 import { fromHtml } from "@takumi-rs/helpers/html";
+import * as csstree from "css-tree";
 import { NodeFilter, parseHTML } from "linkedom";
 
 import type { Assets } from "./assets.ts";
@@ -16,7 +12,8 @@ import type { CascadeRule, ComputedStyle, ComputedStyles } from "./cascade.ts";
 import type { Box, Canvas } from "./model.ts";
 
 import { cssUrls, imageSize } from "./assets.ts";
-import { computeStyles } from "./cascade.ts";
+import { computeStyles, isOutOfFlow } from "./cascade.ts";
+import { parseDeclarations } from "./css.ts";
 
 /** The attribute that ties takumi's nodes back to DOM elements. */
 export const ID = "data-pptx-id";
@@ -24,8 +21,14 @@ export const ID = "data-pptx-id";
 /** Marks global-bottom layer elements that are the same on every slide. */
 const STATIC = "data-pptx-static";
 
-/** The element generated content (::before and ::after) becomes, so it lays out and exports like any other. */
-const PSEUDO_TAG = "pptx-pseudo";
+export const ZERO_WIDTH_SPACE = "\u200B";
+
+const ATOMIC_INLINE_DISPLAYS = new Set([
+	"inline-block",
+	"inline-flex",
+	"inline-grid",
+	"inline-table",
+]);
 
 /** Stops takumi from also generating the content that became real elements. */
 const PSEUDO_RESET = `[data-pptx-before]::before,[data-pptx-after]::after{content:none !important}`;
@@ -37,16 +40,22 @@ const ATTRIBUTE_ENTITIES: Record<string, string> = {
 	">": "&gt;",
 };
 
+export const hasMarker = (style: ComputedStyle) =>
+	style.display === "list-item" && style["list-style-type"] !== "none";
+
+export const isAtomicInline = (style: ComputedStyle) =>
+	ATOMIC_INLINE_DISPLAYS.has(style.display);
+
 export interface Css {
 	rules: CascadeRule[];
 	sheets: string[];
 }
 
 export interface LaidOutBox {
-	h: number;
+	height: number;
 	/** The node's absolute transform: [a, b, c, d] of the CSS matrix. */
 	matrix: [number, number, number, number];
-	w: number;
+	width: number;
 	x: number;
 	y: number;
 }
@@ -203,7 +212,7 @@ export function createLayout({
 						continue;
 					}
 
-					const element = document.createElement(PSEUDO_TAG);
+					const element = document.createElement(`pptx-${kind}`);
 					element.setAttribute(ID, String(next++));
 					element.setAttribute("style", pseudo.css);
 					element.textContent = pseudo.text;
@@ -249,7 +258,7 @@ export function createLayout({
 		shimColumnsBalanced(columns, (item) => {
 			const style = prepared.styles.get(item);
 			return (
-				(boxes.get(item.getAttribute(ID) ?? "")?.h ?? 0) +
+				(boxes.get(item.getAttribute(ID) ?? "")?.height ?? 0) +
 				(parseFloat(style?.["margin-top"] ?? "") || 0) +
 				(parseFloat(style?.["margin-bottom"] ?? "") || 0)
 			);
@@ -303,8 +312,8 @@ export function createLayout({
 			`background:transparent !important;transform:translate(${String(-box.x)}px,${String(-box.y)}px)`,
 		);
 		return renderPng(document, prepared, sheets, {
-			height: box.h * 2,
-			width: box.w * 2,
+			height: box.height * 2,
+			width: box.width * 2,
 		});
 	}
 
@@ -343,15 +352,15 @@ export function createLayout({
 			return undefined;
 		}
 
-		const { h, w } = imageSize(data) ?? { h: canvas.height, w: canvas.width };
-		const scale = Math.min(2, 4096 / Math.max(w, h));
+		const { height, width } = imageSize(data) ?? canvas;
+		const scale = Math.min(2, 4096 / Math.max(width, height));
 		return renderer.render(
-			image({ src: data, style: { display: "block", height: h, width: w } }),
+			image({ src: data, style: { display: "block", height, width } }),
 			{
 				devicePixelRatio: scale,
 				format: "png",
-				height: Math.round(h * scale),
-				width: Math.round(w * scale),
+				height: Math.round(height * scale),
+				width: Math.round(width * scale),
 			},
 		);
 	}
@@ -423,6 +432,17 @@ const slideContentOf = (document: Document) => {
 
 const toTakumi = (content: Element) => {
 	const copy = content.cloneNode(true) as Element;
+	for (const image of copy.querySelectorAll("img:not([src]), img[src='']")) {
+		image.remove();
+	}
+
+	for (const element of [copy, ...copy.querySelectorAll("[style]")]) {
+		const style = element.getAttribute("style");
+		if (style) {
+			element.setAttribute("style", withoutInvalidDeclarations(style));
+		}
+	}
+
 	for (const element of [copy, ...copy.querySelectorAll("*")]) {
 		for (const attribute of element.attributes) {
 			attribute.value = attribute.value.replace(
@@ -435,6 +455,20 @@ const toTakumi = (content: Element) => {
 	// eslint-disable-next-line @typescript-eslint/no-deprecated -- The only takumi API that keeps each element's attributes, which tie layout back to the DOM. Replace before takumi v3 removes it.
 	return fromHtml(copy.outerHTML).node;
 };
+
+/** An inline style without the declarations browsers would drop as invalid, which takumi rejects. */
+const withoutInvalidDeclarations = (style: string) =>
+	parseDeclarations(style)
+		.filter(
+			({ property, value }) =>
+				csstree.lexer.matchProperty(property, value).error?.name !==
+				"SyntaxMatchError",
+		)
+		.map(
+			({ important, property, value }) =>
+				`${property}:${value}${important ? " !important" : ""}`,
+		)
+		.join(";");
 
 function buildDocument(
 	slideNumber: number,
@@ -461,7 +495,13 @@ function buildDocument(
 
 	// takumi has no <wbr>; a zero-width space is the same line-break opportunity.
 	for (const wbr of document.querySelectorAll("wbr")) {
-		wbr.replaceWith(document.createTextNode("​"));
+		wbr.replaceWith(document.createTextNode(ZERO_WIDTH_SPACE));
+	}
+
+	for (const hidden of document.querySelectorAll(
+		"details:not([open]) > :not(summary)",
+	)) {
+		hidden.remove();
 	}
 
 	const layers = slideContentOf(document).children;
@@ -550,6 +590,18 @@ function shimColumnsForMeasure(columns: MultiColumn[]) {
 
 const idOf = (node: TakumiNode) => node.attributes?.[ID];
 
+const laidOutBox = ({
+	height,
+	transform: [a, b, c, d, x, y],
+	width,
+}: MeasuredNode): LaidOutBox => ({
+	height,
+	matrix: [a, b, c, d],
+	width,
+	x,
+	y,
+});
+
 function zipLayout(
 	node: TakumiNode,
 	measured: MeasuredNode,
@@ -574,6 +626,66 @@ function zipLayout(
 				)
 			: [];
 
+	const isApart = (node: TakumiNode) =>
+		node.type === "image" ||
+		hasStyle(node, (style) => isOutOfFlow(style) || isAtomicInline(style));
+
+	const displayOf = (node: TakumiNode) => {
+		const id = idOf(node);
+		return id === undefined ? "inline" : styleOf(id)?.display;
+	};
+
+	const isInlineLevel = (node: TakumiNode) =>
+		displayOf(node)?.startsWith("inline") === true &&
+		!hasStyle(node, isOutOfFlow);
+
+	const isTable = (node: TakumiNode) =>
+		/^(?:inline-)?table$/.test(displayOf(node) ?? "");
+
+	const apartOf = (nodes: TakumiNode[]): TakumiNode[] =>
+		nodes.flatMap((child) =>
+			isApart(child)
+				? [child]
+				: isInlineLevel(child)
+					? apartOf(childrenOf(child))
+					: [],
+		);
+
+	const segmentsOf = (children: TakumiNode[]) => {
+		const segments: (TakumiNode | TakumiNode[])[] = [];
+		let inline: TakumiNode[] = [];
+		const endInline = () => {
+			const hasContent = inline.some(
+				(child) =>
+					isInlineLevel(child) &&
+					!(
+						child.type === "text" &&
+						idOf(child) === undefined &&
+						!child.text.trim()
+					),
+			);
+			if (hasContent) {
+				segments.push(inline);
+			} else {
+				segments.push(...inline.filter((child) => !isInlineLevel(child)));
+			}
+
+			inline = [];
+		};
+
+		for (const child of children) {
+			if (isInlineLevel(child) || hasStyle(child, isOutOfFlow)) {
+				inline.push(child);
+			} else {
+				endInline();
+				segments.push(child);
+			}
+		}
+
+		endInline();
+		return segments;
+	};
+
 	const textSegments = (
 		node: TakumiNode,
 		owner: string,
@@ -582,13 +694,18 @@ function zipLayout(
 		if (node.type === "text") {
 			segments.push({ owner: idOf(node) ?? owner, text: node.text });
 		} else {
-			for (const child of childrenOf(node)) {
+			for (const child of childrenOf(node).filter((child) => !isApart(child))) {
 				textSegments(child, idOf(node) ?? owner, segments);
 			}
 		}
 
 		return segments;
 	};
+
+	const hasText = (nodes: TakumiNode[]) =>
+		nodes
+			.filter((child) => !isApart(child))
+			.some((child) => textSegments(child, "").some(({ text }) => text.trim()));
 
 	const assignRuns = (
 		node: TakumiNode,
@@ -645,87 +762,115 @@ function zipLayout(
 		});
 	};
 
+	const mismatch = (id: string, children: number, measured: number) => {
+		mismatches.push({ children, id, measured });
+	};
+
+	// takumi measures an inline formatting context's boxes after its runs: each box
+	// laid out apart from the text, sometimes after a placeholder per out-of-flow box.
+	const zipInline = (
+		nodes: TakumiNode[],
+		measuredChildren: MeasuredNode[],
+		id: string,
+	) => {
+		const apart = apartOf(nodes);
+		const placeholders = measuredChildren.length - apart.length;
+		if (
+			placeholders !== 0 &&
+			placeholders !==
+				apart.filter((child) => hasStyle(child, isOutOfFlow)).length
+		) {
+			return false;
+		}
+
+		apart.forEach((child, index) => {
+			zip(child, measuredChildren[placeholders + index], id);
+		});
+		return true;
+	};
+
 	const zip = (node: TakumiNode, measured: MeasuredNode, owner: string) => {
 		const own = idOf(node);
 		const id = own ?? owner;
-		const [a, b, c, d, e, f] = measured.transform;
-		const box: LaidOutBox = {
-			h: measured.height,
-			matrix: [a, b, c, d],
-			w: measured.width,
-			x: e,
-			y: f,
-		};
+		const box = laidOutBox(measured);
 		if (own !== undefined) {
 			boxes.set(own, box);
 		}
 
-		if (measured.runs.length) {
-			addRuns(node, measured, owner, box);
-		}
-
-		const children = childrenOf(node);
 		// A list item's ::marker box is measured as its first child.
-		const measuredChildren = hasStyle(
-			node,
-			(style) =>
-				style.display === "list-item" && style["list-style-type"] !== "none",
-		)
+		const measuredChildren = hasStyle(node, hasMarker)
 			? measured.children.slice(1)
 			: measured.children;
-		if (!measuredChildren.length) {
+		if (measured.runs.length) {
+			addRuns(node, measured, owner, box);
+			if (!zipInline(childrenOf(node), measuredChildren, id)) {
+				mismatch(id, childrenOf(node).length, measuredChildren.length);
+			}
+
 			return;
 		}
 
-		if (measuredChildren.length === children.length) {
-			children.forEach((child, index) => {
-				zip(child, measuredChildren[index], id);
-			});
+		if (node.type !== "container") {
+			// Bare text in a flex or grid container lays out as one anonymous item.
+			if (node.type === "text" && measuredChildren.length === 1) {
+				zip({ text: node.text, type: "text" }, measuredChildren[0], id);
+			}
+
 			return;
 		}
 
-		// takumi measures inline content beside positioned children as one line box:
-		// its runs, then a placeholder per positioned child, then their boxes.
-		const positioned = children.filter((child) =>
-			hasStyle(child, ({ position }) =>
-				/^(?:absolute|fixed)$/.test(position ?? ""),
-			),
-		);
-		const [lines] = measuredChildren;
+		const container = node;
+		const children = childrenOf(container);
 		if (
-			node.type === "container" &&
-			positioned.length &&
+			isTable(container) &&
 			measuredChildren.length === 1 &&
-			lines.runs.length &&
-			lines.children.length === positioned.length * 2
+			children.every((child) => displayOf(child) === "table-row")
 		) {
-			addRuns(
-				{
-					...node,
-					children: children.filter((child) => !positioned.includes(child)),
-				},
-				lines,
-				owner,
-				box,
-			);
-			positioned.forEach((child, index) => {
-				zip(child, lines.children[positioned.length + index], id);
-			});
+			// takumi measures a table's rows outside a row group inside an anonymous one.
+			zip({ children, type: "container" }, measuredChildren[0], id);
 			return;
 		}
 
-		mismatches.push({
-			children: children.length,
-			id,
-			measured: measuredChildren.length,
+		const segments = segmentsOf(children);
+		const [first] = segments;
+		if (
+			segments.length === 1 &&
+			Array.isArray(first) &&
+			!hasText(first) &&
+			zipInline(first, measuredChildren, id)
+		) {
+			return;
+		}
+
+		if (segments.length !== measuredChildren.length) {
+			mismatch(id, children.length, measuredChildren.length);
+		}
+
+		const ownsLine =
+			segments.length === 1 &&
+			!hasStyle(container, ({ display }) => /flex|grid/.test(display));
+		segments.slice(0, measuredChildren.length).forEach((segment, index) => {
+			const lines = measuredChildren[index];
+			if (!Array.isArray(segment)) {
+				zip(segment, lines, id);
+				return;
+			}
+
+			if (lines.runs.length) {
+				addRuns(
+					ownsLine
+						? { ...container, children: segment }
+						: { children: segment, type: "container" },
+					lines,
+					ownsLine ? owner : id,
+					ownsLine ? box : laidOutBox(lines),
+				);
+			}
+
+			if (!zipInline(segment, lines.children, id)) {
+				mismatch(id, segment.length, lines.children.length);
+			}
 		});
-		children
-			.filter((child) => idOf(child) !== undefined)
-			.forEach((child, index) => {
-				if (index < measuredChildren.length) {
-					zip(child, measuredChildren[index], id);
-				}
-			});
 	};
 
 	zip(node, measured, idOf(node) ?? "");

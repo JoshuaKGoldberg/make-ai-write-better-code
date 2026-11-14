@@ -1,20 +1,13 @@
-/**
- * Slide transitions: which Slidev transition plays into each slide, and PowerPoint's
- * closest equivalent.
- */
 import type { SlidevConfig } from "@slidev/types";
 
-const PUSH_DIRECTIONS: Record<string, string> = {
-	down: "d",
-	left: "l",
-	right: "r",
-	up: "u",
+const PUSH_DIRECTIONS: Partial<Record<string, string>> = {
+	"slide-down": "d",
+	"slide-left": "l",
+	"slide-right": "r",
+	"slide-up": "u",
 };
 
-/**
- * The transition into a slide, as Slidev plays it going forward: the previous slide's
- * `transition`, else the deck's, and a "forward | backward" pair's forward half.
- */
+/** The transition into a slide going forward: the previous slide's, else the deck's, and a "forward | backward" pair's forward half. */
 export function transitionInto(
 	slideNumber: number,
 	slides: { frontmatter: Record<string, unknown> }[],
@@ -41,18 +34,15 @@ const nameOf = (transition: unknown) =>
 			? transition
 			: undefined;
 
-/**
- * PowerPoint's closest transition to a Slidev one: fades for fades (and view transitions),
- * pushes for slides, and none for none. Custom transitions fade.
- */
+/** PowerPoint's closest transition to a Slidev one; custom transitions fade. */
 export function transitionXml(name: string | undefined) {
 	if (!name || name === "none") {
 		return "";
 	}
 
-	const push = /^slide-(left|right|up|down)$/.exec(name)?.[1];
+	const push = PUSH_DIRECTIONS[name];
 	const effect = push
-		? `<p:push dir="${PUSH_DIRECTIONS[push]}"/>`
+		? `<p:push dir="${push}"/>`
 		: name === "fade-out"
 			? '<p:fade thruBlk="1"/>'
 			: "<p:fade/>";

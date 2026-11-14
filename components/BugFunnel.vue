@@ -48,7 +48,9 @@ const neckWidth = 120;
 const spoutBottom = 414;
 const center = computed(() => (wide.value ? 300 : 400));
 const width = computed(() => (wide.value ? 1000 : 800));
-const eyebrowColumn = computed(() => (200 * center.value) / width.value);
+const eyebrowColumnPercent = computed(
+	() => ((2 * center.value) / width.value) * 100,
+);
 
 function widthAt(y: number) {
 	const progress = (y - cone.top) / (cone.bottom - cone.top);
@@ -110,7 +112,7 @@ const spout = computed(() => {
 		v-if="current"
 		class="signpost-eyebrow"
 		:style="{
-			gridTemplateColumns: `${eyebrowColumn}% ${100 - eyebrowColumn}%`,
+			gridTemplateColumns: `${eyebrowColumnPercent}% ${100 - eyebrowColumnPercent}%`,
 		}"
 	>
 		<div class="eyebrow">{{ eyebrow }}</div>

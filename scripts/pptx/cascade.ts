@@ -1,9 +1,3 @@
-/**
- * A small static CSS cascade. It resolves the computed values PowerPoint export
- * needs (colors, fonts, spacing, borders, transforms, ...) for every element of
- * a parsed document, without a browser: selector matching, specificity, cascade
- * order, !important, inheritance, custom properties, and length units.
- */
 import * as csstree from "css-tree";
 
 import type { Declaration } from "./css.ts";
@@ -22,14 +16,12 @@ export interface CascadeRule {
 	layer: number;
 	order: number;
 	/** The pseudo-element the rule styles, if any. */
-	pseudo?: Pseudo;
+	pseudo?: PseudoElementName;
 	selector: string;
 	specificity: number;
 }
 
-/** A ::before or ::after pseudo-element with generated content. */
-interface PseudoElement {
-	/** Its declarations (variables resolved), in cascade order, as an inline style. */
+interface GeneratedContent {
 	css: string;
 	style: ComputedStyle;
 	text: string;
@@ -45,7 +37,7 @@ export interface ComputedStyles {
 	/** Each list item's ::marker style. */
 	markers: Map<Element, ComputedStyle>;
 	/** Elements' ::before and ::after pseudo-elements that generate content. */
-	pseudos: Map<Element, Partial<Record<"after" | "before", PseudoElement>>>;
+	pseudos: Map<Element, Partial<Record<"after" | "before", GeneratedContent>>>;
 	styles: Map<Element, ComputedStyle>;
 }
 
@@ -68,13 +60,14 @@ export interface Viewport {
 
 type KnownProperty = keyof typeof INITIAL;
 
-type Pseudo = "after" | "before" | "marker";
+type PseudoElementName = "after" | "before" | "marker";
 
 const INHERITED = new Set([
 	"-webkit-text-fill-color",
 	"-webkit-text-stroke-color",
 	"-webkit-text-stroke-width",
 	"color",
+	"color-scheme",
 	"dominant-baseline",
 	"fill",
 	"font-family",
@@ -127,8 +120,6 @@ const INITIAL = {
 	"line-height": "normal",
 	"list-style-type": "disc",
 	"margin-bottom": "0px",
-	"margin-left": "0px",
-	"margin-right": "0px",
 	"margin-top": "0px",
 	"object-fit": "fill",
 	"object-position": "50% 50%",
@@ -147,15 +138,11 @@ const INITIAL = {
 	"vertical-align": "baseline",
 	visibility: "visible",
 	"white-space": "normal",
-	zoom: "1",
 } as const satisfies Record<string, string>;
-
-const INITIAL_VALUES: StyleMap = INITIAL;
 
 const BORDER_WIDTHS: StyleMap = { medium: "3px", thick: "5px", thin: "1px" };
 
-/** Lengths normalized to px once an element's font size is known. */
-const LENGTHS = [
+const LENGTH_PROPERTIES = [
 	"-webkit-text-stroke-width",
 	"border-bottom-width",
 	"border-left-width",
@@ -163,8 +150,6 @@ const LENGTHS = [
 	"border-top-left-radius",
 	"border-top-width",
 	"margin-bottom",
-	"margin-left",
-	"margin-right",
 	"margin-top",
 	"padding-bottom",
 	"padding-left",
@@ -172,25 +157,44 @@ const LENGTHS = [
 	"padding-top",
 ] as const satisfies readonly KnownProperty[];
 
-/** User-agent defaults for the elements decks commonly use. */
 const USER_AGENT_CSS = `
-html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li, pre, section, header, footer, main, nav, article, blockquote, figure, table { display: block }
+html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, menu, li, pre, section, header, footer, main, nav, article, aside, address, blockquote, center, figure, figcaption, hgroup, dl, dt, dd, details, summary, form, fieldset, legend, hr, search { display: block }
 li { display: list-item }
-head, script, style, template, title, meta, link { display: none }
+head, script, style, template, title, meta, link, noscript, datalist { display: none }
+table { display: table }
+caption { display: table-caption; text-align: center }
+colgroup { display: table-column-group }
+col { display: table-column }
+thead { display: table-header-group }
+tbody { display: table-row-group }
+tfoot { display: table-footer-group }
+tr { display: table-row }
+td, th { display: table-cell; padding: 1px }
+center { text-align: center }
 h1 { font-size: 2em; font-weight: bold }
 h2 { font-size: 1.5em; font-weight: bold }
 h3 { font-size: 1.17em; font-weight: bold }
+h4 { font-weight: bold }
+h5 { font-size: 0.83em; font-weight: bold }
+h6 { font-size: 0.67em; font-weight: bold }
+th { font-weight: bold; text-align: center }
 strong, b { font-weight: bolder }
-em, i { font-style: italic }
-code, pre, kbd, samp { font-family: monospace }
+em, i, cite, dfn, var, address { font-style: italic }
+code, pre, kbd, samp, tt { font-family: monospace }
 pre { white-space: pre }
 sup { vertical-align: super; font-size: smaller }
 sub { vertical-align: sub; font-size: smaller }
-a { text-decoration-line: underline }
-ul { list-style-type: disc }
+small { font-size: smaller }
+big { font-size: larger }
+a, u, ins { text-decoration-line: underline }
+s, strike, del { text-decoration-line: line-through }
+mark { background-color: yellow; color: black }
+ul, menu { list-style-type: disc }
 ol { list-style-type: decimal }
 img, svg, video, canvas { display: inline-block }
 `;
+
+const USER_AGENT_LAYER = "<user agent>";
 
 const BORDER_STYLES = new Set([
 	"dashed",
@@ -217,6 +221,8 @@ const KEYWORD_SIZES: Partial<Record<string, number>> = {
 	"x-large": 24,
 	"x-small": 10,
 	"xx-large": 32,
+	"xx-small": 9,
+	"xxx-large": 48,
 };
 const RELATIVE_SIZES: Partial<Record<string, number>> = {
 	larger: 1.2,
@@ -224,10 +230,12 @@ const RELATIVE_SIZES: Partial<Record<string, number>> = {
 };
 const NORMAL_LINE_HEIGHT = 1.2;
 const SIDES = ["top", "right", "bottom", "left"] as const;
+const TEXT_DECORATION_LINE =
+	/^(?:blink|line-through|none|overline|underline|inherit|initial|unset|revert|revert-layer)$/;
 const UNITLESS = /^[\d.]+$/;
+const MAX_VAR_DEPTH = 20;
 
-/** Elements that can't have ::before or ::after content. */
-const REPLACED = new Set([
+const REPLACED_ELEMENTS = new Set([
 	"br",
 	"canvas",
 	"hr",
@@ -241,7 +249,6 @@ const REPLACED = new Set([
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
-/** SVG attributes that set the CSS property of the same name, below every author rule. */
 const PRESENTATION_ATTRIBUTES = [
 	"display",
 	"dominant-baseline",
@@ -268,6 +275,29 @@ const LEGACY_PSEUDO_ELEMENTS = new Set([
 
 const CONDITIONAL_RULES = new Set(["container", "media", "supports"]);
 const SCREEN_MEDIA_TYPES = new Set(["all", "screen"]);
+
+const DESKTOP_MEDIA: Partial<Record<string, number | string>> = {
+	"any-hover": "hover",
+	"any-pointer": "fine",
+	color: 8,
+	"color-gamut": "srgb",
+	"color-index": 0,
+	"display-mode": "browser",
+	"dynamic-range": "standard",
+	"forced-colors": "none",
+	grid: 0,
+	hover: "hover",
+	"inverted-colors": "none",
+	monochrome: 0,
+	pointer: "fine",
+	"prefers-contrast": "no-preference",
+	"prefers-reduced-data": "no-preference",
+	"prefers-reduced-motion": "no-preference",
+	"prefers-reduced-transparency": "no-preference",
+	scripting: "enabled",
+	update: "fast",
+};
+const FALSE_IN_BOOLEAN_CONTEXT = new Set([0, "no-preference", "none"]);
 
 const COMPARISONS: Record<string, (left: number, right: number) => boolean> = {
 	"<": (left, right) => left < right,
@@ -310,15 +340,18 @@ const LENGTH_SOURCE = String.raw`(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(rem|e
 const LENGTH = new RegExp(`^${LENGTH_SOURCE}$`, "i");
 const LENGTHS_IN_TEXT = new RegExp(LENGTH_SOURCE, "gi");
 const MATH_FUNCTION = /^(?:calc|min|max|clamp)\(/;
-const VAR = /var\(\s*(--[\w-]+)\s*(?:,((?:[^()]|\([^()]*\))*))?\)/g;
+const QUOTES: Partial<Record<string, string>> = {
+	"close-quote": "”",
+	"open-quote": "“",
+};
 
-const isPseudo = (value: string): value is Pseudo =>
+const isPseudoElementName = (value: string): value is PseudoElementName =>
 	value === "after" || value === "before" || value === "marker";
 
 const isLength = (value: string) =>
 	LENGTH.test(value) || MATH_FUNCTION.test(value);
 
-const isPseudoElement = (
+const isPseudoElementSelector = (
 	node: csstree.CssNode,
 ): node is csstree.PseudoClassSelector | csstree.PseudoElementSelector =>
 	node.type === "PseudoElementSelector" ||
@@ -329,6 +362,9 @@ const pixels = (value: number) => `${String(value)}px`;
 
 /** The computed style of an element no rule applies to. */
 export const INITIAL_STYLE: ComputedStyle = INITIAL;
+
+export const isOutOfFlow = (style: ComputedStyle) =>
+	/^(?:absolute|fixed)$/.test(style.position ?? "");
 
 /** Parses stylesheets (after the user-agent defaults) into an ordered rule list. */
 export function createCascade(sheets: string[], environment: CascadeOptions) {
@@ -358,9 +394,9 @@ export function createCascade(sheets: string[], environment: CascadeOptions) {
 			}
 
 			const nodes = selector.children.toArray();
-			const pseudoElement = nodes.find(isPseudoElement);
+			const pseudoElement = nodes.find(isPseudoElementSelector);
 			const pseudo = pseudoElement?.name;
-			if (pseudo !== undefined && !isPseudo(pseudo)) {
+			if (pseudo !== undefined && !isPseudoElementName(pseudo)) {
 				return;
 			}
 
@@ -398,10 +434,16 @@ export function createCascade(sheets: string[], environment: CascadeOptions) {
 
 			const name = node.name.toLowerCase();
 			if (name === "layer") {
-				const names = splitTopLevel(
-					node.prelude ? csstree.generate(node.prelude) : "",
-					",",
-				).map((part) => (layerName ? `${layerName}.${part}` : part));
+				const names: string[] = [];
+				if (node.prelude) {
+					csstree.walk(node.prelude, {
+						enter(layer) {
+							names.push(layerName ? `${layerName}.${layer.name}` : layer.name);
+						},
+						visit: "Layer",
+					});
+				}
+
 				if (!node.block) {
 					names.forEach(declareLayer);
 					return;
@@ -415,10 +457,7 @@ export function createCascade(sheets: string[], environment: CascadeOptions) {
 				return;
 			}
 
-			if (
-				!node.block ||
-				(name === "media" && !mediaMatches(node.prelude, environment))
-			) {
+			if (!node.block) {
 				return;
 			}
 
@@ -428,20 +467,28 @@ export function createCascade(sheets: string[], environment: CascadeOptions) {
 					layerName,
 					scopeRoot(node.prelude) ?? scope,
 				);
-			} else if (CONDITIONAL_RULES.has(name)) {
+			} else if (
+				CONDITIONAL_RULES.has(name) &&
+				preludeMatches(node.prelude, environment)
+			) {
 				visitBlock(node.block.children, layerName, scope);
 			}
 		});
 	};
 
-	for (const sheet of [USER_AGENT_CSS, ...sheets]) {
+	const visitSheet = (sheet: string, layerName: string) => {
 		const ast = csstree.parse(sheet, {
 			parseCustomProperty: false,
 			parseValue: false,
 		});
 		if (ast.type === "StyleSheet") {
-			visitBlock(ast.children, "");
+			visitBlock(ast.children, layerName);
 		}
+	};
+
+	visitSheet(USER_AGENT_CSS, USER_AGENT_LAYER);
+	for (const sheet of sheets) {
+		visitSheet(sheet, "");
 	}
 
 	const ranked = layers.toSorted((first, second) => {
@@ -462,9 +509,13 @@ export function createCascade(sheets: string[], environment: CascadeOptions) {
 
 		return secondParts.length - firstParts.length;
 	});
+	const ranks = new Map([
+		[USER_AGENT_LAYER, -1],
+		...ranked.map((name, index): [string, number] => [name, index]),
+	]);
 	return rules.map(({ layerName, ...rule }) => ({
 		...rule,
-		layer: layerName ? ranked.indexOf(layerName) : ranked.length,
+		layer: ranks.get(layerName) ?? ranked.length,
 	}));
 }
 
@@ -480,7 +531,7 @@ export function computeStyles(
 	const supported = rules.filter((rule) =>
 		isSupported(document, rule.selector),
 	);
-	const rulesFor = (pseudo: Pseudo | undefined) =>
+	const rulesFor = (pseudo: PseudoElementName | undefined) =>
 		supported.filter((rule) => rule.pseudo === pseudo);
 	const elementRules = rulesFor(undefined);
 	const pseudoRules = {
@@ -488,8 +539,8 @@ export function computeStyles(
 		before: rulesFor("before"),
 		marker: rulesFor("marker"),
 	};
-	let rootFontSize = 16;
-	const length = (value: string, fontSize: number, percentBase = 0) =>
+	let rootFontSize = parseFloat(INITIAL["font-size"]);
+	const length = (value: string, fontSize: number, percentBase?: number) =>
 		resolveLength(value, { fontSize, percentBase, rootFontSize, viewport });
 	const matching = (element: Element, candidates: CascadeRule[]) =>
 		candidates.filter((rule) => element.matches(rule.selector));
@@ -512,7 +563,7 @@ export function computeStyles(
 			}
 		}
 
-		const inlineStyle = pseudo ? null : element.getAttribute("style");
+		const inlineStyle = pseudo ? undefined : element.getAttribute("style");
 		const inline = inlineStyle ? parseDeclarations(inlineStyle) : [];
 		const ordered = [
 			...(pseudo ? [] : presentationHints(element)),
@@ -555,11 +606,13 @@ export function computeStyles(
 		for (const [key, value = ""] of Object.entries(raw)) {
 			const inherits =
 				value === "inherit" ||
-				(INHERITED.has(key) && (value === "unset" || value === "revert"));
+				(INHERITED.has(key) &&
+					value !== "initial" &&
+					CSS_WIDE_KEYWORDS.has(value));
 			style[key] = inherits
-				? (parent[key] ?? INITIAL_VALUES[key])
+				? (parent[key] ?? INITIAL_STYLE[key])
 				: CSS_WIDE_KEYWORDS.has(value)
-					? INITIAL_VALUES[key]
+					? INITIAL_STYLE[key]
 					: value;
 		}
 
@@ -583,17 +636,24 @@ export function computeStyles(
 		const lineHeight = style["line-height"];
 		if (
 			lineHeight !== undefined &&
-			lineHeight !== "normal" &&
-			!UNITLESS.test(lineHeight)
+			lineHeightFactor(lineHeight) === undefined
 		) {
 			style["line-height"] = pixels(length(lineHeight, fontSize, fontSize));
+		}
+
+		const colorScheme = style["color-scheme"] ?? "";
+		const dark = /\bdark\b/.test(colorScheme) && !/\blight\b/.test(colorScheme);
+		for (const [key, value] of Object.entries(style)) {
+			if (value?.includes("light-dark(")) {
+				style[key] = resolveLightDark(value, dark);
+			}
 		}
 
 		const computed: ComputedStyle = { ...INITIAL, ...style };
 
 		if (
 			(/flex|grid/.test(parent.display ?? "") ||
-				/^(?:absolute|fixed)$/.test(computed.position ?? "") ||
+				isOutOfFlow(computed) ||
 				(computed.float ?? "none") !== "none") &&
 			computed.display.startsWith("inline")
 		) {
@@ -603,11 +663,11 @@ export function computeStyles(
 					: computed.display.replace("inline-", "");
 		}
 
-		for (const key of LENGTHS) {
+		for (const key of LENGTH_PROPERTIES) {
 			const value = computed[key];
 			computed[key] =
 				BORDER_WIDTHS[value] ??
-				(value.endsWith("%") || value === "auto"
+				(value.includes("%") || value === "auto"
 					? value
 					: pixels(length(value, fontSize)));
 		}
@@ -638,7 +698,7 @@ export function computeStyles(
 
 		if (
 			style.display !== "none" &&
-			!REPLACED.has(element.localName) &&
+			!REPLACED_ELEMENTS.has(element.localName) &&
 			element.namespaceURI !== SVG_NAMESPACE
 		) {
 			for (const kind of ["before", "after"] as const) {
@@ -678,13 +738,11 @@ export function computeStyles(
 
 /** An element's line height in px, from its computed font size and line height. */
 export function lineHeightOf(style: ComputedStyle) {
-	const fontSize = parseFloat(style["font-size"]);
 	const lineHeight = style["line-height"];
-	return lineHeight === "normal"
-		? fontSize * NORMAL_LINE_HEIGHT
-		: UNITLESS.test(lineHeight)
-			? Number(lineHeight) * fontSize
-			: parseFloat(lineHeight);
+	const factor = lineHeightFactor(lineHeight);
+	return factor === undefined
+		? parseFloat(lineHeight)
+		: factor * parseFloat(style["font-size"]);
 }
 
 /** Resolves a length, or a `calc()`, `min()`, `max()`, or `clamp()` expression, to px. */
@@ -693,24 +751,28 @@ export function resolveLength(
 	{ fontSize, percentBase = 0, rootFontSize, viewport }: LengthContext,
 ) {
 	const text = (value ?? "").trim().toLowerCase();
-	if (!text || ["auto", "none", "normal"].includes(text)) {
-		return 0;
-	}
-
 	const toPixels = (amount: string, unit: string) => {
 		const number = Number(amount);
 		const absolute = ABSOLUTE_UNITS[unit];
+		if (absolute !== undefined) {
+			return number * absolute;
+		}
+
 		const relative = FONT_UNITS[unit];
-		return absolute !== undefined
-			? number * absolute
-			: relative !== undefined
-				? number * relative * fontSize
-				: unit === "rem"
-					? number * rootFontSize
-					: unit === "%"
-						? (number / 100) * percentBase
-						: (number / 100) *
-							VIEWPORT_UNITS[unit.replace(/^[sld]/, "")](viewport);
+		if (relative !== undefined) {
+			return number * relative * fontSize;
+		}
+
+		if (unit === "rem") {
+			return number * rootFontSize;
+		}
+
+		return (
+			(number / 100) *
+			(unit === "%"
+				? percentBase
+				: VIEWPORT_UNITS[unit.replace(/^[sld]/, "")](viewport))
+		);
 	};
 
 	if (MATH_FUNCTION.test(text) || /[+*/]|\s-\s/.test(text)) {
@@ -728,23 +790,16 @@ export function resolveLength(
 	return match ? toPixels(match[1], match.at(2) ?? "") : 0;
 }
 
-/** Unescapes a CSS string's escapes, like "\\2192 " for an arrow. */
-export function unescapeCss(value: string) {
-	return value.replace(
-		/\\(?:([\da-f]{1,6})\s?|(\n)|(.))/gi,
-		(_, hex?: string, newline?: string, character?: string) =>
-			hex
-				? String.fromCodePoint(parseInt(hex, 16))
-				: newline
-					? ""
-					: (character ?? ""),
-	);
+/** Resolves a length against the initial font size, as media queries and SVG attributes do. */
+export function resolveInitialLength(value: string, viewport: Viewport) {
+	const fontSize = parseFloat(INITIAL["font-size"]);
+	return resolveLength(value, { fontSize, rootFontSize: fontSize, viewport });
 }
 
 function conditionMatches(
 	condition: csstree.Condition,
 	environment: CascadeOptions,
-): boolean {
+) {
 	const terms = condition.children.toArray();
 	const operator = terms.find(
 		(term): term is csstree.Identifier => term.type === "Identifier",
@@ -759,44 +814,46 @@ function conditionMatches(
 			: results.every(Boolean);
 }
 
-/** The text a pseudo-element's `content` generates, or undefined when it generates none. */
+function contentPart(node: csstree.CssNode, element: Element) {
+	switch (node.type) {
+		case "Function": {
+			const name = node.children.first;
+			return node.name === "attr" && name?.type === "Identifier"
+				? (element.getAttribute(name.name) ?? "")
+				: "";
+		}
+		case "Identifier":
+			return QUOTES[node.name] ?? "";
+		case "String":
+			return node.value;
+		default:
+			return "";
+	}
+}
+
 function contentText(value: string | undefined, element: Element) {
-	const content = value?.trim() ?? "";
-	if (!content || content === "none" || content === "normal") {
+	if (!value || value === "none" || value === "normal") {
 		return undefined;
 	}
 
-	let text = "";
-	for (const [token] of content.matchAll(
-		/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[\w-]+\([^)]*\)|open-quote|close-quote|\//g,
-	)) {
-		if (token === "/") {
-			break;
-		}
-
-		if (token.startsWith('"') || token.startsWith("'")) {
-			text += unescapeCss(token.slice(1, -1));
-		} else if (token.startsWith("attr(")) {
-			const name = token.slice(5, -1).trim().split(/[\s,]/)[0];
-			text += element.getAttribute(name) ?? "";
-		} else if (token === "open-quote") {
-			text += "“";
-		} else if (token === "close-quote") {
-			text += "”";
-		}
-	}
-
-	return text;
+	const ast = csstree.parse(value, { context: "value" });
+	const nodes = ast.type === "Value" ? ast.children.toArray() : [];
+	const altTextStart = nodes.findIndex(
+		(node) => node.type === "Operator" && node.value === "/",
+	);
+	return nodes
+		.slice(0, altTextStart < 0 ? undefined : altTextStart)
+		.map((node) => contentPart(node, element))
+		.join("");
 }
 
-/** Evaluates + - * /, parentheses, and calc(), min(), max(), and clamp() over numbers. */
 function evaluateArithmetic(expression: string) {
 	const tokens =
 		expression.match(
 			/(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|calc|min|max|clamp|[+\-*/(),]/g,
 		) ?? [];
 	let index = 0;
-	const args = (): number[] => {
+	const argumentList = (): number[] => {
 		index++;
 		const values = [sum()];
 		while (tokens[index] === ",") {
@@ -822,18 +879,18 @@ function evaluateArithmetic(expression: string) {
 				return -factor();
 			case "calc":
 				index++;
-				return args()[0] ?? 0;
+				return argumentList()[0] ?? 0;
 			case "clamp": {
 				index++;
-				const [low = 0, value = 0, high = 0] = args();
+				const [low = 0, value = 0, high = 0] = argumentList();
 				return Math.max(low, Math.min(value, high));
 			}
 			case "max":
 				index++;
-				return Math.max(...args());
+				return Math.max(...argumentList());
 			case "min":
 				index++;
-				return Math.min(...args());
+				return Math.min(...argumentList());
 			default:
 				index++;
 				return Number(token);
@@ -862,8 +919,7 @@ function evaluateArithmetic(expression: string) {
 	return Number.isFinite(result) ? result : 0;
 }
 
-/** Expands the shorthands decks commonly use into the longhands the exporter reads. */
-function expand(property: string, value: string): StyleMap {
+function expand(property: string, value: string) {
 	switch (property) {
 		case "-webkit-text-stroke": {
 			const [width, color = "currentcolor"] = splitTopLevel(value, " ");
@@ -890,6 +946,7 @@ function expand(property: string, value: string): StyleMap {
 		case "border-width":
 			return expandSides(property.replace("-", "-*-"), value);
 		case "border-radius":
+		case "border-top-left-radius":
 			return {
 				"border-top-left-radius": splitTopLevel(
 					splitTopLevel(value, "/")[0] ?? "",
@@ -917,24 +974,30 @@ function expand(property: string, value: string): StyleMap {
 		case "padding":
 			return expandSides(`${property}-*`, value);
 		case "text-decoration":
-			return { "text-decoration-line": splitTopLevel(value, " ")[0] };
+			return {
+				"text-decoration-line":
+					splitTopLevel(value, " ")
+						.filter((part) => TEXT_DECORATION_LINE.test(part))
+						.join(" ") || "none",
+			};
 		default:
-			return { [property]: value };
+			return expandLogical(property, value) ?? { [property]: value };
 	}
 }
 
-/** Expands the `background` shorthand's layers into their images, positions, sizes, repeats, and color. */
 function expandBackground(value: string) {
 	const images: string[] = [];
 	const positions: string[] = [];
 	const sizes: string[] = [];
 	const repeats: string[] = [];
+	const clips: string[] = [];
 	let color = "transparent";
 	for (const layer of splitTopLevel(value, ",")) {
 		let image = "none";
 		const position: string[] = [];
 		const size: string[] = [];
 		const repeat: string[] = [];
+		const boxes: string[] = [];
 		let afterSlash = false;
 		const spaced = splitTopLevel(layer, "/").join(" / ");
 		for (const part of splitTopLevel(spaced, " ")) {
@@ -954,11 +1017,9 @@ function expandBackground(value: string) {
 				/^(?:-?[\d.]|calc\()/.test(part)
 			) {
 				(afterSlash ? size : position).push(part);
-			} else if (
-				!/^(?:scroll|fixed|local|(?:border|padding|content)-box|text)$/.test(
-					part,
-				)
-			) {
+			} else if (/^(?:(?:border|padding|content)-box|text)$/.test(part)) {
+				boxes.push(part);
+			} else if (!/^(?:scroll|fixed|local)$/.test(part)) {
 				color = part;
 			}
 		}
@@ -967,9 +1028,11 @@ function expandBackground(value: string) {
 		positions.push(position.join(" ") || "0% 0%");
 		sizes.push(size.join(" ") || "auto");
 		repeats.push(repeat.join(" ") || "repeat");
+		clips.push(boxes.at(-1) ?? "border-box");
 	}
 
 	return {
+		"background-clip": clips.join(", "),
 		"background-color": color,
 		"background-image": images.every((image) => image === "none")
 			? "none"
@@ -980,7 +1043,6 @@ function expandBackground(value: string) {
 	};
 }
 
-/** Expands one side's border shorthand (e.g. `border-top`) into its width, style, and color. */
 function expandBorder(prefix: string, value: string) {
 	const longhands: StyleMap = {
 		[`${prefix}-color`]: "currentcolor",
@@ -1000,10 +1062,13 @@ function expandBorder(prefix: string, value: string) {
 	return longhands;
 }
 
-function expandFont(value: string): StyleMap {
+function expandFont(value: string) {
 	const parts = splitTopLevel(splitTopLevel(value, "/").join(" / "), " ");
 	const sizeIndex = parts.findIndex(
-		(part) => isLength(part) || part in KEYWORD_SIZES || part in RELATIVE_SIZES,
+		(part) =>
+			(isLength(part) && !UNITLESS.test(part)) ||
+			part in KEYWORD_SIZES ||
+			part in RELATIVE_SIZES,
 	);
 	if (sizeIndex < 0) {
 		return {};
@@ -1026,6 +1091,24 @@ function expandFont(value: string): StyleMap {
 	};
 }
 
+function expandLogical(property: string, value: string) {
+	const [, box, axis, edge] =
+		/^(margin|padding|inset)-(block|inline)(?:-(start|end))?$/.exec(property) ??
+		[];
+	if (!box) {
+		return undefined;
+	}
+
+	const prefix = box === "inset" ? "" : `${box}-`;
+	const [start, end] = axis === "block" ? ["top", "bottom"] : ["left", "right"];
+	if (edge) {
+		return { [`${prefix}${edge === "start" ? start : end}`]: value };
+	}
+
+	const [startValue, endValue = startValue] = splitTopLevel(value, " ");
+	return { [`${prefix}${end}`]: endValue, [`${prefix}${start}`]: startValue };
+}
+
 function expandSides(pattern: string, value: string) {
 	const [top, right = top, bottom = top, left = right] = splitTopLevel(
 		value,
@@ -1041,33 +1124,54 @@ function expandSides(pattern: string, value: string) {
 
 function featureMatches(
 	{ name, value }: csstree.Feature,
-	{ colorScheme, viewport }: CascadeOptions,
+	environment: CascadeOptions,
 ) {
-	const text = value ? csstree.generate(value) : undefined;
-	switch (name) {
-		case "orientation":
-			return (
-				text === (viewport.width >= viewport.height ? "landscape" : "portrait")
-			);
-		case "prefers-color-scheme":
-			return text === colorScheme;
-		case "prefers-reduced-motion":
-			return text !== "reduce";
+	const [, bound, feature = name] = /^(min|max)-(.+)$/.exec(name) ?? [];
+	const actual = mediaValue(feature, environment);
+	if (actual === undefined) {
+		return false;
 	}
 
-	const [, bound, dimension] =
-		/^(?:(min|max)-)?(width|height)$/.exec(name) ?? [];
-	if (!dimension || text === undefined) {
-		return true;
+	if (!value) {
+		return !bound && !FALSE_IN_BOOLEAN_CONTEXT.has(actual);
 	}
 
-	const size = dimension === "width" ? viewport.width : viewport.height;
-	const limit = mediaLength(text, viewport);
+	if (typeof actual === "string") {
+		return !bound && csstree.generate(value) === actual;
+	}
+
+	const limit = resolveInitialLength(
+		csstree.generate(value),
+		environment.viewport,
+	);
 	return bound === "min"
-		? size >= limit
+		? actual >= limit
 		: bound === "max"
-			? size <= limit
-			: size === limit;
+			? actual <= limit
+			: actual === limit;
+}
+
+function findFunction(value: string, name: string) {
+	const start = value.indexOf(`${name}(`);
+	if (start < 0) {
+		return undefined;
+	}
+
+	const open = start + name.length + 1;
+	let close = open;
+	for (let nesting = 1; close < value.length; close++) {
+		if (value[close] === "(") {
+			nesting++;
+		} else if (value[close] === ")" && --nesting === 0) {
+			break;
+		}
+	}
+
+	return {
+		after: value.slice(close + 1),
+		before: value.slice(0, start),
+		body: value.slice(open, close),
+	};
 }
 
 function isSupported(document: Document, selector: string) {
@@ -1079,27 +1183,47 @@ function isSupported(document: Document, selector: string) {
 	}
 }
 
-function mediaLength(value: string, viewport: Viewport) {
-	return resolveLength(value, { fontSize: 16, rootFontSize: 16, viewport });
+function lineHeightFactor(lineHeight: string) {
+	return lineHeight === "normal"
+		? NORMAL_LINE_HEIGHT
+		: UNITLESS.test(lineHeight)
+			? Number(lineHeight)
+			: undefined;
 }
 
-function mediaMatches(
+function mediaValue(
+	name: string,
+	{ colorScheme, viewport }: CascadeOptions,
+): number | string | undefined {
+	switch (name) {
+		case "aspect-ratio":
+			return viewport.width / viewport.height;
+		case "height":
+			return viewport.height;
+		case "orientation":
+			return viewport.width >= viewport.height ? "landscape" : "portrait";
+		case "prefers-color-scheme":
+			return colorScheme;
+		case "width":
+			return viewport.width;
+		default:
+			return DESKTOP_MEDIA[name];
+	}
+}
+
+function preludeMatches(
 	prelude: csstree.AtrulePrelude | csstree.Raw | null,
 	environment: CascadeOptions,
 ) {
-	if (!prelude) {
-		return true;
-	}
-
-	const list = prelude.type === "AtrulePrelude" ? prelude.children.first : null;
 	return (
-		list?.type === "MediaQueryList" &&
-		list.children
-			.toArray()
-			.some(
-				(query) =>
-					query.type === "MediaQuery" && queryMatches(query, environment),
-			)
+		!prelude ||
+		(prelude.type === "AtrulePrelude" &&
+			prelude.children
+				.toArray()
+				.every(
+					(node) =>
+						node.type === "Identifier" || termMatches(node, environment),
+				))
 	);
 }
 
@@ -1132,16 +1256,17 @@ function rangeMatches(
 		right,
 		rightComparison,
 	}: csstree.FeatureRange,
-	{ viewport }: CascadeOptions,
+	environment: CascadeOptions,
 ) {
-	const operand = (node: csstree.CssNode) =>
-		node.type === "Identifier"
-			? node.name === "width"
-				? viewport.width
-				: node.name === "height"
-					? viewport.height
-					: NaN
-			: mediaLength(csstree.generate(node), viewport);
+	const operand = (node: csstree.CssNode) => {
+		if (node.type !== "Identifier") {
+			return resolveInitialLength(csstree.generate(node), environment.viewport);
+		}
+
+		const value = mediaValue(node.name, environment);
+		return typeof value === "number" ? value : NaN;
+	};
+
 	return (
 		COMPARISONS[leftComparison](operand(left), operand(middle)) &&
 		(!right ||
@@ -1162,34 +1287,42 @@ function resolveFontSize(
 	);
 }
 
-/** Substitutes var() references, or returns undefined when one is invalid at computed-value time. */
+function resolveLightDark(value: string, dark: boolean): string {
+	const call = findFunction(value, "light-dark");
+	if (!call) {
+		return value;
+	}
+
+	const [light = "", darkValue = ""] = splitTopLevel(call.body, ",");
+	return resolveLightDark(
+		call.before + (dark ? darkValue : light) + call.after,
+		dark,
+	);
+}
+
 function resolveVars(
 	value: string,
 	style: StyleMap,
 	depth = 0,
 ): string | undefined {
-	if (!value.includes("var(")) {
+	const call = findFunction(value, "var");
+	if (!call) {
 		return value;
 	}
 
-	if (
-		depth > 20 ||
-		[...value.matchAll(VAR)].some(
-			(reference) =>
-				style[reference[1]] === undefined && reference.at(2) === undefined,
-		)
-	) {
+	const [name = "", ...fallbackParts] = call.body.split(",");
+	const substitute =
+		style[name.trim()] ??
+		(fallbackParts.length ? fallbackParts.join(",").trim() : undefined);
+	if (substitute === undefined || depth >= MAX_VAR_DEPTH) {
 		return undefined;
 	}
 
-	const substituted = value.replace(
-		VAR,
-		(_: string, name: string, fallback: string | undefined) =>
-			style[name] ?? fallback?.trim() ?? "",
-	);
-	return substituted === value
-		? substituted
-		: resolveVars(substituted, style, depth + 1);
+	const resolved = resolveVars(substitute, style, depth + 1);
+	const after = resolveVars(call.after, style, depth);
+	return resolved === undefined || after === undefined
+		? undefined
+		: call.before + resolved + after;
 }
 
 function resolveWeight(value: string, parentWeight: number) {
@@ -1215,7 +1348,7 @@ function scoped(selector: string, scope: string) {
 
 function scopeRoot(prelude: csstree.AtrulePrelude | csstree.Raw | null) {
 	const scope =
-		prelude?.type === "AtrulePrelude" ? prelude.children.first : null;
+		prelude?.type === "AtrulePrelude" ? prelude.children.first : undefined;
 	return scope?.type === "Scope" && scope.root
 		? csstree.generate(scope.root)
 		: undefined;
@@ -1271,6 +1404,15 @@ function specificity(selector: csstree.CssNode) {
 	return weight;
 }
 
+function supportsDeclaration({ property, value }: csstree.Declaration) {
+	const text = csstree.generate(value);
+	return (
+		property.startsWith("--") ||
+		text.includes("var(") ||
+		!csstree.lexer.matchProperty(property, text).error
+	);
+}
+
 function termMatches(
 	term: csstree.CssNode,
 	environment: CascadeOptions,
@@ -1280,8 +1422,19 @@ function termMatches(
 			return conditionMatches(term, environment);
 		case "Feature":
 			return featureMatches(term, environment);
+		case "FeatureFunction":
+			return term.feature === "selector";
 		case "FeatureRange":
 			return rangeMatches(term, environment);
+		case "MediaQueryList":
+			return term.children
+				.toArray()
+				.some(
+					(query) =>
+						query.type === "MediaQuery" && queryMatches(query, environment),
+				);
+		case "SupportsDeclaration":
+			return supportsDeclaration(term.declaration);
 		default:
 			return false;
 	}

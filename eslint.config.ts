@@ -66,7 +66,6 @@ export default defineConfig(
 		extends: [tseslint.configs.disableTypeChecked, prettier],
 		files: ["**/*.vue"],
 		rules: {
-			// As typescript-eslint does for .ts files, since these scripts are TypeScript too.
 			"no-undef": "off",
 		},
 	},
@@ -89,7 +88,6 @@ export default defineConfig(
 		extends: [vitest.configs.recommended],
 		files: ["**/*.test.*"],
 		rules: {
-			// Asymmetric matchers such as expect.stringContaining() return any.
 			"@typescript-eslint/no-unsafe-assignment": "off",
 			"vitest/prefer-describe-function-title": "error",
 		},

@@ -4,14 +4,12 @@ title: Fixture
 colorSchema: light
 aspectRatio: 4/3
 canvasWidth: 800
+fonts:
+  local: Nowhere Sans
 transition: fade
-layout: cover
-background: /photo.png
 ---
 
 # Fixture Cover
-
-A dimmed background image
 
 ---
 
@@ -69,14 +67,6 @@ transition: none
 <img class="fit" src="/photo.png" alt="Cropped photo" />
 <img src="/shape.svg" alt="SVG shape" width="120" height="80" />
 
-![Imported](./assets/local.png)
-
----
-
-# After None
-
-The slide before this one plays no transition into it.
-
 ---
 
 # Code and Shapes
@@ -110,14 +100,19 @@ A second paragraph.
 <video src="/clip.mp4"></video>
 
 ---
+dragPos:
+  named: 200,300,120,30
+---
 
 # Directives
 
-<span v-mark.underline="1">Marked</span>
+<span v-mark.circle="{ at: 1 }">Marked</span>
 
 <div v-motion :initial="{ x: -80 }" :enter="{ x: 0 }">Moving</div>
 
 <div v-drag="[40, 300, 120, 30]">Dragged</div>
+
+<div v-drag="'named'">Named</div>
 
 ---
 
@@ -145,6 +140,8 @@ b
 \end{array}
 $$
 
+---
+class: nested-lists
 ---
 
 # Nested Lists
@@ -186,3 +183,81 @@ $$
 <div class="tiled">Tiled</div>
 <img class="framed" src="/photo.png" alt="Framed photo" />
 <div class="card"><h3>Card title</h3><p>Card body</p></div>
+
+---
+
+# Click Order
+
+<div v-click>Outer<div v-click>Inner</div></div>
+
+<v-clicks depth="2">
+
+- One
+  - One a
+- Two
+
+</v-clicks>
+
+<div v-click.fade>Faded</div>
+
+<div v-click.hide>Hidden</div>
+
+<div v-click="[1, 2]">Ranged</div>
+
+<div v-click="false">Unclicked</div>
+
+---
+
+# Code Blocks
+
+<CodeGroup>
+
+```ts [first.ts]
+const first = 1;
+```
+
+```ts [second.ts]
+const second = 2;
+```
+
+</CodeGroup>
+
+```ts {1|hide}
+const highlighted = 1;
+const dishonored = 2;
+```
+
+```ts {monaco}
+const edited = 1;
+```
+
+```ts twoslash
+const hovered = 1;
+```
+
+````md magic-move
+```ts
+const before = 1;
+```
+```ts
+const after = 1;
+```
+````
+
+---
+
+# Text Effects
+
+<p class="gradient-text">Gradient text</p>
+
+<p>First line<br>Second line</p>
+
+<svg aria-label="Labeled" width="120" height="40" viewBox="0 0 120 40"><defs><linearGradient id="fade"><stop offset="0" stop-color="red" /><stop offset="1" stop-color="blue" /></linearGradient></defs><polygon points="0,0 120,0 120,16 0,16" fill="url(#fade)" /><text x="0" y="36" fill="teal">SVG label</text></svg>
+
+<div class="columns"><p>Left column</p><p>Right column</p></div>
+
+---
+
+# Missing Image
+
+<img src="/missing.png" alt="Missing" />

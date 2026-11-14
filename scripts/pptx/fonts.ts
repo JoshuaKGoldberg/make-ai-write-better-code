@@ -1,9 +1,3 @@
-/**
- * Finds the fonts a deck's text uses, as a browser would: the deck's `@font-face` rules
- * (including Slidev's web fonts), then installed fonts by family name, then installed
- * fonts for generic families. Each font's file gives layout its glyphs, extraction and
- * writing their metrics, and PowerPoint the font's real name.
- */
 import type { ResolvedFontOptions } from "@slidev/types";
 import type { Font as TakumiFont } from "@takumi-rs/core";
 
@@ -20,16 +14,26 @@ import { createCache, cssUrls } from "./assets.ts";
 import { declarationsOf, splitTopLevel, unquote } from "./css.ts";
 
 export interface FontBook {
-	/** Whether a PowerPoint font has a glyph for a character, or undefined if its coverage is unknown. */
-	covers(font: string, codePoint: number): boolean | undefined;
 	/** Loads the fonts for text in these font-family stacks, returning those not yet loaded, in registration order. */
 	load(stacks: Iterable<string>): Promise<TakumiFont[]>;
 	/** Line metrics for a PowerPoint font, from its file when it's loaded. */
 	metrics(font: string): FontMetrics;
+	/** The families the deck's `fonts` options name as web or local fonts that no stylesheet, web font, or installed font provides. */
+	missingFamilies(): Promise<string[]>;
 	/** The PowerPoint font (and whether to embolden it) for text in a stack at a weight and style. */
 	resolve(stack: string, weight: number, italic: boolean): ResolvedFont;
 	/** A monospaced font for spacer runs, and its no-break space's advance in em. */
 	spacer(): { advance: number; font: string };
+}
+
+interface Face {
+	collectionIndex?: number;
+	generic?: Generic;
+	italic: boolean;
+	load: () => Promise<Buffer | undefined>;
+	name: string;
+	unicodeRange?: [number, number][];
+	weight: [number, number];
 }
 
 interface FontMetrics {
@@ -41,29 +45,8 @@ interface FontMetrics {
 	descent: number;
 }
 
-interface ResolvedFont {
-	bold: boolean;
-	font: string;
-}
-
-/** A face a family can use: an `@font-face` rule, or an installed font file. */
-interface Face {
-	/** The face within a font collection file. */
-	collectionIndex?: number;
-	generic?: Generic;
-	italic: boolean;
-	load: () => Promise<Buffer | undefined>;
-	/** The family name to register it under for layout. */
-	name: string;
-	/** Inclusive code point ranges, from `unicode-range`. */
-	unicodeRange?: [number, number][];
-	/** The face's weight range; a variable font's spans its axis. */
-	weight: [number, number];
-}
-
 type Generic = NonNullable<Extract<TakumiFont, { data: unknown }>["generic"]>;
 
-/** An installed font face, from its file's name and OS/2 tables. */
 interface InstalledFace {
 	family: string;
 	file: string;
@@ -77,8 +60,12 @@ interface LoadedFace {
 	data: Buffer;
 	face: Face;
 	font: fontkit.Font;
-	/** The PowerPoint fonts the face can be, across weights. */
 	names: Set<string>;
+}
+
+interface ResolvedFont {
+	bold: boolean;
+	font: string;
 }
 
 // Chrome renders ui-monospace with SF Mono on macOS, which apps can't use; Menlo shares its advance.
@@ -93,7 +80,6 @@ const SANS_SERIF = ["Helvetica", "Arial", "DejaVu Sans", "Liberation Sans"];
 const SERIF = ["Times", "Times New Roman", "DejaVu Serif", "Liberation Serif"];
 const SYSTEM_UI = ["Helvetica Neue", "Segoe UI", "Ubuntu", "DejaVu Sans"];
 
-/** Installed fonts to use for generic families, in order of preference. */
 const GENERICS: Partial<Record<Generic, string[]>> = {
 	cursive: ["Apple Chancery", "Comic Sans MS", "URW Chancery L"],
 	emoji: ["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"],
@@ -120,8 +106,9 @@ const MEASURED_BASELINES: [RegExp, number][] = [
 	[/^league spartan\b/i, 0.753],
 	[/^menlo\b/i, MENLO_BASELINE],
 ];
+const BASELINE_FIT_INTERCEPT = 0.532;
+const BASELINE_FIT_SLOPE = 0.2855;
 
-/** Menlo's metrics, for fonts with no loaded file. */
 const DEFAULT_METRICS: FontMetrics = {
 	ascent: 0.928,
 	baseline: MENLO_BASELINE,
@@ -151,20 +138,20 @@ const isGeneric = (family: string): family is Generic =>
 /** Finds the fonts a deck uses, from its stylesheets, its Slidev font options, and installed fonts. */
 export function createFontBook({
 	assets,
-	fonts: options,
+	fonts: fontOptions,
 	sheets,
 }: {
 	assets: Assets;
 	fonts?: Partial<ResolvedFontOptions>;
 	sheets: string[];
 }): FontBook {
-	const faces = new Map<string, Face[]>();
+	const declaredFaces = new Map<string, Face[]>();
 	const imported = new Set<string>();
 	const addSheet = async (css: string, base?: string) => {
 		const sheet = readSheet(css, assets, base);
 		for (const face of sheet.faces) {
 			const key = face.name.toLowerCase();
-			faces.set(key, [...(faces.get(key) ?? []), face]);
+			declaredFaces.set(key, [...(declaredFaces.get(key) ?? []), face]);
 		}
 
 		for (const url of sheet.imports.filter((url) => !imported.has(url))) {
@@ -183,23 +170,23 @@ export function createFontBook({
 		}
 
 		if (
-			options?.webfonts?.length &&
-			options.provider &&
-			options.provider !== "none"
+			fontOptions?.webfonts?.length &&
+			fontOptions.provider &&
+			fontOptions.provider !== "none"
 		) {
-			await addSheet(await loadWebFonts(options, assets));
+			await addSheet(await loadWebFonts(fontOptions, assets));
 		}
 	};
 
-	const opened: LoadedFace[] = [];
+	const openedFaces: LoadedFace[] = [];
 	const registered = new Set<Face>();
-	const named = new Map<string, LoadedFace[]>();
+	const facesByFont = new Map<string, LoadedFace[]>();
 	const loadedFaces = createCache((face: Face) =>
 		face.load().then((data) => {
 			const loaded = data && openFace(data, face);
 			if (loaded) {
-				opened.push(loaded);
-				named.clear();
+				openedFaces.push(loaded);
+				facesByFont.clear();
 			}
 
 			return loaded;
@@ -207,15 +194,15 @@ export function createFontBook({
 	);
 	const usable = (face: Face) => loadedFaces.get(face) !== undefined;
 
-	const families = new Map<string, Face[]>();
+	const installedFamilies = new Map<string, Face[]>();
 	const familyFaces = (family: string) => {
 		const key = family.toLowerCase();
-		const declared = faces.get(key);
+		const declared = declaredFaces.get(key);
 		if (declared) {
 			return declared;
 		}
 
-		let list = families.get(key);
+		let list = installedFamilies.get(key);
 		if (!list) {
 			const generic = isGeneric(key) ? key : undefined;
 			const fallbacks = generic && GENERICS[generic];
@@ -224,7 +211,7 @@ export function createFontBook({
 						.map((name) => installedFaces(name, generic))
 						.find((found) => found.length) ?? [])
 				: installedFaces(family);
-			families.set(key, list);
+			installedFamilies.set(key, list);
 		}
 
 		return list;
@@ -236,13 +223,24 @@ export function createFontBook({
 			.find((list) => list.length);
 
 	const facesNamed = (font: string) => {
-		let list = named.get(font);
+		let list = facesByFont.get(font);
 		if (!list) {
-			list = opened.filter((loaded) => loaded.names.has(font));
-			named.set(font, list);
+			list = openedFaces.filter((loaded) => loaded.names.has(font));
+			facesByFont.set(font, list);
 		}
 
 		return list;
+	};
+
+	const loadFamily = async (family: string) => {
+		const list = familyFaces(family);
+		await Promise.all(list.map(loadedFaces.load));
+		return list;
+	};
+
+	const addSheetsOnce = async () => {
+		sheetsAdded ??= addSheets();
+		await sheetsAdded;
 	};
 
 	const resolve = (
@@ -258,29 +256,21 @@ export function createFontBook({
 	};
 
 	return {
-		covers(font, codePoint) {
-			const list = facesNamed(font);
-			return list.length
-				? list.some((loaded) => loaded.font.hasGlyphForCodePoint(codePoint))
-				: undefined;
-		},
 		async load(stacks) {
-			sheetsAdded ??= addSheets();
-			await sheetsAdded;
+			await addSheetsOnce();
 
 			const used: Face[][] = [];
 			const texts = [...stacks];
 			const candidates = [
-				options?.sans?.join(","),
-				options?.mono?.join(","),
+				fontOptions?.sans?.join(","),
+				fontOptions?.mono?.join(","),
 				...texts,
 				"monospace",
 				"emoji",
 			].filter((stack) => stack !== undefined);
 			for (const stack of candidates) {
 				for (const family of splitStack(stack)) {
-					const list = familyFaces(family);
-					await Promise.all(list.map(loadedFaces.load));
+					const list = await loadFamily(family);
 					if (list.some(usable)) {
 						if (!used.includes(list)) {
 							used.push(list);
@@ -320,6 +310,23 @@ export function createFontBook({
 			);
 			return loaded ? metricsOf(loaded.font, font) : DEFAULT_METRICS;
 		},
+		async missingFamilies() {
+			await addSheetsOnce();
+
+			const named = new Set(
+				[...(fontOptions?.webfonts ?? []), ...(fontOptions?.local ?? [])].map(
+					unquote,
+				),
+			);
+			const missing: string[] = [];
+			for (const family of named) {
+				if (!(await loadFamily(family)).some(usable)) {
+					missing.push(family);
+				}
+			}
+
+			return missing;
+		},
 		resolve(stack, weight, italic) {
 			const { bold, font } = resolve(stack, weight, italic);
 			return { bold, font };
@@ -334,7 +341,6 @@ export function createFontBook({
 	};
 }
 
-/** The family name a font file gives, without a variable font's default instance's weight. */
 function familyName(font: fontkit.Font) {
 	return (
 		font.getName("preferredFamily", "en") ??
@@ -342,7 +348,6 @@ function familyName(font: fontkit.Font) {
 	);
 }
 
-/** Directories fonts are installed in, by platform. */
 function fontDirectories() {
 	const home = os.homedir();
 	switch (process.platform) {
@@ -370,12 +375,11 @@ function fontDirectories() {
 	}
 }
 
-/** An `@font-face` rule's face, which loads its first supported source. */
 function fontFace(
 	declarations: Declaration[],
 	assets: Assets,
 	base: string | undefined,
-): Face | undefined {
+) {
 	const value = (property: string) =>
 		declarations.findLast((declaration) => declaration.property === property)
 			?.value;
@@ -390,7 +394,7 @@ function fontFace(
 			const url = cssUrls(source).at(0);
 			const format = /format\(([^)]*)\)/i.exec(source)?.[1] ?? "";
 			return url && !/embedded-opentype|svg/i.test(format)
-				? [{ url: base ? new URL(url, base).href : url }]
+				? [{ url: resolveUrl(url, base) }]
 				: [];
 		},
 	);
@@ -420,7 +424,7 @@ function fontFace(
 		name,
 		unicodeRange: parseUnicodeRange(value("unicode-range")),
 		weight: [weights[0] ?? 400, weights.at(-1) ?? 400],
-	};
+	} satisfies Face;
 }
 
 function inUnicodeRange(face: Face, codePoint: number) {
@@ -434,7 +438,6 @@ function inUnicodeRange(face: Face, codePoint: number) {
 
 let installed: Map<string, InstalledFace[]> | undefined;
 
-/** Installed faces of a family, by its typographic or legacy family name: one per file, since layout registers whole files. */
 function installedFaces(family: string, generic?: Generic): Face[] {
 	installed ??= scanInstalledFonts();
 	const byFile = new Map<string, InstalledFace[]>();
@@ -459,7 +462,6 @@ function installedFaces(family: string, generic?: Generic): Face[] {
 	});
 }
 
-/** Loads Slidev's web font stylesheet (Google Fonts or coollabs) and returns its CSS. */
 async function loadWebFonts(
 	options: Partial<ResolvedFontOptions>,
 	assets: Assets,
@@ -483,8 +485,7 @@ async function loadWebFonts(
 	return (await assets.load(url))?.toString("utf8") ?? "";
 }
 
-/** Line metrics from a font file: the ascent and descent browsers lay lines out with, and PowerPoint's baseline. */
-function metricsOf(font: fontkit.Font, name: string): FontMetrics {
+function metricsOf(font: fontkit.Font, name: string) {
 	const windowsMetrics = windowsMetricsOf(font);
 	const typographic = windowsMetrics?.fsSelection.useTypoMetrics
 		? windowsMetrics
@@ -494,7 +495,7 @@ function metricsOf(font: fontkit.Font, name: string): FontMetrics {
 	const descent =
 		-(typographic ? typographic.typoDescender : font.descent) / font.unitsPerEm;
 	const measured = MEASURED_BASELINES.find(([pattern]) => pattern.test(name));
-	const typoRatio =
+	const typographicAscentRatio =
 		windowsMetrics &&
 		windowsMetrics.typoAscender - windowsMetrics.typoDescender > 0
 			? windowsMetrics.typoAscender /
@@ -502,17 +503,18 @@ function metricsOf(font: fontkit.Font, name: string): FontMetrics {
 			: ascent / (ascent + descent);
 	return {
 		ascent,
-		baseline: measured?.[1] ?? 0.532 + 0.2855 * typoRatio,
+		baseline:
+			measured?.[1] ??
+			BASELINE_FIT_INTERCEPT + BASELINE_FIT_SLOPE * typographicAscentRatio,
 		descent,
-	};
+	} satisfies FontMetrics;
 }
 
-/** Opens a face's file, choosing its face within a collection. */
 function openFace(data: Buffer, face: Face): LoadedFace | undefined {
 	let font: fontkit.Font;
 	try {
-		const opened = fontkit.create(data);
-		font = "fonts" in opened ? opened.fonts[face.collectionIndex ?? 0] : opened;
+		const file = fontkit.create(data);
+		font = "fonts" in file ? file.fonts[face.collectionIndex ?? 0] : file;
 	} catch {
 		return undefined;
 	}
@@ -546,11 +548,6 @@ function parseUnicodeRange(value: string | undefined) {
 	});
 }
 
-/**
- * The face of a family CSS font matching picks for a weight and style: the closest weight,
- * trying heavier faces first above 500, lighter faces first below 400, and in between,
- * faces up to 500, then lighter faces, then heavier ones.
- */
 function pickFace(
 	family: Face[],
 	weight: number,
@@ -568,22 +565,7 @@ function pickFace(
 		}
 
 		const nearest = weight < low ? low : high;
-		const heavier = nearest > weight;
-		const tier =
-			weight > 500
-				? heavier
-					? 0
-					: 1
-				: weight < 400
-					? heavier
-						? 1
-						: 0
-					: !heavier
-						? 1
-						: nearest <= 500
-							? 0
-							: 2;
-		return tier * 1000 + Math.abs(nearest - weight);
+		return weightTier(weight, nearest) * 1000 + Math.abs(nearest - weight);
 	};
 
 	const best = pool
@@ -592,11 +574,6 @@ function pickFace(
 	return best && loaded(best);
 }
 
-/**
- * The name PowerPoint knows a face by. A variable font's named instances are separate
- * fonts to PowerPoint (like "League Spartan Light"); other faces use their family name,
- * emboldened when the text is bold and the face isn't already.
- */
 function powerPointName(font: fontkit.Font, weight: number): ResolvedFont {
 	const axis = font.variationAxes.wght;
 	if (axis) {
@@ -636,68 +613,11 @@ function powerPointName(font: fontkit.Font, weight: number): ResolvedFont {
 	};
 }
 
-/** Reads each face's family names, weight, and italic flag from a TrueType or OpenType file. */
-function readFaces(file: string): InstalledFace[] {
+function readFaces(file: string) {
 	let descriptor: number | undefined;
 	try {
 		descriptor = fs.openSync(file, "r");
-		const handle = descriptor;
-		const read = (offset: number, length: number) => {
-			const buffer = Buffer.alloc(length);
-			fs.readSync(handle, buffer, 0, length, offset);
-			return buffer;
-		};
-
-		const header = read(0, 12);
-		const collection = header.toString("latin1", 0, 4) === "ttcf";
-		const count = collection ? header.readUInt32BE(8) : 1;
-		const directory = collection ? read(12, 4 * count) : undefined;
-		const offsets = Array.from({ length: count }, (_, index) =>
-			directory ? directory.readUInt32BE(index * 4) : 0,
-		);
-		return offsets.flatMap((offset, index) => {
-			const tables = new Map<string, { length: number; offset: number }>();
-			const tableCount = read(offset + 4, 2).readUInt16BE(0);
-			const records = read(offset + 12, tableCount * 16);
-			for (let record = 0; record < tableCount; record++) {
-				tables.set(records.toString("latin1", record * 16, record * 16 + 4), {
-					length: records.readUInt32BE(record * 16 + 12),
-					offset: records.readUInt32BE(record * 16 + 8),
-				});
-			}
-
-			const nameTable = tables.get("name");
-			if (!nameTable) {
-				return [];
-			}
-
-			const names = readNames(read(nameTable.offset, nameTable.length));
-			const metricsTable = tables.get("OS/2");
-			const windowsMetrics =
-				metricsTable &&
-				read(metricsTable.offset, Math.min(metricsTable.length, 64));
-			const family = names.get(1);
-			if (!family) {
-				return [];
-			}
-
-			return [
-				{
-					family,
-					file,
-					index,
-					italic:
-						windowsMetrics && windowsMetrics.length >= 64
-							? (windowsMetrics.readUInt16BE(62) & 1) === 1
-							: /italic|oblique/i.test(names.get(2) ?? ""),
-					preferredFamily: names.get(16),
-					weight:
-						windowsMetrics && windowsMetrics.length >= 6
-							? windowsMetrics.readUInt16BE(4)
-							: 400,
-				},
-			];
-		});
+		return readFacesFrom(descriptor, file);
 	} catch {
 		return [];
 	} finally {
@@ -707,7 +627,65 @@ function readFaces(file: string): InstalledFace[] {
 	}
 }
 
-/** Reads English names from a name table, by name ID. */
+function readFacesFrom(descriptor: number, file: string): InstalledFace[] {
+	const read = (offset: number, length: number) => {
+		const buffer = Buffer.alloc(length);
+		fs.readSync(descriptor, buffer, 0, length, offset);
+		return buffer;
+	};
+
+	const header = read(0, 12);
+	const collection = header.toString("latin1", 0, 4) === "ttcf";
+	const count = collection ? header.readUInt32BE(8) : 1;
+	const directory = collection ? read(12, 4 * count) : undefined;
+	const offsets = Array.from({ length: count }, (_, index) =>
+		directory ? directory.readUInt32BE(index * 4) : 0,
+	);
+	return offsets.flatMap((offset, index) => {
+		const tables = new Map<string, { length: number; offset: number }>();
+		const tableCount = read(offset + 4, 2).readUInt16BE(0);
+		const records = read(offset + 12, tableCount * 16);
+		for (let record = 0; record < tableCount; record++) {
+			tables.set(records.toString("latin1", record * 16, record * 16 + 4), {
+				length: records.readUInt32BE(record * 16 + 12),
+				offset: records.readUInt32BE(record * 16 + 8),
+			});
+		}
+
+		const nameTable = tables.get("name");
+		if (!nameTable) {
+			return [];
+		}
+
+		const names = readNames(read(nameTable.offset, nameTable.length));
+		const metricsTable = tables.get("OS/2");
+		const windowsMetrics =
+			metricsTable &&
+			read(metricsTable.offset, Math.min(metricsTable.length, 64));
+		const family = names.get(1);
+		if (!family) {
+			return [];
+		}
+
+		return [
+			{
+				family,
+				file,
+				index,
+				italic:
+					windowsMetrics && windowsMetrics.length >= 64
+						? (windowsMetrics.readUInt16BE(62) & 1) === 1
+						: /italic|oblique/i.test(names.get(2) ?? ""),
+				preferredFamily: names.get(16),
+				weight:
+					windowsMetrics && windowsMetrics.length >= 6
+						? windowsMetrics.readUInt16BE(4)
+						: 400,
+			},
+		];
+	});
+}
+
 function readNames(table: Buffer) {
 	const names = new Map<number, string>();
 	const count = table.readUInt16BE(2);
@@ -721,12 +699,12 @@ function readNames(table: Buffer) {
 	const best = new Map<number, number>();
 	const utf16 = new TextDecoder("utf-16be");
 	for (let record = 0; record < count; record++) {
-		const at = 6 + record * 12;
-		const platform = table.readUInt16BE(at);
-		const language = table.readUInt16BE(at + 4);
-		const id = table.readUInt16BE(at + 6);
-		const length = table.readUInt16BE(at + 8);
-		const offset = storage + table.readUInt16BE(at + 10);
+		const recordOffset = 6 + record * 12;
+		const platform = table.readUInt16BE(recordOffset);
+		const language = table.readUInt16BE(recordOffset + 4);
+		const id = table.readUInt16BE(recordOffset + 6);
+		const length = table.readUInt16BE(recordOffset + 8);
+		const offset = storage + table.readUInt16BE(recordOffset + 10);
 		const score = rank(platform, language);
 		if (
 			!score ||
@@ -766,9 +744,9 @@ function readSheet(css: string, assets: Assets, base?: string) {
 				const target =
 					name === "import" && node.prelude?.type === "AtrulePrelude"
 						? node.prelude.children.first
-						: null;
+						: undefined;
 				if (target?.type === "String" || target?.type === "Url") {
-					imports.push(base ? new URL(target.value, base).href : target.value);
+					imports.push(resolveUrl(target.value, base));
 				}
 			},
 			visit: "Atrule",
@@ -777,7 +755,10 @@ function readSheet(css: string, assets: Assets, base?: string) {
 	return { faces, imports };
 }
 
-/** Indexes installed fonts by family name, reading only each file's name and OS/2 tables. */
+function resolveUrl(url: string, base: string | undefined) {
+	return URL.parse(url, base)?.href ?? url;
+}
+
 function scanInstalledFonts() {
 	const index = new Map<string, InstalledFace[]>();
 	for (const directory of fontDirectories()) {
@@ -810,12 +791,24 @@ function scanInstalledFonts() {
 	return index;
 }
 
-/** A font-family stack's family names, unquoted. */
 function splitStack(stack: string) {
 	return splitTopLevel(stack, ",").map(unquote).filter(Boolean);
 }
 
 /** A font's OS/2 table, which some fonts lack, though fontkit's types say otherwise. */
+function weightTier(weight: number, nearest: number) {
+	const heavier = nearest > weight;
+	if (weight > 500) {
+		return heavier ? 0 : 1;
+	}
+
+	if (weight < 400) {
+		return heavier ? 1 : 0;
+	}
+
+	return !heavier ? 1 : nearest <= 500 ? 0 : 2;
+}
+
 function windowsMetricsOf(font: fontkit.Font): fontkit.Os2Table | undefined {
 	return font["OS/2"];
 }

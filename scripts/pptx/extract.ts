@@ -1,34 +1,20 @@
-/**
- * Turns a laid-out slide state (see layout.ts) into model items (see model.ts):
- * text with styled runs and exact line breaks, lists, code, boxes, images, SVG
- * shapes, and rasters for anything PowerPoint can't represent natively.
- */
 import type { ExtractOptions } from "./extract/context.ts";
 import type { LaidOutBox, Layout } from "./layout.ts";
 
-import { imageFormat } from "./assets.ts";
+import { isOutOfFlow } from "./cascade.ts";
 import { paintItems } from "./extract/boxes.ts";
 import { createExtractContext, MIN_OPACITY } from "./extract/context.ts";
 import { geometryOf } from "./extract/geometry.ts";
 import { imageItem, rasterItem } from "./extract/images.ts";
+import { isListElement, isNativeList, listItem } from "./extract/lists.ts";
 import { svgItems } from "./extract/svg.ts";
-import {
-	codeItem,
-	inlinePills,
-	isListElement,
-	isNativeList,
-	listItem,
-	textItem,
-} from "./extract/text.ts";
-import { isBackgroundOnly } from "./layout.ts";
-
-/** Image formats PowerPoint shows; build.ts converts others to PNG. */
-const NATIVE_FORMATS = new Set(["bmp", "gif", "jpeg", "png"]);
+import { codeItem, inlinePills, textItem } from "./extract/text.ts";
+import { isAtomicInline, isBackgroundOnly } from "./layout.ts";
 
 /** Elements with more descendants than this render as one image instead of shapes. */
 const MAX_NATIVE_DESCENDANTS = 400;
 
-/** Elements that lay out apart from the text around them. */
+/** Elements drawn as their own items, apart from the text they sit in. */
 const REPLACED_ELEMENTS = new Set(["img", "svg"]);
 
 const UNRENDERED_ELEMENTS = new Set(["head", "script", "style", "template"]);
@@ -41,9 +27,7 @@ const UNSUPPORTED_EMBEDS = [
 	["video", "a video"],
 ] as const;
 
-/** Whether PowerPoint can show an image file as-is. */
-export const isNativeImage = (data: Buffer) =>
-	NATIVE_FORMATS.has(imageFormat(data) ?? "");
+const isMath = (element: Element) => element.classList.contains("katex");
 
 /** Turns a laid-out slide state into model items, and descriptions of what it left out. */
 export function extractState(layout: Layout, options: ExtractOptions) {
@@ -51,13 +35,18 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 	const { styleOf } = context;
 
 	const isDense = (element: Element) =>
-		context.descendantCountOf(element) > MAX_NATIVE_DESCENDANTS;
+		element.querySelectorAll("*").length > MAX_NATIVE_DESCENDANTS;
 
-	const isDetached = (element: Element) =>
-		/^(?:absolute|fixed)$/.test(styleOf(element).position ?? "") ||
-		REPLACED_ELEMENTS.has(element.localName);
+	const drawsApart = (element: Element) => {
+		const style = styleOf(element);
+		return (
+			isOutOfFlow(style) ||
+			isAtomicInline(style) ||
+			REPLACED_ELEMENTS.has(element.localName) ||
+			isMath(element)
+		);
+	};
 
-	/** Whether clipping hides an element's text, as with screen-reader-only text. */
 	const isClippedAway = (element: Element, laidOut: LaidOutBox) => {
 		const style = styleOf(element);
 		const clips = ["clip", "overflow", "overflow-x", "overflow-y"].some(
@@ -66,25 +55,17 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 		return (
 			/^inset\(\s*50%\s*\)$/.test(style["clip-path"] ?? "") ||
 			(clips &&
-				(laidOut.w <= 1 || laidOut.h <= 1) &&
+				(laidOut.width <= 1 || laidOut.height <= 1) &&
 				element.textContent.trim() !== "")
 		);
 	};
 
-	/** Walks the descendants of text that lay out apart from it: positioned ones (like ::after decorations) and replaced ones (like icons). */
-	const walkDetached = (element: Element) => {
-		for (const descendant of element.querySelectorAll("*")) {
-			let nested = false;
-			for (
-				let ancestor = descendant.parentElement;
-				ancestor && ancestor !== element;
-				ancestor = ancestor.parentElement
-			) {
-				nested ||= isDetached(ancestor);
-			}
-
-			if (isDetached(descendant) && !nested) {
-				walk(descendant);
+	const walkApart = (element: Element) => {
+		for (const child of element.children) {
+			if (drawsApart(child)) {
+				walk(child);
+			} else {
+				walkApart(child);
 			}
 		}
 	};
@@ -110,8 +91,25 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 			return;
 		}
 
+		if (isMath(element)) {
+			rasterItem(
+				context,
+				element,
+				element.querySelector("annotation")?.textContent.trim(),
+			);
+			return;
+		}
+
 		const laidOut = context.boxOf(element);
-		if (!laidOut || isClippedAway(element, laidOut)) {
+		if (!laidOut) {
+			if (context.isInline(element)) {
+				walkApart(element);
+			}
+
+			return;
+		}
+
+		if (isClippedAway(element, laidOut)) {
 			return;
 		}
 
@@ -123,10 +121,9 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 		}
 
 		for (const item of paint) {
-			context.push(item);
+			context.push(element, item);
 		}
 
-		const entry = context.ownRunsOf(element);
 		if (element.localName === "img") {
 			imageItem(context, element, opacity, geometry);
 		} else if (element.localName === "svg") {
@@ -140,18 +137,23 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 			rasterItem(context, element);
 		} else if (isListElement(element) && isNativeList(context, element)) {
 			listItem(context, element, opacity);
-			walkDetached(element);
-		} else if (entry) {
-			inlinePills(context, element, entry, opacity);
-			textItem(context, element, entry, opacity);
-			walkDetached(element);
+			walkApart(element);
 		} else {
+			const entry = context.ownRunsOf(element);
+			if (entry) {
+				inlinePills(context, element, entry);
+				textItem(context, element, entry);
+				walkApart(element);
+				return;
+			}
+
 			for (const child of element.children) {
 				walk(child);
 			}
 
 			for (const loose of context.looseRunsOf(element)) {
-				textItem(context, element, loose, opacity);
+				inlinePills(context, element, loose);
+				textItem(context, element, loose);
 			}
 		}
 	};

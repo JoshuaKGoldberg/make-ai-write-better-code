@@ -1,7 +1,4 @@
-/**
- * Writes a native .pptx from the deck model (see model.ts): text boxes, bulleted
- * lists, code, shapes, images, click animations, transitions, and speaker notes.
- */
+import * as csstree from "css-tree";
 import JSZip from "jszip";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -10,36 +7,42 @@ import pptxgen from "pptxgenjs";
 import type { FontBook } from "./fonts.ts";
 import type {
 	Box,
-	Canvas,
 	CodeItem,
 	Deck,
 	Fill,
+	ImageItem,
 	Item,
 	ListItem,
 	ListParagraph,
 	Paragraph,
 	Run,
+	Shadow,
 	Slide,
 	Stroke,
 	TextItem,
 	TextStyle,
 } from "./model.ts";
-import type { Gradients, SlidePatch } from "./ooxml.ts";
+import type {
+	Gradients,
+	ListMarker,
+	SlidePatch,
+	Theme,
+	TitleLook,
+} from "./ooxml.ts";
+import type { BuildPptxProblem } from "./types.ts";
 
-import { unescapeCss } from "./cascade.ts";
-import { unquote } from "./css.ts";
 import {
 	createGradients,
+	createNumbering,
 	DECORATIVE,
 	finishPackage,
 	normalizeDegrees,
 	UPPERCASE_LANG,
 } from "./ooxml.ts";
-import { truncate } from "./text.ts";
 
-export interface WriteOptions {
+interface WriteOptions {
 	deck: Deck;
-	/** The deck's fonts, for their metrics and glyph coverage. */
+	/** The deck's fonts, for their metrics. */
 	fonts: FontBook;
 	out: string;
 	/** Whether to write one static slide per click state instead of animating clicks. */
@@ -62,24 +65,17 @@ type ItemWriter = ReturnType<typeof createItemWriter>;
 
 /** A list's marker in PowerPoint: a character bullet, or automatic numbering. */
 type Marker =
-	| { code: string; keyword: boolean; kind: "char" }
+	| { code: string; kind: "keyword" | "string" }
 	| { kind: "number"; style: string };
 
 type TextParagraph = Paragraph & {
 	/** For list items: the marker, and the hanging indent it sits in. */
 	bullet?: pptxgen.default.TextPropsOptions["bullet"];
 	indentLevel?: number;
+	marker?: ListMarker;
 	/** pt */
 	spaceAfter?: number;
 };
-
-/** Consecutive numbered list paragraphs at one level, which PowerPoint numbers on from their start. */
-interface NumberSequence {
-	level: number;
-	next: number;
-	start: number;
-	style: string;
-}
 
 /** Converts canvas px to PowerPoint's units. */
 interface Units {
@@ -96,25 +92,66 @@ const PAGE_HEIGHT_INCHES = 7.5;
 const PAGE_LAYOUT = "Slidev";
 const EMU_PER_INCH = 914400;
 
-/** The font macOS browsers draw symbols the deck's fonts lack (like ✓) in; PowerPoint's own fallback differs. */
-const SYMBOL_FONT = "Lucida Grande";
-
 /** Bulleted paragraphs render about 0.035 lines lower in PowerPoint (measured). */
 const LIST_LIFT = 0.035;
 
 /** Browsers draw a disc marker about 0.75em left of where each item's text starts. */
 const BULLET_GAP = 0.75;
 
+/** A number marker's width in em: each digit's, and its period's and gap's. */
+const NUMBER_DIGIT_WIDTH = 0.55;
+const NUMBER_PERIOD_WIDTH = 0.6;
+
 /** PowerPoint shrinks superscripts and subscripts to about 2/3 of their size; 1.12x renders like a browser's 75% superscripts. */
 const SCRIPT_SCALE = 1.12;
+
+/** PowerPoint's single line spacing, as a multiple of the font size. */
+const SINGLE_LINE_PITCH = 1.2;
 
 /** pptxgenjs swaps a zero shadow blur or offset for its defaults, so zero is written as this. */
 const NEAR_ZERO = 0.01;
 
-const DEFAULT_FONT_SIZE = 16;
+/** pptxgenjs swaps a 0° shadow angle for its default and only writes whole degrees up to 359, so 0° is written as this. */
+const NEAR_FULL_TURN = 359;
+
+/** Width (px, or a fraction of the box's) one-line text grows by, so PowerPoint's slightly different measuring never wraps it. */
+const ONE_LINE_SLACK = { minimum: 10, ratio: 0.06 };
+
+/** Width text that can't wrap grows by, toward the side(s) its alignment grows it. */
+const NOWRAP_SLACK = { minimum: 8, ratio: 0.08 };
+
+/** Width wrapped text grows by, enough for rounding without PowerPoint's lines taking words the browser wrapped. */
+const ROUNDING_SLACK = { minimum: 2, ratio: 0.01 };
+
+/** pt */
+const MIN_LINE_WIDTH = 0.25;
+const MIN_TEXT_OUTLINE_WIDTH = 0.5;
+
+/** px between code baselines that are a new line rather than rounding, and that a measured pitch may differ from the line height by. */
+const MIN_LINE_GAP = 1;
+const LINE_PITCH_TOLERANCE = 0.3;
+
+/** px an item may move or resize between click states and still be the same shape. */
+const SAME_PLACE_TOLERANCE = 1.5;
+
+/** Orders an item from a later click state just after one at the same paint order. */
+const LATER_STATE_ORDER = 0.001;
+
 const MIN_ROUNDED_RADIUS = 0.5;
 const NAME_LENGTH = 48;
 const NO_BREAK_SPACE = "00A0";
+
+const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
+
+/** pptxgenjs's bullets are 4 hex digits, so markers beyond the BMP become a bullet. */
+const ASTRAL_MARKER = "2022";
+
+const ALIGNMENTS = {
+	center: "ctr",
+	justify: "just",
+	left: "l",
+	right: "r",
+} as const;
 
 const NUMBER_STYLES: Partial<Record<string, string>> = {
 	decimal: "arabicPeriod",
@@ -155,27 +192,12 @@ export async function writePptx({
 	presentation.subject = "";
 	presentation.title = deck.title;
 
-	const theme = themeOf(deck);
-	if (theme.bodyFont) {
-		presentation.theme = {
-			bodyFontFace: theme.bodyFont,
-			headFontFace: theme.headingFont ?? theme.bodyFont,
-		};
-	}
-
 	const units: Units = {
 		inches: (pixels) => (pixels * widthInches) / deck.canvas.width,
 		points: (pixels) => ((pixels * widthInches) / deck.canvas.width) * 72,
 	};
 	const gradients = createGradients(colorsOf(deck));
-	const addItem = createItemWriter({
-		bodyFont: theme.bodyFont ?? "Arial",
-		canvas: deck.canvas,
-		fonts,
-		gradients,
-		presentation,
-		units,
-	});
+	const addItem = createItemWriter({ fonts, gradients, presentation, units });
 	const patches = deck.slides.flatMap((slide) =>
 		slidePerClick
 			? writeClickSlides(presentation, slide, addItem)
@@ -185,23 +207,19 @@ export async function writePptx({
 	const zip = await JSZip.loadAsync(
 		await presentation.write({ outputType: "nodebuffer" }),
 	);
+	const monospace = fonts.spacer().font;
 	await fs.mkdir(path.dirname(out), { recursive: true });
 	await fs.writeFile(
 		out,
 		await finishPackage(zip, {
 			background: await fs.readFile(deck.background.file),
-			emuPerPixel: EMU_PER_INCH * units.inches(1),
 			gradients,
-			monospace: fonts.spacer().font,
+			monospace,
 			slides: patches,
-			theme: {
-				background: deck.background.color,
-				link: theme.link,
-				text: theme.text ?? "000000",
-			},
+			theme: themeOf(deck, patches, monospace, units.points),
 		}),
 	);
-	return { slides: patches.length };
+	return { problems: numberingProblems(deck), slides: patches.length };
 }
 
 /** Writes a slide with its click states as animations. */
@@ -211,13 +229,11 @@ function writeAnimatedSlide(
 	addItem: ItemWriter,
 ) {
 	const powerPointSlide = presentation.addSlide();
-	powerPointSlide.addNotes(withoutControlCharacters(slide.notes));
-	const patch = emptyPatch(slide);
+	const patch = slidePatch(slide.notes, slide.transition);
 	const used = new Set<string>();
 	for (const entry of timeline(slide)) {
 		const name = uniqueName(entry.item, used);
-		const shapes = addItem(powerPointSlide, entry.item, name);
-		describeShape(patch, entry.item, name);
+		const shapes = addItem(powerPointSlide, patch, entry.item, name);
 
 		for (let click = 1; click < slide.states.length; click++) {
 			const now = entry.states.has(click);
@@ -257,53 +273,52 @@ function writeClickSlides(
 	const entries = timeline(slide);
 	return slide.states.map((_, click) => {
 		const powerPointSlide = presentation.addSlide();
-		powerPointSlide.addNotes(
-			withoutControlCharacters(
-				`Slide ${String(slide.number)}, click ${String(click)}\n\n${slide.notes}`,
-			),
+		const patch = slidePatch(
+			`Slide ${String(slide.number)}, click ${String(click)}\n\n${slide.notes}`,
+			click === 0 ? slide.transition : undefined,
 		);
-		const patch = emptyPatch(slide);
 		const used = new Set<string>();
 		for (const entry of entries.filter(({ states }) => states.has(click))) {
-			const name = uniqueName(entry.item, used);
 			addItem(
 				powerPointSlide,
+				patch,
 				entry.item,
-				name,
+				uniqueName(entry.item, used),
 				entry.paragraphStates?.map((states) => states.has(click)),
 			);
-			describeShape(patch, entry.item, name);
 		}
 
 		return patch;
 	});
 }
 
-const emptyPatch = (slide: Slide): SlidePatch => ({
+const slidePatch = (
+	notes: string,
+	transition: string | undefined,
+): SlidePatch => ({
+	decorative: [],
 	effects: [],
 	lists: [],
+	notes: withoutControlCharacters(notes),
 	pictureCorners: [],
-	transition: slide.transition,
+	transition,
 });
 
 function createItemWriter({
-	bodyFont,
-	canvas,
 	fonts,
 	gradients,
 	presentation,
-	units: { inches, points },
+	units,
 }: {
-	bodyFont: string;
-	canvas: Canvas;
 	fonts: FontBook;
 	gradients: Gradients;
 	presentation: Presentation;
 	units: Units;
 }) {
+	const { inches, points } = units;
 	const position = (box: Box) => ({
-		h: inches(box.h),
-		w: inches(box.w),
+		h: inches(box.height),
+		w: inches(box.width),
 		x: inches(box.x),
 		y: inches(box.y),
 	});
@@ -316,45 +331,28 @@ function createItemWriter({
 						: fill.transparency || undefined,
 				}
 			: { type: "none" };
-	const lineFor = (
-		stroke: Stroke | undefined,
-	): pptxgen.default.ShapeLineProps =>
-		stroke
-			? {
-					color: stroke.color,
-					transparency: stroke.transparency,
-					width: Math.max(0.25, points(stroke.width)),
-				}
-			: { type: "none" };
-
-	const splitFallback = (run: Run): Run[] => {
-		if (run.pad) {
-			return [run];
-		}
-
-		const pieces: Run[] = [];
-		for (const character of run.text) {
-			const missing =
-				fonts.covers(run.font, character.codePointAt(0) ?? 0) === false &&
-				!/[\p{Extended_Pictographic}\p{Cf}]/u.test(character);
-			const font = missing ? SYMBOL_FONT : run.font;
-			const last = pieces.at(-1);
-			if (last?.font === font) {
-				last.text += character;
-			} else {
-				pieces.push({
-					...run,
-					bold: missing ? /(?:SemiBold|Bold|Black)$/.test(run.font) : run.bold,
-					font,
-					lineBreak: pieces.length ? undefined : run.lineBreak,
-					softBreak: pieces.length ? undefined : run.softBreak,
-					text: character,
-				});
-			}
-		}
-
-		return pieces.length ? pieces : [run];
-	};
+	const lineFor = (stroke: Stroke | undefined) =>
+		stroke && {
+			color: stroke.color,
+			transparency: stroke.transparency,
+			width: Math.max(MIN_LINE_WIDTH, points(stroke.width)),
+		};
+	const shadowFor = (shadow: Shadow): pptxgen.default.ShadowProps => ({
+		angle:
+			normalizeDegrees(
+				Math.round(
+					(Math.atan2(shadow.offsetY, shadow.offsetX) * 180) / Math.PI,
+				),
+			) || NEAR_FULL_TURN,
+		blur: Math.max(NEAR_ZERO, points(shadow.blur)),
+		color: shadow.color,
+		offset: Math.max(
+			NEAR_ZERO,
+			points(Math.hypot(shadow.offsetX, shadow.offsetY)),
+		),
+		opacity: 1 - shadow.transparency / 100,
+		type: "outer",
+	});
 
 	const textRuns = (
 		paragraphs: TextParagraph[],
@@ -366,7 +364,7 @@ function createItemWriter({
 			wrap,
 		}: {
 			code: boolean;
-			firstRun: Run | undefined;
+			firstRun: Run;
 			lineHeight: number;
 			/** Whether this is the outlined copy behind a text stroke. */
 			outline: boolean;
@@ -375,18 +373,11 @@ function createItemWriter({
 	) =>
 		paragraphs.flatMap((paragraph, paragraphIndex) => {
 			const last = paragraphIndex === paragraphs.length - 1;
-			const pieces: Run[] = paragraph.runs.length
-				? mergeRuns(paragraph.runs.flatMap(splitFallback), wrap)
-				: [
-						blankRun(
-							firstRun ?? emptyRun(code ? fonts.spacer().font : bodyFont),
-						),
-					];
-			const baseSize =
-				pieces.find((run) => !run.script)?.size ?? pieces[0].size;
-			const multiple = lineHeight
-				? Math.round((lineHeight / (1.2 * baseSize)) * 1000) / 1000
-				: undefined;
+			const pieces = paragraph.runs.length
+				? mergeRuns(paragraph.runs, wrap)
+				: [blankRun(firstRun)];
+			const baseSize = baseSizeOf(pieces);
+			const multiple = lineSpacingOf(lineHeight, baseSize);
 			return pieces.map((run, runIndex) => {
 				const hyperlink = run.href && !run.pad ? { url: run.href } : undefined;
 				const options: pptxgen.default.TextPropsOptions = {
@@ -398,10 +389,9 @@ function createItemWriter({
 						: undefined,
 					color: run.gradient ? gradients.sentinel(run.gradient) : run.color,
 					fontFace: run.font,
-					fontSize:
-						Math.round(
-							points(run.script ? SCRIPT_SCALE * baseSize : run.size) * 10,
-						) / 10,
+					fontSize: fontSizeOf(
+						points(run.script ? SCRIPT_SCALE * baseSize : run.size),
+					),
 					hyperlink,
 					indentLevel: paragraph.indentLevel,
 					italic: run.italic,
@@ -411,11 +401,15 @@ function createItemWriter({
 						outline && run.stroke
 							? {
 									color: run.stroke.color,
-									size: Math.max(0.5, points(run.stroke.width)),
+									size: Math.max(
+										MIN_TEXT_OUTLINE_WIDTH,
+										points(run.stroke.width),
+									),
 								}
 							: undefined,
 					paraSpaceAfter: paragraph.spaceAfter,
 					softBreakBefore: breaksBefore(run, wrap) || undefined,
+					strike: run.strike ? "sngStrike" : undefined,
 					subscript: run.script === "sub" || undefined,
 					superscript: run.script === "super" || undefined,
 					transparency: run.transparency || undefined,
@@ -430,186 +424,12 @@ function createItemWriter({
 			});
 		});
 
-	/** The line pitch of a code block, measured from its baselines; blank lines make some gaps span several lines. */
-	const codePitch = (item: CodeItem) => {
-		const { baselines, style } = item;
-		const pitches = baselines
-			.slice(1)
-			.map((baseline, index) => baseline - baselines[index])
-			.filter((gap) => gap > 1)
-			.map((gap) => gap / Math.max(1, Math.round(gap / style.lineHeight)))
-			.sort((a, b) => a - b);
-		const pitch = pitches.at(Math.floor(pitches.length / 2));
-		return pitch !== undefined && Math.abs(pitch - style.lineHeight) > 0.3
-			? pitch
-			: style.lineHeight;
-	};
-
-	/**
-	 * A list's paragraphs, each with the space after it in whole points (PowerPoint rounds
-	 * paragraph spacing to them), keeping the running total exact so errors never add up.
-	 */
-	const spacedListParagraphs = (
-		item: ListItem,
-	): (ListParagraph & { spaceAfter?: number })[] => {
-		let exact = 0;
-		let written = 0;
-		return item.paragraphs.map((paragraph, index) => {
-			const next = item.paragraphs.at(index + 1);
-			const last = paragraph.baselines.at(-1);
-			if (!next?.baselines.length || last === undefined) {
-				return paragraph;
-			}
-
-			exact += points(
-				Math.max(0, next.baselines[0] - (last + item.style.lineHeight)),
-			);
-			const spaceAfter = Math.round(exact) - written;
-			written += spaceAfter;
-			return { ...paragraph, spaceAfter: spaceAfter || undefined };
-		});
-	};
-
-	/**
-	 * A list's paragraphs with their markers, each hanging before its text. Hidden
-	 * paragraphs and later paragraphs of an item keep their place unmarked.
-	 */
-	const listParagraphs = (
-		item: ListItem,
-		visibleParagraphs: boolean[] | undefined,
-		markerGap: number,
-	): TextParagraph[] => {
-		let sequence: NumberSequence | undefined;
-		return spacedListParagraphs(item).map((paragraph, index) => {
-			const { level, number } = paragraph;
-			const visible = visibleParagraphs?.[index] ?? true;
-			const marker =
-				paragraph.bullet && visible ? markerFor(paragraph.marker) : undefined;
-			const indent = Math.max(
-				1,
-				points((markerGap + paragraph.indent) / (level + 1)),
-			);
-			const start =
-				marker?.kind === "number" &&
-				sequence?.level === level &&
-				sequence.style === marker.style &&
-				sequence.next === number
-					? sequence.start
-					: number;
-			sequence =
-				marker?.kind === "number"
-					? { level, next: number + 1, start, style: marker.style }
-					: undefined;
-			return {
-				bullet:
-					marker === undefined
-						? { characterCode: NO_BREAK_SPACE, indent }
-						: marker.kind === "number"
-							? {
-									indent,
-									numberStartAt: start,
-									style: marker.style,
-									type: "number",
-								}
-							: { characterCode: marker.code, indent },
-				indentLevel: level || undefined,
-				runs: visible
-					? paragraph.runs
-					: paragraph.runs.map((run) => ({ ...run, transparency: 100 })),
-				spaceAfter: paragraph.spaceAfter,
-			};
-		});
-	};
-
-	/** Where the box's top goes so PowerPoint's first baseline lands on the browser's, and how tall it is. */
-	const verticalPlacement = (
-		item: CodeItem | ListItem | TextItem,
-		style: TextStyle,
-		rotation: number,
-		firstRun: Run | undefined,
-	) => {
-		const { box } = item;
-		const baselines =
-			item.kind === "list"
-				? item.paragraphs.find((paragraph) => paragraph.baselines.length)
-						?.baselines
-				: item.baselines;
-		const size = firstRun?.size ?? DEFAULT_FONT_SIZE;
-		const { ascent, baseline, descent } = fonts.metrics(firstRun?.font ?? "");
-		if (rotation && style.lineHeight) {
-			const top =
-				box.y +
-				(style.lineHeight - (ascent + descent) * size) / 2 +
-				ascent * size -
-				baseline * style.lineHeight;
-			return { height: box.h + (box.y - top), top };
-		}
-
-		if (baselines?.length && style.lineHeight) {
-			const top =
-				baselines[0] -
-				(baseline + (item.kind === "list" ? LIST_LIFT : 0)) * style.lineHeight;
-			return {
-				height: Math.max(
-					box.h + (box.y - top),
-					baselines[baselines.length - 1] - baselines[0] + style.lineHeight,
-				),
-				top,
-			};
-		}
-
-		return { height: box.h, top: box.y };
-	};
-
-	/**
-	 * How wide the box is and where it starts. Wrapped text gets just enough slack for
-	 * rounding, so PowerPoint's lines don't take words the browser wrapped; one-line text
-	 * gets more, so PowerPoint's slightly different measuring never wraps it, as far as the
-	 * slide's edges allow on the side(s) its alignment grows it toward.
-	 */
-	const horizontalPlacement = (
-		box: Box,
-		style: TextStyle,
-		rotation: number,
-	) => {
-		const slack =
-			style.nowrap || rotation
-				? 0
-				: style.wrapWidth === undefined
-					? Math.max(10, box.w * 0.06)
-					: Math.max(2, box.w * 0.01);
-		const width =
-			style.wrapWidth !== undefined && style.align === "left" && !rotation
-				? Math.min(box.w, style.wrapWidth)
-				: box.w;
-		const roomLeft = Math.max(0, box.x);
-		const roomRight = Math.max(0, canvas.width - (box.x + box.w));
-		const extra =
-			style.nowrap && !rotation
-				? Math.min(
-						Math.max(8, box.w * 0.08),
-						style.align === "center"
-							? 2 * Math.min(roomLeft, roomRight)
-							: style.align === "right"
-								? roomLeft
-								: roomRight,
-					)
-				: 0;
-		const grown = slack + extra;
-		const shift =
-			style.align === "center"
-				? grown / 2
-				: style.align === "right"
-					? grown
-					: 0;
-		return { left: box.x - shift, width: width + grown };
-	};
-
 	const addText = (
 		slide: pptxgen.default.Slide,
+		patch: SlidePatch,
 		item: CodeItem | ListItem | TextItem,
 		name: string,
-		visibleParagraphs?: boolean[],
+		visibleParagraphs: boolean[] | undefined,
 	) => {
 		const style =
 			item.kind === "code"
@@ -618,49 +438,42 @@ function createItemWriter({
 		const rotation = item.kind === "text" ? item.rotation : 0;
 		const markerGap =
 			item.kind === "list"
-				? markerGapOf(
-						item,
-						firstRunOf(item.paragraphs)?.size ?? DEFAULT_FONT_SIZE,
-					)
+				? markerGapOf(item, firstRunOf(item.paragraphs).size)
 				: 0;
 		const paragraphs: TextParagraph[] =
 			item.kind === "list"
-				? listParagraphs(item, visibleParagraphs, markerGap)
+				? listParagraphs(item, visibleParagraphs, markerGap, points)
 				: item.paragraphs;
 		const firstRun = firstRunOf(paragraphs);
-		const { height, top } = verticalPlacement(item, style, rotation, firstRun);
+		const { height, top } = verticalPlacement(
+			item,
+			style,
+			rotation,
+			firstRun,
+			fonts,
+		);
 		const { left, width } = horizontalPlacement(item.box, style, rotation);
+		const box = {
+			height,
+			width: width + markerGap,
+			x: left - markerGap,
+			y: top,
+		};
 		const shadow = paragraphs
 			.flatMap(({ runs }) => runs)
 			.find((run) => run.shadow)?.shadow;
 		const options: pptxgen.default.TextPropsOptions = {
+			...position(box),
 			align: style.align,
 			fit: "none",
-			h: inches(height),
 			isTextBox: true,
 			margin: 0,
 			objectName: name,
 			rotate: rotation ? normalizeDegrees(rotation) : undefined,
-			shadow: shadow && {
-				angle: normalizeDegrees(
-					Math.round(
-						(Math.atan2(shadow.offsetY, shadow.offsetX) * 180) / Math.PI,
-					),
-				),
-				blur: Math.max(NEAR_ZERO, points(shadow.blur)),
-				color: shadow.color,
-				offset: Math.max(
-					NEAR_ZERO,
-					points(Math.hypot(shadow.offsetX, shadow.offsetY)),
-				),
-				opacity: 1 - shadow.transparency / 100,
-				type: "outer",
-			},
+			shadow:
+				shadow && shadow.transparency < 100 ? shadowFor(shadow) : undefined,
 			valign: "top",
-			w: inches(width + markerGap),
 			wrap: !style.nowrap,
-			x: inches(left - markerGap),
-			y: inches(top),
 		};
 		const runOptions = {
 			code: item.kind === "code",
@@ -670,32 +483,63 @@ function createItemWriter({
 		};
 		const names = [name];
 		if (paragraphs.some(({ runs }) => runs.some((run) => run.stroke))) {
-			// CSS paints text strokes behind the fill, so an outlined copy goes behind an unoutlined one.
-			// pptxgenjs mutates option objects, so never share one between calls.
+			// https://github.com/gitbrent/PptxGenJS/issues/1527
+			const outlineName = `${name} (outline)`;
 			slide.addText(textRuns(paragraphs, { ...runOptions, outline: true }), {
 				...structuredClone(options),
-				objectName: `${name} (outline)`,
+				objectName: outlineName,
 			});
-			names.push(`${name} (outline)`);
+			names.push(outlineName);
+			if (!item.decorative) {
+				patch.decorative.push(outlineName);
+			}
 		}
 
 		slide.addText(
 			textRuns(paragraphs, { ...runOptions, outline: false }),
 			structuredClone(options),
 		);
+
+		if (item.kind === "list") {
+			patch.lists.push({
+				color: item.bulletColor,
+				markers: paragraphs.map(({ marker }) => marker ?? "none"),
+				name,
+			});
+		}
+
+		const text = plainText(item);
+		if (
+			item.kind === "text" &&
+			item.heading &&
+			!item.decorative &&
+			text &&
+			!patch.title
+		) {
+			patch.title = {
+				look: titleLook(box, style, firstRun, units),
+				name,
+				text,
+			};
+		}
+
 		return names;
 	};
 
-	/** Adds an item to a slide; returns the names of the shapes it created. */
-	return (
+	const addItem = (
 		slide: pptxgen.default.Slide,
+		patch: SlidePatch,
 		item: Item,
 		name: string,
-		visibleParagraphs?: boolean[],
+		visibleParagraphs: boolean[] | undefined,
 	) => {
 		switch (item.kind) {
 			case "box": {
-				const radius = Math.min(item.radius, item.box.w / 2, item.box.h / 2);
+				const radius = Math.min(
+					item.radius,
+					item.box.width / 2,
+					item.box.height / 2,
+				);
 				const rounded = radius > MIN_ROUNDED_RADIUS;
 				slide.addShape(
 					rounded
@@ -716,7 +560,7 @@ function createItemWriter({
 			case "code":
 			case "list":
 			case "text":
-				return addText(slide, item, name, visibleParagraphs);
+				return addText(slide, patch, item, name, visibleParagraphs);
 			case "ellipse":
 				slide.addShape(presentation.ShapeType.ellipse, {
 					...position(item.box),
@@ -730,26 +574,40 @@ function createItemWriter({
 				const crop = item.kind === "image" ? item.crop : undefined;
 				slide.addImage({
 					...position(item.box),
-					// pptxgenjs crops from the whole image's size to the frame's.
 					...(crop && {
-						h: inches(crop.h),
+						h: inches(crop.height),
 						sizing: {
-							h: inches(item.box.h),
+							h: inches(item.box.height),
 							type: "crop" as const,
-							w: inches(item.box.w),
+							w: inches(item.box.width),
 							x: inches(item.box.x - crop.x),
 							y: inches(item.box.y - crop.y),
 						},
-						w: inches(crop.w),
+						w: inches(crop.width),
 					}),
-					// pptxgenjs falls back to the file path for empty alt text; mark it decorative instead.
-					altText: withoutControlCharacters(item.alt) || DECORATIVE,
+					altText: isDecorative(item)
+						? DECORATIVE
+						: withoutControlCharacters(item.alt),
 					objectName: name,
 					path: item.file,
-					rounding: item.kind === "image" && item.circle,
+					rounding: item.kind === "image" && isCircle(item),
 					transparency:
 						item.kind === "image" ? item.transparency || undefined : undefined,
 				});
+				if (
+					item.kind === "image" &&
+					!isCircle(item) &&
+					item.radius > MIN_ROUNDED_RADIUS
+				) {
+					patch.pictureCorners.push({
+						adjust: Math.round(
+							(item.radius / Math.min(item.box.width, item.box.height)) *
+								100000,
+						),
+						name,
+					});
+				}
+
 				return [name];
 			}
 
@@ -772,52 +630,226 @@ function createItemWriter({
 				return [name];
 		}
 	};
+
+	/** Adds an item to a slide, recording the patches it needs; returns the names of the shapes it created. */
+	return (
+		slide: pptxgen.default.Slide,
+		patch: SlidePatch,
+		item: Item,
+		name: string,
+		visibleParagraphs?: boolean[],
+	) => {
+		const names = addItem(slide, patch, item, name, visibleParagraphs);
+		if (isDecorative(item)) {
+			patch.decorative.push(...names);
+		}
+
+		return names;
+	};
 }
 
-/** Records what post-processing a shape needs: rounded picture corners, list markers, or being the slide's title. */
-function describeShape(patch: SlidePatch, item: Item, name: string) {
-	if (
-		item.kind === "image" &&
-		!item.circle &&
-		item.radius > MIN_ROUNDED_RADIUS
-	) {
-		patch.pictureCorners.push({ name, radius: item.radius });
-	}
+/** Whether an image's corners round it all the way into an ellipse. */
+const isCircle = (image: ImageItem) =>
+	image.radius >= Math.min(image.box.width, image.box.height) / 2 - 1;
 
-	if (item.kind === "list") {
-		const first = item.paragraphs.at(0);
-		const marker = first && markerFor(first.marker);
-		patch.lists.push({
-			color: item.bulletColor,
-			keyword: marker?.kind === "char" && marker.keyword,
-			name,
-		});
-	}
+/** Whether screen readers should skip an item; pptxgenjs writes a picture's file path for empty alt text, so pictures without any are decorative too. */
+const isDecorative = (item: Item) =>
+	item.decorative ||
+	((item.kind === "image" || item.kind === "raster") &&
+		!withoutControlCharacters(item.alt));
 
-	if (item.kind === "text" && item.heading) {
-		patch.title ??= name;
-	}
+/** Where a title's box sits and how its first run looks, for the master's title style. */
+function titleLook(
+	box: Box,
+	style: TextStyle,
+	run: Run,
+	{ inches, points }: Units,
+): TitleLook {
+	const emu = (pixels: number) => Math.round(inches(pixels) * EMU_PER_INCH);
+	return {
+		align: ALIGNMENTS[style.align],
+		color: run.color.toUpperCase(),
+		cx: emu(box.width),
+		cy: emu(box.height),
+		font: run.font,
+		lineSpacing: spacingPercent(lineSpacingOf(style.lineHeight, run.size)),
+		size: Math.round(fontSizeOf(points(run.size)) * 100),
+		x: emu(box.x),
+		y: emu(box.y),
+	};
 }
 
-/** The PowerPoint marker for a CSS list-style-type. */
-function markerFor(listStyle: string): Marker {
+/** The line pitch of a code block, measured from its baselines; blank lines make some gaps span several lines. */
+function codePitch({ baselines, style }: CodeItem) {
+	const pitches = baselines
+		.slice(1)
+		.map((baseline, index) => baseline - baselines[index])
+		.filter((gap) => gap > MIN_LINE_GAP)
+		.map((gap) => gap / Math.max(1, Math.round(gap / style.lineHeight)))
+		.sort((a, b) => a - b);
+	const pitch = pitches.at(Math.floor(pitches.length / 2));
+	return pitch !== undefined &&
+		Math.abs(pitch - style.lineHeight) > LINE_PITCH_TOLERANCE
+		? pitch
+		: style.lineHeight;
+}
+
+/** A list's paragraphs, with the space after each in the whole points PowerPoint rounds to, keeping their running total exact. */
+function spacedListParagraphs(
+	item: ListItem,
+	points: Units["points"],
+): (ListParagraph & { spaceAfter?: number })[] {
+	let exact = 0;
+	let written = 0;
+	return item.paragraphs.map((paragraph, index) => {
+		const next = item.paragraphs.at(index + 1);
+		const last = paragraph.baselines.at(-1);
+		if (!next?.baselines.length || last === undefined) {
+			return paragraph;
+		}
+
+		exact += points(
+			Math.max(0, next.baselines[0] - (last + item.style.lineHeight)),
+		);
+		const spaceAfter = Math.round(exact) - written;
+		written += spaceAfter;
+		return { ...paragraph, spaceAfter: spaceAfter || undefined };
+	});
+}
+
+/** A list's paragraphs with their markers hanging before their text; hidden paragraphs and an item's later paragraphs keep their place unmarked. */
+function listParagraphs(
+	item: ListItem,
+	visibleParagraphs: boolean[] | undefined,
+	markerGap: number,
+	points: Units["points"],
+): TextParagraph[] {
+	const numbering = createNumbering();
+	return spacedListParagraphs(item, points).map((paragraph, index) => {
+		const { level, number } = paragraph;
+		const visible = visibleParagraphs?.[index] ?? true;
+		const marker =
+			paragraph.bullet && visible ? markerFor(paragraph.marker) : undefined;
+		const indent = Math.max(
+			1,
+			points((markerGap + paragraph.indent) / (level + 1)),
+		);
+		const start = numbering(
+			level,
+			number,
+			marker?.kind === "number" ? marker.style : undefined,
+		);
+		return {
+			bullet:
+				marker === undefined
+					? { characterCode: NO_BREAK_SPACE, indent }
+					: marker.kind === "number"
+						? {
+								indent,
+								numberStartAt: Math.max(1, start),
+								style: marker.style,
+								type: "number",
+							}
+						: { characterCode: marker.code, indent },
+			indentLevel: level || undefined,
+			marker: marker?.kind ?? "none",
+			runs: visible
+				? paragraph.runs
+				: paragraph.runs.map((run) => ({ ...run, transparency: 100 })),
+			spaceAfter: paragraph.spaceAfter,
+		};
+	});
+}
+
+/** Where the box's top goes so PowerPoint's first baseline lands on the browser's, and how tall it is. */
+function verticalPlacement(
+	item: CodeItem | ListItem | TextItem,
+	style: TextStyle,
+	rotation: number,
+	{ font, size }: Run,
+	fonts: FontBook,
+) {
+	const { box } = item;
+	const baselines =
+		item.kind === "list"
+			? item.paragraphs.find((paragraph) => paragraph.baselines.length)
+					?.baselines
+			: item.baselines;
+	const { ascent, baseline, descent } = fonts.metrics(font);
+	if (rotation && style.lineHeight) {
+		const top =
+			box.y +
+			(style.lineHeight - (ascent + descent) * size) / 2 +
+			ascent * size -
+			baseline * style.lineHeight;
+		return { height: box.height + (box.y - top), top };
+	}
+
+	if (baselines?.length && style.lineHeight) {
+		const top =
+			baselines[0] -
+			(baseline + (item.kind === "list" ? LIST_LIFT : 0)) * style.lineHeight;
+		return {
+			height: Math.max(
+				box.height + (box.y - top),
+				baselines[baselines.length - 1] - baselines[0] + style.lineHeight,
+			),
+			top,
+		};
+	}
+
+	return { height: box.height, top: box.y };
+}
+
+/** How wide the box is and where it starts, with slack toward the side(s) its alignment grows it, within the room its container leaves. */
+function horizontalPlacement(box: Box, style: TextStyle, rotation: number) {
+	const width =
+		style.wrapWidth !== undefined && style.align === "left" && !rotation
+			? Math.min(box.width, style.wrapWidth)
+			: box.width;
+	const roomLeft = Math.max(0, box.x);
+	const roomRight = Math.max(0, style.availableWidth - box.width);
+	const room =
+		style.align === "center"
+			? 2 * Math.min(roomLeft, roomRight)
+			: style.align === "right"
+				? roomLeft
+				: roomRight;
+	const slackOf = ({ minimum, ratio }: typeof ONE_LINE_SLACK) =>
+		Math.max(minimum, box.width * ratio);
+	const grown = rotation
+		? 0
+		: style.nowrap
+			? Math.min(slackOf(NOWRAP_SLACK), room)
+			: style.wrapWidth === undefined
+				? Math.max(
+						slackOf(ROUNDING_SLACK),
+						Math.min(slackOf(ONE_LINE_SLACK), room),
+					)
+				: slackOf(ROUNDING_SLACK);
+	const shift =
+		style.align === "center" ? grown / 2 : style.align === "right" ? grown : 0;
+	return { left: box.x - shift, width: width + grown };
+}
+
+/** The PowerPoint marker for a CSS list-style-type, if it shows one. */
+function markerFor(listStyle: string): Marker | undefined {
 	const keyword = KEYWORD_MARKERS[listStyle];
 	if (keyword) {
-		return { code: keyword, keyword: true, kind: "char" };
+		return { code: keyword, kind: "keyword" };
 	}
 
 	if (/^["']/.test(listStyle)) {
-		const code = unescapeCss(unquote(listStyle)).trim().codePointAt(0);
-		return {
-			code:
-				code === undefined
-					? NO_BREAK_SPACE
-					: code <= 0xffff
-						? code.toString(16).toUpperCase().padStart(4, "0")
-						: "2022",
-			keyword: false,
-			kind: "char",
-		};
+		const code = csstree.string.decode(listStyle).trim().codePointAt(0);
+		return code === undefined
+			? undefined
+			: {
+					code:
+						code <= 0xffff
+							? code.toString(16).toUpperCase().padStart(4, "0")
+							: ASTRAL_MARKER,
+					kind: "string",
+				};
 	}
 
 	return { kind: "number", style: NUMBER_STYLES[listStyle] ?? "arabicPeriod" };
@@ -827,12 +859,12 @@ function markerFor(listStyle: string): Marker {
 function markerGapOf(list: ListItem, size: number) {
 	const outermost = list.paragraphs.filter(({ level }) => level === 0);
 	const first = outermost.at(0);
-	return first && markerFor(first.marker).kind === "number"
+	return first && markerFor(first.marker)?.kind === "number"
 		? (Math.max(
 				...outermost.map(({ marker, number }) => numberLength(number, marker)),
 			) *
-				0.55 +
-				0.6) *
+				NUMBER_DIGIT_WIDTH +
+				NUMBER_PERIOD_WIDTH) *
 				size
 		: BULLET_GAP * size;
 }
@@ -858,41 +890,72 @@ function numberLength(number: number, listStyle: string) {
 	return digits.length;
 }
 
-const emptyRun = (font: string): Run => ({
-	bold: false,
-	color: "ffffff",
-	font,
-	italic: false,
-	letterSpacing: 0,
-	size: DEFAULT_FONT_SIZE,
-	text: "",
-	transparency: 0,
-	underline: false,
-	upper: false,
-});
+/** Lists PowerPoint can't number as the browser does: it numbers from 1 at the lowest. */
+function numberingProblems(deck: Deck): BuildPptxProblem[] {
+	return deck.slides.flatMap((slide) =>
+		slide.states.some(({ items }) =>
+			items.some(
+				(item) =>
+					item.kind === "list" &&
+					item.paragraphs.some(
+						(paragraph) =>
+							paragraph.bullet &&
+							paragraph.number < 1 &&
+							markerFor(paragraph.marker)?.kind === "number",
+					),
+			),
+		)
+			? [
+					{
+						message:
+							"PowerPoint can't number list items below 1, so a list here is numbered from 1.",
+						severity: "warning" as const,
+						slide: slide.number,
+					},
+				]
+			: [],
+	);
+}
 
 /** A blank paragraph's run, styled like its text so text typed into it matches. */
 const blankRun = (style: Run): Run => ({
 	...style,
 	href: undefined,
 	lineBreak: undefined,
-	softBreak: undefined,
 	text: "",
 	underline: false,
 });
 
-const firstRunOf = (paragraphs: Paragraph[]) =>
-	paragraphs.find(({ runs }) => runs.length)?.runs[0];
+function firstRunOf(paragraphs: Paragraph[]) {
+	const run = paragraphs.find(({ runs }) => runs.length)?.runs[0];
+	if (!run) {
+		throw new Error("Text items need at least one run.");
+	}
+
+	return run;
+}
+
+const baseSizeOf = (runs: Run[]) =>
+	(runs.find((run) => !run.script) ?? runs[0]).size;
+
+/** A paragraph's line spacing, as a multiple of single spacing. */
+const lineSpacingOf = (lineHeight: number, baseSize: number) =>
+	lineHeight
+		? Math.round((lineHeight / (SINGLE_LINE_PITCH * baseSize)) * 1000) / 1000
+		: undefined;
+
+const fontSizeOf = (points: number) => Math.round(points * 10) / 10;
+
+/** A line spacing multiple in PowerPoint's 1000ths of a percent. */
+const spacingPercent = (multiple: number | undefined) =>
+	multiple === undefined ? undefined : Math.round(multiple * 100000);
 
 const breaksBefore = (run: Run, wrap: boolean) =>
-	run.lineBreak === true || (!wrap && run.softBreak === true);
+	run.lineBreak === "forced" || (!wrap && run.lineBreak === "wrap");
 
-/**
- * Joins neighboring runs that look alike (as takumi splits text per line), so each
- * link, word, or phrase is one run to edit, except where a line break is kept.
- */
+/** Joins neighboring runs that look alike (as takumi splits text per line) into one run to edit, except where a line break is kept. */
 function mergeRuns(runs: Run[], wrap: boolean) {
-	const breakAndText = new Set(["lineBreak", "softBreak", "text"]);
+	const breakAndText = new Set(["lineBreak", "text"]);
 	const format = (run: Run) =>
 		JSON.stringify(run, (name, value: unknown) =>
 			breakAndText.has(name) ? undefined : value,
@@ -919,14 +982,7 @@ const visibleCount = (list: ListItem) =>
 
 /** A fingerprint of an item's appearance, ignoring identity, naming, position, and list paragraph visibility. */
 function appearanceOf(item: Item) {
-	const ignored = new Set([
-		"baselines",
-		"box",
-		"key",
-		"label",
-		"order",
-		"visible",
-	]);
+	const ignored = new Set(["baselines", "box", "key", "label", "visible"]);
 	return JSON.stringify(item, (name, value: unknown) =>
 		ignored.has(name)
 			? undefined
@@ -936,14 +992,11 @@ function appearanceOf(item: Item) {
 	);
 }
 
-/**
- * Merges a slide's click states into items, each with the states it's visible in. Anything
- * that moved, resized, or restyled between clicks becomes a new item that crossfades in.
- */
+/** Merges a slide's click states into items, each with the states it's visible in; anything that moves, resizes, or restyles becomes a new item. */
 function timeline(slide: Slide) {
 	const byKey = new Map<string, Entry[]>();
 	slide.states.forEach((state, index) => {
-		for (const item of state.items) {
+		for (const [order, item] of state.items.entries()) {
 			const anchor = item.box;
 			const look = appearanceOf(item);
 			const candidates = byKey.get(item.key) ?? [];
@@ -951,8 +1004,10 @@ function timeline(slide: Slide) {
 				(candidate) =>
 					!candidate.states.has(index) &&
 					candidate.look === look &&
-					(["h", "w", "x", "y"] as const).every(
-						(side) => Math.abs(candidate.anchor[side] - anchor[side]) < 1.5,
+					(["height", "width", "x", "y"] as const).every(
+						(side) =>
+							Math.abs(candidate.anchor[side] - anchor[side]) <
+							SAME_PLACE_TOLERANCE,
 					),
 			);
 			if (!entry) {
@@ -960,7 +1015,7 @@ function timeline(slide: Slide) {
 					anchor,
 					item,
 					look,
-					order: item.order + index * 0.001,
+					order: order + index * LATER_STATE_ORDER,
 					states: new Set(),
 				};
 				candidates.push(entry);
@@ -968,7 +1023,6 @@ function timeline(slide: Slide) {
 			}
 
 			entry.states.add(index);
-			// Hidden list items can sit out of place (v-click's hidden transform, for one).
 			if (
 				item.kind === "list" &&
 				entry.item.kind === "list" &&
@@ -983,7 +1037,7 @@ function timeline(slide: Slide) {
 				));
 				item.paragraphs.forEach((paragraph, paragraphIndex) => {
 					if (paragraph.visible) {
-						sets[paragraphIndex]?.add(index);
+						sets[paragraphIndex].add(index);
 					}
 				});
 			}
@@ -992,8 +1046,8 @@ function timeline(slide: Slide) {
 	return [...byKey.values()].flat().sort((a, b) => a.order - b.order);
 }
 
-/** A readable, unique name for PowerPoint's Selection Pane, cut at a word if it's long. */
-function uniqueName(item: Item, used: Set<string>) {
+/** An item's text, or what it's labeled as, on one line. */
+function plainText(item: Item) {
 	const text =
 		item.kind === "image"
 			? item.alt || (item.label ?? "")
@@ -1002,6 +1056,15 @@ function uniqueName(item: Item, used: Set<string>) {
 						.map(({ runs }) => runs.map((run) => run.text).join(""))
 						.join(" ")
 				: (item.label ?? "");
+	return withoutControlCharacters(text)
+		.replace(/\p{Cf}/gu, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/** A readable, unique name for PowerPoint's Selection Pane, cut at a word if it's long. */
+function uniqueName(item: Item, used: Set<string>) {
+	const text = plainText(item);
 	const label = (
 		{
 			box: "Box",
@@ -1014,11 +1077,11 @@ function uniqueName(item: Item, used: Set<string>) {
 			text: "Text",
 		} satisfies Record<Item["kind"], string>
 	)[item.kind];
-	const full = withoutControlCharacters(`${label}${text ? `: ${text}` : ""}`)
-		.replace(/\p{Cf}/gu, "")
-		.replace(/\s+/g, " ")
-		.trim();
-	const cut = truncate(full, NAME_LENGTH);
+	const full = text ? `${label}: ${text}` : label;
+	const cut = [...graphemes.segment(full)]
+		.slice(0, NAME_LENGTH)
+		.map(({ segment }) => segment)
+		.join("");
 	const space = cut.lastIndexOf(" ");
 	const base =
 		cut === full
@@ -1053,41 +1116,151 @@ function colorsOf(deck: Deck) {
 	return colors;
 }
 
-function mostUsed(runs: Run[], property: (run: Run) => string) {
-	const usage = new Map<string, number>();
-	for (const run of runs) {
-		const value = property(run);
-		usage.set(value, (usage.get(value) ?? 0) + run.text.length);
+/** Values by how much they're used, most first; ties keep their first use's order. */
+function ranked<T, Value>(
+	items: T[],
+	value: (item: T) => undefined | Value,
+	weight: (item: T) => number = () => 1,
+) {
+	const usage = new Map<Value, number>();
+	for (const item of items) {
+		const key = value(item);
+		if (key !== undefined) {
+			usage.set(key, (usage.get(key) ?? 0) + weight(item));
+		}
 	}
 
-	return [...usage].sort(([, a], [, b]) => b - a).at(0)?.[0];
+	return [...usage].sort(([, a], [, b]) => b - a).map(([key]) => key);
 }
 
-/** The deck's most used text and link colors, and its most used body and heading fonts, by characters. */
-function themeOf(deck: Deck) {
-	const texts = deck.slides.flatMap(({ states }) =>
-		states.flatMap(({ items }) =>
-			items.flatMap((item) =>
-				item.kind === "list" || item.kind === "text" ? [item] : [],
-			),
-		),
+const characters = (run: Run) => run.text.length;
+
+/** The deck's theme: its most used colors, fonts, body text, and title look. */
+function themeOf(
+	deck: Deck,
+	patches: SlidePatch[],
+	monospace: string,
+	points: Units["points"],
+): Theme {
+	const items = deck.slides.flatMap(({ states }) =>
+		states.flatMap((state) => state.items),
 	);
-	const runsOf = (items: (ListItem | TextItem)[]) =>
-		items.flatMap(({ paragraphs }) =>
+	const isHeading = (item: Item) => item.kind === "text" && item.heading;
+	const texts = items.filter(
+		(item) => item.kind === "list" || item.kind === "text",
+	);
+	const body = texts.filter((item) => !isHeading(item));
+	const runsOf = (textItems: (ListItem | TextItem)[]) =>
+		textItems.flatMap(({ paragraphs }) =>
 			paragraphs.flatMap(({ runs }) => runs.filter((run) => !run.pad)),
 		);
 	const runs = runsOf(texts);
-	const headings = texts.filter((item) => item.kind === "text" && item.heading);
+	const bodyRuns = runsOf(body);
+	const text = ranked(runs, (run) => run.color, characters).at(0) ?? "000000";
+	const minorFont = ranked(bodyRuns, (run) => run.font, characters).at(0);
+	const title = titleLookOf(patches);
 	return {
-		bodyFont: mostUsed(
-			runsOf(texts.filter((item) => !headings.includes(item))),
-			(run) => run.font,
+		accents: accentsOf(
+			items,
+			new Set(
+				[deck.background.color, text, title?.color].flatMap((color) =>
+					color ? [color.toUpperCase()] : [],
+				),
+			),
 		),
-		headingFont: mostUsed(runsOf(headings), (run) => run.font),
-		link: mostUsed(
+		background: deck.background.color,
+		bodyLineSpacing: ranked(
+			body.flatMap(({ paragraphs, style }) =>
+				paragraphs.map(({ runs: paragraphRuns }) => ({
+					lineHeight: style.lineHeight,
+					runs: paragraphRuns,
+				})),
+			),
+			({ lineHeight, runs: paragraphRuns }) =>
+				paragraphRuns.length
+					? spacingPercent(lineSpacingOf(lineHeight, baseSizeOf(paragraphRuns)))
+					: undefined,
+			({ runs: paragraphRuns }) =>
+				paragraphRuns.reduce((sum, run) => sum + characters(run), 0),
+		).at(0),
+		bodySize: ranked(
+			bodyRuns.filter((run) => !run.script),
+			(run) => Math.round(fontSizeOf(points(run.size)) * 100),
+			characters,
+		).at(0),
+		fonts: [
+			...new Set([
+				...items.flatMap((item) =>
+					"paragraphs" in item
+						? item.paragraphs.flatMap(({ runs: paragraphRuns }) =>
+								paragraphRuns.map((run) => run.font),
+							)
+						: [],
+				),
+				monospace,
+			]),
+		].sort(),
+		link: ranked(
 			runs.filter((run) => run.href),
 			(run) => run.color,
-		),
-		text: mostUsed(runs, (run) => run.color),
+			characters,
+		).at(0),
+		majorFont:
+			ranked(runsOf(texts.filter(isHeading)), (run) => run.font, characters).at(
+				0,
+			) ?? minorFont,
+		minorFont,
+		name: deck.title,
+		text,
+		title,
 	};
+}
+
+/** The slides' most common title style, at its most common place (the topmost, when places tie). */
+function titleLookOf(patches: SlidePatch[]) {
+	const styleOf = ({
+		align,
+		color,
+		cx,
+		font,
+		lineSpacing,
+		size,
+		x,
+	}: TitleLook) =>
+		JSON.stringify([align, color, cx, font, lineSpacing, size, x]);
+	const looks = patches.flatMap(({ title }) => (title ? [title.look] : []));
+	const style = ranked(looks, styleOf).at(0);
+	const group = looks.filter((look) => styleOf(look) === style);
+	const y = ranked(
+		group.toSorted((a, b) => a.y - b.y),
+		(look) => look.y,
+	).at(0);
+	return group.find((look) => look.y === y);
+}
+
+/** The colors the deck uses most for shapes, borders, markers, and text, other than its text and background colors. */
+function accentsOf(items: Item[], excluded: Set<string>) {
+	const uses = items.flatMap((item) => {
+		const solid = (
+			paint:
+				undefined | { color: string; gradient?: unknown; transparency: number },
+		) =>
+			paint && !paint.gradient && paint.transparency < 50 ? [paint.color] : [];
+		return [
+			...("fill" in item ? solid(item.fill) : []),
+			...("border" in item ? solid(item.border) : []),
+			...(item.kind === "list" && item.bulletColor ? [item.bulletColor] : []),
+			...("paragraphs" in item
+				? new Set(
+						item.paragraphs.flatMap(({ runs }) =>
+							runs.flatMap((run) => solid(run)),
+						),
+					)
+				: []),
+		].map((color) => color.toUpperCase());
+	});
+	return ranked(
+		uses.filter((color) => !excluded.has(color)),
+		(color) => color,
+	).slice(0, 6);
 }

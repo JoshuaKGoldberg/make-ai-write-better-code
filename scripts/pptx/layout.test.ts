@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { createAssets, imageSize } from "./assets.ts";
 import { createCascade } from "./cascade.ts";
-import { createLayout } from "./layout.ts";
+import { createLayout, ID } from "./layout.ts";
 
 const canvas = { height: 300, width: 400 };
 const sheets = [`p { font-family: "Fixture Sans"; margin: 0 }`];
@@ -79,10 +79,67 @@ describe(createLayout, () => {
 		expect(mismatches).toEqual([]);
 	});
 
+	it("lays out an element when an inline declaration is invalid", async () => {
+		const { runs } = await layOut(
+			`<p style="height: tall; color: red">kept</p>`,
+		);
+
+		expect([...runs.values()]).toEqual([
+			expect.objectContaining({
+				runs: [expect.objectContaining({ text: "kept" })],
+			}),
+		]);
+	});
+
+	it("lays out a slide when an image has no source", async () => {
+		const { mismatches, runs } = await layOut(`<p>kept</p><img alt="">`);
+
+		expect({ mismatches, runs: [...runs.values()] }).toEqual({
+			mismatches: [],
+			runs: [
+				expect.objectContaining({
+					runs: [expect.objectContaining({ text: "kept" })],
+				}),
+			],
+		});
+	});
+
+	it("measures an inline image's own box when text precedes it", async () => {
+		const { boxes, document, mismatches } = await layOut(
+			`<p><b>Bold</b> <img src='${red}'></p>`,
+		);
+		const boxOf = (selector: string) =>
+			boxes.get(document.querySelector(selector)?.getAttribute(ID) ?? "");
+
+		expect({ bold: boxOf("b"), image: boxOf("img"), mismatches }).toEqual({
+			bold: undefined,
+			image: expect.objectContaining({ height: 20, width: 30 }),
+			mismatches: [],
+		});
+	});
+
+	it("lays out a table's rows when they aren't in a row group", async () => {
+		const { mismatches, runs } = await layOut(
+			`<p style="display: inline-table"><span style="display: table-row">a</span><span style="display: table-row">b</span></p>`,
+		);
+
+		expect({ mismatches, runs: [...runs.values()] }).toEqual({
+			mismatches: [],
+			runs: [
+				expect.objectContaining({
+					runs: [expect.objectContaining({ text: "a" })],
+				}),
+				expect.objectContaining({
+					runs: [expect.objectContaining({ text: "b" })],
+				}),
+			],
+		});
+	});
+
 	it("renders an image to a PNG at twice its size", async () => {
 		const png = (await layout.toPng("/shape.svg")) ?? Buffer.alloc(0);
 
-		expect(imageSize(png)).toEqual({ h: 160, w: 240 });
+		expect(imageSize(png)).toEqual({ height: 160, width: 240 });
 	});
 
 	it("averages a PNG's color", async () => {

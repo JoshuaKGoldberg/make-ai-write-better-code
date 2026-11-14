@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { useSlideContext } from "@slidev/client";
-
-defineOptions({ render: () => null });
+import { useClickTarget } from "./clicks.ts";
 
 const props = defineProps({
 	size: { default: 1, type: [String, Number] },
 });
 
-const { $clicksContext: clicks } = useSlideContext();
-const delta = Number(props.size);
-clicks.register(Symbol("click-gap"), {
-	delta,
-	max: clicks.currentOffset + delta - 1,
+const delta = Number.isNaN(Number(props.size)) ? 1 : Number(props.size);
+const target = useClickTarget((clicks, element) => {
+	clicks.register(element, { delta, max: clicks.currentOffset + delta - 1 });
+	element.remove();
 });
 </script>
+
+<template>
+	<span v-bind="target" />
+</template>

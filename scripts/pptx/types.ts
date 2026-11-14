@@ -1,17 +1,15 @@
 export interface BuildPptxOptions {
-	/** The color scheme to export in; defaults to the deck's `colorSchema` (light unless it's "dark"). */
-	colorScheme?: "dark" | "light";
-	/** The Slidev entry, relative to `root`; defaults to "slides.md". */
+	/** Whether to export in dark mode; defaults to whether the deck's `colorSchema` is "dark". */
+	dark?: boolean;
+	/** The deck's Markdown entry, relative to the working directory; defaults to "slides.md". */
 	entry?: string;
 	/** The .pptx file to write. */
-	out: string;
-	/** The deck's directory; defaults to the working directory. */
-	root?: string;
-	/** Whether to write one static slide per click state instead of animating clicks, for comparing against Slidev's renders. */
-	slidePerClick?: boolean;
-	/** Only these slide numbers (1-based). */
-	slides?: number[];
-	/** A directory to keep intermediate files in: the model and rendered images. Defaults to a temporary directory, removed once built. */
+	output: string;
+	/** The slides to build, as a Slidev range such as "1,4-6"; defaults to all of them. */
+	range?: string;
+	/** Whether to write one static slide per click state instead of animating clicks. */
+	withClicks?: boolean;
+	/** A directory to keep intermediate files in: the model, rendered images, and Vite's cache. Defaults to a temporary directory, removed once built. */
 	work?: string;
 }
 
@@ -20,12 +18,14 @@ export interface BuildPptxProblem {
 	/** The click state it happened in, when it's specific to one. */
 	click?: number;
 	message: string;
-	/** The 1-based slide number. */
-	slide: number;
+	/** "error" when content is missing from the PowerPoint, or "warning" when it's there but may look different. */
+	severity: "error" | "warning";
+	/** The 1-based slide number, when it's specific to one slide. */
+	slide?: number;
 }
 
 export interface BuildPptxResult {
 	problems: BuildPptxProblem[];
-	/** How many PowerPoint slides were written: one per Slidev slide, or one per click state with `slidePerClick`. */
+	/** How many PowerPoint slides were written: one per Slidev slide, or one per click state with `withClicks`. */
 	slides: number;
 }

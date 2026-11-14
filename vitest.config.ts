@@ -4,6 +4,7 @@ export default defineConfig({
 	test: {
 		clearMocks: true,
 		coverage: {
+			exclude: ["scripts/pptx/bin.ts", "scripts/pptx/ssr/**"],
 			include: ["scripts/**/*.ts", "src/**/*.ts"],
 			reporter: ["html", "lcov"],
 		},

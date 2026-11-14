@@ -13,7 +13,9 @@ export function declarationsOf(children: csstree.List<csstree.CssNode>) {
 		if (node.type === "Declaration") {
 			declarations.push({
 				important: Boolean(node.important),
-				property: node.property.toLowerCase(),
+				property: node.property.startsWith("--")
+					? node.property
+					: node.property.toLowerCase(),
 				value: (node.value.type === "Raw"
 					? withoutComments(node.value.value)
 					: csstree.generate(node.value)
@@ -36,7 +38,7 @@ export function parseDeclarations(css: string) {
 }
 
 /** Splits a value on a separator outside parentheses and strings, trimming parts and dropping empty ones. " " splits on any whitespace. */
-export function splitTopLevel(value: string, separator: " " | "," | "/" | ";") {
+export function splitTopLevel(value: string, separator: " " | "," | "/") {
 	const parts: string[] = [];
 	let depth = 0;
 	let quote = "";
@@ -91,10 +93,9 @@ export function unquote(value: string) {
 	return value.trim().replace(/^(["'])(.*)\1$/s, "$2");
 }
 
-/** A raw CSS value without its comments, like the hex note UnoCSS writes after a color. */
 function withoutComments(value: string) {
 	return value.replace(
 		/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\/\*[\s\S]*?\*\//g,
-		(match, quoted?: string) => quoted ?? "",
+		(_, quoted?: string) => quoted ?? "",
 	);
 }

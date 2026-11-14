@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { useSlideContext } from "@slidev/client";
 import {
 	CLASS_VCLICK_CURRENT,
 	CLASS_VCLICK_DISPLAY_NONE,
 	CLASS_VCLICK_PRIOR,
 	CLASS_VCLICK_TARGET,
+	CLICKS_MAX,
 } from "@slidev/client/constants.ts";
 import { useSlots } from "vue";
+
+import { useClickTarget } from "./clicks.ts";
 
 const props = defineProps({
 	at: { default: "+1", type: [Number, String] },
@@ -17,42 +19,53 @@ const props = defineProps({
 });
 
 const contents = [];
-let nextStart;
+let lastStart;
 for (const [range, slot] of Object.entries(useSlots()).sort(
-	([a], [b]) => parseInt(b) - parseInt(a),
+	([a], [b]) => -a.split("-")[0] + +b.split("-")[0],
 )) {
-	const [start, end = nextStart ?? start + 1] = range.split("-").map(Number);
-	contents.unshift({ end, slot, start });
-	nextStart = start;
+	if (Number.isFinite(+range)) {
+		contents.unshift({ end: lastStart ?? +range + 1, slot, start: +range });
+		lastStart = +range;
+	} else {
+		const [start, end] = range.split("-").map(Number);
+		if (!Number.isFinite(start) || !Number.isFinite(end)) {
+			throw new TypeError(`Invalid range for v-switch: ${range}`);
+		}
+
+		contents.unshift({ end, slot, start });
+		lastStart = start;
+	}
 }
 
-const { $clicksContext: clicks } = useSlideContext();
-const info = clicks.calculateSince(
-	props.at,
-	Math.max(...contents.map(({ end }) => end)) - 1,
-);
-clicks.register(Symbol("v-switch"), info);
-const offset = info ? info.currentOffset.value + 1 : Infinity;
-const shown = contents
-	.map((content) => ({
-		...content,
-		visible: content.start <= offset && offset < content.end,
-	}))
-	.filter(({ visible }) => visible || !props.unmount);
+const target = useClickTarget((clicks, element) => {
+	const info = clicks.calculateSince(
+		props.at,
+		Math.max(...contents.map(({ end }) => end)) - 1,
+	);
+	clicks.register(element, info);
+	const offset = info ? info.currentOffset.value + 1 : CLICKS_MAX;
+	for (const [index, child] of [...element.children].entries()) {
+		const { end, start } = contents[index];
+		const visible = start <= offset && offset < end;
+		if (props.unmount && !visible) {
+			child.remove();
+			continue;
+		}
+
+		child.classList.add(CLASS_VCLICK_TARGET);
+		child.classList.toggle(CLASS_VCLICK_CURRENT, offset === start);
+		child.classList.toggle(CLASS_VCLICK_PRIOR, offset >= end);
+		child.classList.toggle(CLASS_VCLICK_DISPLAY_NONE, !visible);
+	}
+});
 </script>
 
 <template>
-	<component :is="tag">
+	<component :is="tag" v-bind="target">
 		<component
 			:is="childTag"
-			v-for="{ end, slot, start, visible } in shown"
+			v-for="{ end, slot, start } in contents"
 			:key="start"
-			:class="[
-				CLASS_VCLICK_TARGET,
-				offset === start && CLASS_VCLICK_CURRENT,
-				offset >= end && CLASS_VCLICK_PRIOR,
-				!visible && CLASS_VCLICK_DISPLAY_NONE,
-			]"
 			:data-slidev-clicks-start="start"
 			:data-slidev-clicks-end="end"
 		>

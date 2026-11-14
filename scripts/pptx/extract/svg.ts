@@ -1,12 +1,22 @@
 import type { Color } from "../color.ts";
 import type { Fill, Gradient, Point, TextStyle } from "../model.ts";
 import type { ExtractContext } from "./context.ts";
+import type { Size } from "./geometry.ts";
 
 import { MIN_VISIBLE_ALPHA, parseColor, transparencyOf } from "../color.ts";
-import { MIN_OPACITY } from "./context.ts";
+import { availableWidthOf } from "./boxes.ts";
+import { MIN_OPACITY, pathOf } from "./context.ts";
 import { geometryOf } from "./geometry.ts";
 import { rasterItem } from "./images.ts";
-import { runStyle } from "./text.ts";
+import { runStyle } from "./runs.ts";
+
+/** An SVG shape being drawn: its box in slide px, and the scale from its SVG's units to them. */
+interface DrawnShape {
+	box: Size;
+	scale: number;
+	shape: Element;
+	svg: Element;
+}
 
 type Paint = Color & { gradient?: Gradient };
 
@@ -48,21 +58,21 @@ export function svgItems(context: ExtractContext, svg: Element) {
 	}
 
 	const shapes = [...svg.querySelectorAll("*")];
-	if (!shapes.every((shape) => isNative(context, shape))) {
+	const { box, rotation } = geometryOf(laidOut);
+	if (rotation || !shapes.every((shape) => isNative(context, shape))) {
 		rasterItem(context, svg);
 		return;
 	}
 
-	const { box } = geometryOf(laidOut);
 	const [viewX, viewY, viewWidth, viewHeight] = (
 		svg.getAttribute("viewBox") ??
-		`0 0 ${String(laidOut.w)} ${String(laidOut.h)}`
+		`0 0 ${String(laidOut.width)} ${String(laidOut.height)}`
 	)
 		.split(/[\s,]+/)
 		.map(Number);
-	const scale = Math.min(box.w / viewWidth, box.h / viewHeight);
-	const originX = box.x + (box.w - viewWidth * scale) / 2 - viewX * scale;
-	const originY = box.y + (box.h - viewHeight * scale) / 2 - viewY * scale;
+	const scale = Math.min(box.width / viewWidth, box.height / viewHeight);
+	const originX = box.x + (box.width - viewWidth * scale) / 2 - viewX * scale;
+	const originY = box.y + (box.height - viewHeight * scale) / 2 - viewY * scale;
 	const toSlide = (x: number, y: number): Point => ({
 		x: originX + x * scale,
 		y: originY + y * scale,
@@ -72,12 +82,10 @@ export function svgItems(context: ExtractContext, svg: Element) {
 
 	for (const shape of shapes) {
 		const opacity = context.opacityOf(shape);
-		if (opacity < MIN_OPACITY) {
+		if (opacity < MIN_OPACITY || shape.closest("defs")) {
 			continue;
 		}
 
-		const key = context.pathOf(shape);
-		const label = shapeLabelOf(context, shape);
 		switch (shape.localName) {
 			case "circle":
 			case "ellipse": {
@@ -86,17 +94,18 @@ export function svgItems(context: ExtractContext, svg: Element) {
 					numberOf(shape, shape.localName === "circle" ? "r" : "rx") * scale;
 				const radiusY =
 					numberOf(shape, shape.localName === "circle" ? "r" : "ry") * scale;
-				context.push({
-					...shapePaint(context, svg, shape, opacity, scale),
-					box: {
-						h: radiusY * 2,
-						w: radiusX * 2,
-						x: center.x - radiusX,
-						y: center.y - radiusY,
-					},
-					key: `${key}#${shape.localName}`,
+				const box = {
+					height: radiusY * 2,
+					width: radiusX * 2,
+					x: center.x - radiusX,
+					y: center.y - radiusY,
+				};
+				context.push(shape, {
+					...shapePaint(context, { box, scale, shape, svg }, opacity),
+					box,
+					key: `${pathOf(shape)}#${shape.localName}`,
 					kind: "ellipse",
-					label,
+					label: shapeLabelOf(context, shape),
 				});
 				break;
 			}
@@ -115,23 +124,24 @@ export function svgItems(context: ExtractContext, svg: Element) {
 				const ys = points.map((point) => point.y);
 				const x = Math.min(...xs);
 				const y = Math.min(...ys);
-				context.push({
-					...shapePaint(context, svg, shape, opacity, scale),
-					box: { h: Math.max(...ys) - y, w: Math.max(...xs) - x, x, y },
-					key: `${key}#polygon`,
+				const box = {
+					height: Math.max(...ys) - y,
+					width: Math.max(...xs) - x,
+					x,
+					y,
+				};
+				context.push(shape, {
+					...shapePaint(context, { box, scale, shape, svg }, opacity),
+					box,
+					key: `${pathOf(shape)}#polygon`,
 					kind: "polygon",
-					label,
+					label: shapeLabelOf(context, shape),
 					points: points.map((point) => ({ x: point.x - x, y: point.y - y })),
 				});
 				break;
 			}
 
 			case "text": {
-				const fill = paintOf(context, svg, shape, "fill");
-				if (!fill) {
-					break;
-				}
-
 				const style = context.styleOf(shape);
 				const size = parseFloat(style["font-size"]) * scale;
 				const text = shape.textContent.trim();
@@ -146,20 +156,28 @@ export function svgItems(context: ExtractContext, svg: Element) {
 					SVG_TEXT.minWidth,
 					text.length * size * SVG_TEXT.characterWidth,
 				);
-				context.push({
+				const x =
+					align === "center"
+						? at.x - width / 2
+						: align === "right"
+							? at.x - width
+							: at.x;
+				const box = {
+					height: size * SVG_TEXT.lineHeight,
+					width,
+					x,
+					y: baseline - size * SVG_TEXT.ascent,
+				};
+				const fill = paintOf(context, { box, shape, svg }, "fill");
+				if (!fill) {
+					break;
+				}
+
+				context.push(shape, {
 					baselines: [baseline],
-					box: {
-						h: size * SVG_TEXT.lineHeight,
-						w: width,
-						x:
-							align === "center"
-								? at.x - width / 2
-								: align === "right"
-									? at.x - width
-									: at.x,
-						y: baseline - size * SVG_TEXT.ascent,
-					},
-					key: `${key}#svgtext:${text}`,
+					box,
+					heading: false,
+					key: `${pathOf(shape)}#svgtext:${text}`,
 					kind: "text",
 					paragraphs: [
 						{
@@ -177,6 +195,7 @@ export function svgItems(context: ExtractContext, svg: Element) {
 					rotation: 0,
 					style: {
 						align,
+						availableWidth: availableWidthOf(context, shape, x),
 						lineHeight: size * SVG_TEXT.lineHeight,
 						nowrap: true,
 					},
@@ -202,24 +221,21 @@ function isNative(context: ExtractContext, element: Element) {
 	);
 }
 
-/** A shape's fill or stroke: a color, or a gradient it references. */
 function paintOf(
 	context: ExtractContext,
-	svg: Element,
-	shape: Element,
+	{ box, shape, svg }: Omit<DrawnShape, "scale">,
 	property: "fill" | "stroke",
 ): Paint | undefined {
 	const style = context.styleOf(shape);
 	const value = style[property];
 	const id = /url\(\s*["']?#([^"')\s]+)["']?\s*\)/.exec(value)?.[1];
 	if (id) {
-		return svgGradient(context, svg, id);
+		return svgGradient(context, svg, id, box);
 	}
 
 	return value === "none" ? undefined : parseColor(value, style.color);
 }
 
-/** An SVG shape's label: its own class (like "bug"), else its drawing's label. */
 function shapeLabelOf(context: ExtractContext, shape: Element) {
 	return (
 		[
@@ -229,16 +245,13 @@ function shapeLabelOf(context: ExtractContext, shape: Element) {
 	);
 }
 
-/** A shape's fill and border, faded by its opacity. */
 function shapePaint(
 	context: ExtractContext,
-	svg: Element,
-	shape: Element,
+	drawn: DrawnShape,
 	opacity: number,
-	scale: number,
 ) {
-	const fill = paintOf(context, svg, shape, "fill");
-	const stroke = paintOf(context, svg, shape, "stroke");
+	const fill = paintOf(context, drawn, "fill");
+	const stroke = paintOf(context, drawn, "stroke");
 	return {
 		border:
 			stroke && stroke.alpha > MIN_VISIBLE_ALPHA
@@ -247,9 +260,9 @@ function shapePaint(
 						transparency: transparencyOf(stroke.alpha, opacity),
 						width:
 							context.resolve(
-								shape,
-								context.styleOf(shape)["stroke-width"] ?? "1",
-							) * scale,
+								drawn.shape,
+								context.styleOf(drawn.shape)["stroke-width"] ?? "1",
+							) * drawn.scale,
 					}
 				: undefined,
 		fill:
@@ -269,21 +282,27 @@ function shapePaint(
 }
 
 /** A gradient an SVG shape references, averaged to a color for consumers without gradients. */
-function svgGradient(context: ExtractContext, svg: Element, id: string) {
+function svgGradient(
+	context: ExtractContext,
+	svg: Element,
+	id: string,
+	{ height, width }: Size,
+) {
 	const gradient = svg.querySelector(`[id="${id}"]`);
 	if (!gradient) {
 		return undefined;
 	}
 
-	const stops = [...gradient.querySelectorAll("stop")].map((stop) => {
+	const stops = [...gradient.querySelectorAll("stop")].flatMap((stop) => {
 		const style = context.styleOf(stop);
-		const color = parseColor(style["stop-color"] ?? "black", style.color) ?? {
-			alpha: 1,
-			hex: "000000",
-		};
+		const color = parseColor(style["stop-color"] ?? "black", style.color);
+		if (!color) {
+			return [];
+		}
+
 		const offset = stop.getAttribute("offset") ?? "0";
 		return {
-			hex: color.hex,
+			color: color.hex,
 			position: parseFloat(offset) * (offset.includes("%") ? 1 : 100),
 			transparency: transparencyOf(
 				color.alpha,
@@ -303,10 +322,14 @@ function svgGradient(context: ExtractContext, svg: Element, id: string) {
 		return Number.isFinite(parsed) ? parsed : fallback;
 	};
 
+	const [unitWidth, unitHeight] =
+		gradient.getAttribute("gradientUnits") === "userSpaceOnUse"
+			? [1, 1]
+			: [width, height];
 	const angle =
 		(Math.atan2(
-			coordinate("y2", 0) - coordinate("y1", 0),
-			coordinate("x2", 1) - coordinate("x1", 0),
+			(coordinate("y2", 0) - coordinate("y1", 0)) * unitWidth,
+			(coordinate("x2", 1) - coordinate("x1", 0)) * unitHeight,
 		) *
 			180) /
 			Math.PI +
@@ -314,7 +337,7 @@ function svgGradient(context: ExtractContext, svg: Element, id: string) {
 	const average = (index: number) =>
 		Math.round(
 			stops.reduce(
-				(sum, stop) => sum + parseInt(stop.hex.slice(index, index + 2), 16),
+				(sum, stop) => sum + parseInt(stop.color.slice(index, index + 2), 16),
 				0,
 			) / stops.length,
 		);

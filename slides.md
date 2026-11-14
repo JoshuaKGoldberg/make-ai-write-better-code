@@ -2044,15 +2044,15 @@ layout: default
   <li v-click>Rolled it out at Sentry: it found hundreds of improvements</li>
 </ul>
 
-<p class="protip" v-click>Writing custom lint rules? Review them with github.com/JoshuaKGoldberg/lint-rule-review-skill</p>
+<div class="cards protip" v-click><div>Writing custom lint rules? Review them with github.com/JoshuaKGoldberg/lint-rule-review-skill</div></div>
 
 <style>
 .protip {
-  background: var(--jg-card-bg);
-  border: 1px solid var(--jg-hairline);
-  border-radius: var(--jg-card-radius);
-  box-shadow: var(--jg-glow);
-  margin-top: 2rem;
+  margin: 2rem 0 0.5rem;
+}
+
+.protip > div {
+  border-color: var(--jg-hairline);
   padding: 1rem 1.5rem;
 }
 </style>

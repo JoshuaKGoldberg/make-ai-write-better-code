@@ -1,8 +1,3 @@
-/**
- * CSS color parsing: hex, named colors, rgb(), hsl(), hwb(), lab(), lch(), oklab(),
- * oklch(), color(), and color-mix(), each resolved to sRGB hex and an alpha; and
- * the linear gradients and shadows built from them.
- */
 import type { Gradient, Shadow } from "./model.ts";
 
 import { splitTopLevel } from "./css.ts";
@@ -16,7 +11,6 @@ export interface Color {
 
 type Matrix = [Vector, Vector, Vector];
 
-/** A color as gamma-encoded sRGB channels (unclipped, so mixes keep wide-gamut values) and alpha. */
 interface Rgba {
 	alpha: number;
 	b: number;
@@ -24,10 +18,8 @@ interface Rgba {
 	r: number;
 }
 
-/** A color space color-mix() can interpolate in. */
 interface Space {
 	from: (coordinates: Vector, alpha: number) => Rgba;
-	/** The index of the coordinate that's a hue, if any. */
 	hueIndex?: number;
 	to: (color: Rgba) => Vector;
 }
@@ -69,6 +61,11 @@ const P3_TO_XYZ: Matrix = [
 	[0.2289745640697488, 0.6917385218365064, 0.079286914093745],
 	[0, 0.04511338185890264, 1.043944368900976],
 ];
+const XYZ_TO_P3: Matrix = [
+	[2.493496911941425, -0.9313836179191239, -0.40271078445071684],
+	[-0.8294889695615747, 1.7626640603183463, 0.023624685841943577],
+	[0.03584583024378447, -0.07617238926804182, 0.9568845240076872],
+];
 const OKLAB_TO_LMS: Matrix = [
 	[1, 0.3963377774, 0.2158037573],
 	[1, -0.1055613458, -0.0638541728],
@@ -102,24 +99,25 @@ const HUE_UNITS: Partial<Record<string, number>> = {
 };
 
 const ANGLE = /^-?[\d.]+(?:deg|grad|rad|turn)$/;
+const COLOR_HINT = /^(?:[-+.\d]|calc\()/;
 const GRADIENT = /^(?:repeating-)?(?:conic|linear|radial)-gradient\(/;
 const SIDE_ANGLES: Partial<Record<string, number>> = {
 	"to bottom": 180,
+	"to bottom left": 225,
+	"to bottom right": 135,
 	"to left": 270,
+	"to left bottom": 225,
+	"to left top": 315,
 	"to right": 90,
+	"to right bottom": 135,
+	"to right top": 45,
 	"to top": 0,
+	"to top left": 315,
+	"to top right": 45,
 };
 
 /** Below this alpha, paint can't be seen. */
 export const MIN_VISIBLE_ALPHA = 0.004;
-
-const PREDEFINED_SPACES = new Set([
-	"srgb",
-	"srgb-linear",
-	"xyz",
-	"xyz-d50",
-	"xyz-d65",
-]);
 
 const mapVector = (
 	vector: Vector,
@@ -171,7 +169,22 @@ const toPolar = ([lightness, a, b]: Vector): Vector => [
 	((Math.atan2(b, a) * 180) / Math.PI + 360) % 360,
 ];
 
-function fromHsl([hue, saturation, lightness]: Vector, alpha: number): Rgba {
+const XYZ_D50: Space = {
+	from: (xyz, alpha) =>
+		fromLinearRgb(
+			multiply(XYZ_TO_LINEAR_SRGB, multiply(D50_TO_D65, xyz)),
+			alpha,
+		),
+	to: (color) =>
+		multiply(D65_TO_D50, multiply(LINEAR_SRGB_TO_XYZ, linearRgbOf(color))),
+};
+
+const XYZ_D65: Space = {
+	from: (xyz, alpha) => fromLinearRgb(multiply(XYZ_TO_LINEAR_SRGB, xyz), alpha),
+	to: (color) => multiply(LINEAR_SRGB_TO_XYZ, linearRgbOf(color)),
+};
+
+function fromHsl([hue, saturation, lightness]: Vector, alpha: number) {
 	const chroma = saturation * Math.min(lightness, 1 - lightness);
 	const channel = (offset: number) => {
 		const position = (offset + hue / 30) % 12;
@@ -183,7 +196,7 @@ function fromHsl([hue, saturation, lightness]: Vector, alpha: number): Rgba {
 	return { alpha, b: channel(4), g: channel(8), r: channel(0) };
 }
 
-function fromHwb([hue, whiteness, blackness]: Vector, alpha: number): Rgba {
+function fromHwb([hue, whiteness, blackness]: Vector, alpha: number) {
 	if (whiteness + blackness >= 1) {
 		const gray = whiteness / (whiteness + blackness);
 		return { alpha, b: gray, g: gray, r: gray };
@@ -206,10 +219,7 @@ function fromLab([lightness, a, b]: Vector, alpha: number) {
 		(fz ** 3 > LAB_EPSILON ? fz ** 3 : (116 * fz - 16) / LAB_KAPPA) *
 			D50_WHITE[2],
 	];
-	return fromLinearRgb(
-		multiply(XYZ_TO_LINEAR_SRGB, multiply(D50_TO_D65, xyz)),
-		alpha,
-	);
+	return XYZ_D50.from(xyz, alpha);
 }
 
 function fromOklab(oklab: Vector, alpha: number) {
@@ -243,9 +253,8 @@ function toHsl({ b, g, r }: Rgba): Vector {
 function toLab(color: Rgba) {
 	const f = (value: number) =>
 		value > LAB_EPSILON ? Math.cbrt(value) : (LAB_KAPPA * value + 16) / 116;
-	const [x, y, z] = mapVector(
-		multiply(D65_TO_D50, multiply(LINEAR_SRGB_TO_XYZ, linearRgbOf(color))),
-		(value, index) => f(value / D50_WHITE[index]),
+	const [x, y, z] = mapVector(XYZ_D50.to(color), (value, index) =>
+		f(value / D50_WHITE[index]),
 	);
 	return [116 * y - 16, 500 * (x - y), 200 * (y - z)] satisfies Vector;
 }
@@ -257,12 +266,25 @@ function toOklab(color: Rgba) {
 	);
 }
 
-const XYZ_D65: Space = {
-	from: (xyz, alpha) => fromLinearRgb(multiply(XYZ_TO_LINEAR_SRGB, xyz), alpha),
-	to: (color) => multiply(LINEAR_SRGB_TO_XYZ, linearRgbOf(color)),
+const PREDEFINED_SPACES: Partial<Record<string, Space>> = {
+	"display-p3": {
+		from: (rgb, alpha) =>
+			XYZ_D65.from(multiply(P3_TO_XYZ, mapVector(rgb, toLinear)), alpha),
+		to: (color) =>
+			mapVector(multiply(XYZ_TO_P3, XYZ_D65.to(color)), fromLinear),
+	},
+	srgb: {
+		from: ([r, g, b], alpha) => ({ alpha, b, g, r }),
+		to: ({ b, g, r }) => [r, g, b],
+	},
+	"srgb-linear": { from: fromLinearRgb, to: linearRgbOf },
+	xyz: XYZ_D65,
+	"xyz-d50": XYZ_D50,
+	"xyz-d65": XYZ_D65,
 };
 
 const SPACES: Partial<Record<string, Space>> = {
+	...PREDEFINED_SPACES,
 	hsl: { from: fromHsl, hueIndex: 0, to: toHsl },
 	hwb: {
 		from: fromHwb,
@@ -285,25 +307,9 @@ const SPACES: Partial<Record<string, Space>> = {
 		hueIndex: 2,
 		to: (color) => toPolar(toOklab(color)),
 	},
-	srgb: {
-		from: ([r, g, b], alpha) => ({ alpha, b, g, r }),
-		to: ({ b, g, r }) => [r, g, b],
-	},
-	"srgb-linear": { from: fromLinearRgb, to: linearRgbOf },
-	xyz: XYZ_D65,
-	"xyz-d50": {
-		from: (xyz, alpha) =>
-			fromLinearRgb(
-				multiply(XYZ_TO_LINEAR_SRGB, multiply(D50_TO_D65, xyz)),
-				alpha,
-			),
-		to: (color) =>
-			multiply(D65_TO_D50, multiply(LINEAR_SRGB_TO_XYZ, linearRgbOf(color))),
-	},
-	"xyz-d65": XYZ_D65,
 };
 
-/** Parses a CSS color into a hex string and alpha, or undefined for transparent, none, or unsupported values. */
+/** Parses a CSS color into a hex string and alpha, or undefined for none or unsupported values. */
 export function parseColor(value: string | undefined, current?: string) {
 	const rgba = value
 		? parseRgba(normalize(value), current && normalize(current))
@@ -333,11 +339,8 @@ export const isGradient = (image: string) => GRADIENT.test(image);
 export const hasVisibleStop = ({ stops }: Gradient) =>
 	stops.some((stop) => stop.transparency < transparencyOf(MIN_VISIBLE_ALPHA));
 
-/** Parses one `linear-gradient()`, faded by an opacity, or undefined for any other image or more than one. */
-export function parseLinearGradient(
-	image: string,
-	opacity: number,
-): Gradient | undefined {
+/** Parses one `linear-gradient()`, faded by an opacity, or undefined for any other image, more than one, or an invalid one. */
+export function parseLinearGradient(image: string, opacity: number) {
 	const body = /^linear-gradient\((.*)\)$/s.exec(image.trim())?.[1];
 	if (body === undefined || splitTopLevel(image, ",").length > 1) {
 		return undefined;
@@ -345,26 +348,35 @@ export function parseLinearGradient(
 
 	const [direction = "", ...rest] = splitTopLevel(body, ",");
 	const sideAngle = direction.startsWith("to ")
-		? (SIDE_ANGLES[direction] ?? 180)
+		? (SIDE_ANGLES[direction.replace(/\s+/g, " ")] ?? 180)
 		: undefined;
-	const angle = ANGLE.test(direction) ? hueOf(direction) : sideAngle;
-	const stops = angle === undefined ? [direction, ...rest] : rest;
-	return {
-		angle: angle ?? 180,
-		stops: stops.map((stop, index) => {
-			const [color = "", ...positions] = splitTopLevel(stop, " ");
-			const position = positions.find((part) => part.endsWith("%"));
-			const { alpha, hex } = parseColor(color) ?? { alpha: 0, hex: "000000" };
-			return {
-				hex,
-				position:
-					position === undefined
-						? (index / Math.max(1, stops.length - 1)) * 100
-						: parseFloat(position),
-				transparency: transparencyOf(alpha, opacity),
-			};
-		}),
-	};
+	const angle = ANGLE.test(direction) ? degreesOf(direction) : sideAngle;
+	const stops = (angle === undefined ? [direction, ...rest] : rest)
+		.map((stop) => splitTopLevel(stop, " "))
+		.filter((parts) => parts.length > 1 || !COLOR_HINT.test(parts[0] ?? ""))
+		.flatMap(([color = "", ...positions]) => {
+			const percentages = positions
+				.filter((part) => part.endsWith("%"))
+				.map(parseFloat);
+			return (percentages.length ? percentages : [undefined]).map(
+				(position) => ({ color: parseColor(color), position }),
+			);
+		});
+	const positions = spreadPositions(stops.map(({ position }) => position));
+	const parsed = stops.flatMap(({ color }, index) =>
+		color
+			? [
+					{
+						color: color.hex,
+						position: positions[index],
+						transparency: transparencyOf(color.alpha, opacity),
+					},
+				]
+			: [],
+	);
+	return parsed.length === stops.length
+		? ({ angle: angle ?? 180, stops: parsed } satisfies Gradient)
+		: undefined;
 }
 
 /** Parses the first layer of a `text-shadow`, resolving its lengths with `toPixels`. */
@@ -372,7 +384,7 @@ export function parseShadow(
 	value: string,
 	toPixels: (length: string) => number,
 	current: string,
-): Shadow | undefined {
+) {
 	const [layer = ""] = splitTopLevel(value, ",");
 	const parts = splitTopLevel(layer, " ");
 	const lengths = parts.filter((part) => /^(?:[-+.\d]|calc\()/.test(part));
@@ -391,18 +403,17 @@ export function parseShadow(
 		offsetX,
 		offsetY,
 		transparency: transparencyOf(color.alpha),
-	};
+	} satisfies Shadow;
 }
 
-function hueOf(part: string) {
+function degreesOf(part: string) {
 	return part === "none"
 		? 0
 		: parseFloat(part) * (HUE_UNITS[/[a-z]*$/.exec(part)?.[0] ?? ""] ?? NaN);
 }
 
-/** Resolves `color-mix()`, interpolating with premultiplied alpha. */
-function mix(args: string[], current: string | undefined) {
-	const [method = "", ...colors] = args;
+function mix(parts: string[], current: string | undefined) {
+	const [method = "", ...colors] = parts;
 	const space = SPACES[/^in\s+([\w-]+)/.exec(method)?.[1] ?? "oklab"];
 	const [first, second] = colors.map((part) => {
 		const tokens = splitTopLevel(part, " ");
@@ -410,7 +421,6 @@ function mix(args: string[], current: string | undefined) {
 		const color = parseRgba(
 			tokens.filter((_, index) => index !== percentIndex).join(" "),
 			current,
-			true,
 		);
 		return (
 			color && {
@@ -463,7 +473,7 @@ function normalize(value: string) {
 	return value.trim().toLowerCase();
 }
 
-function parseHex(digits: string): Rgba {
+function parseHex(digits: string) {
 	const full =
 		digits.length <= 4
 			? digits.replace(/./g, (digit) => digit + digit)
@@ -481,15 +491,14 @@ function parseHex(digits: string): Rgba {
 function parseRgba(
 	text: string,
 	current: string | undefined,
-	transparentIsColor = false,
 ): Rgba | undefined {
 	if (text === "transparent") {
-		return transparentIsColor ? { alpha: 0, b: 0, g: 0, r: 0 } : undefined;
+		return { alpha: 0, b: 0, g: 0, r: 0 };
 	}
 
 	if (text === "currentcolor") {
 		return current && current !== "currentcolor"
-			? parseRgba(current, undefined, transparentIsColor)
+			? parseRgba(current, undefined)
 			: undefined;
 	}
 
@@ -545,23 +554,13 @@ function parseRgba(
 				number(second, 1),
 				number(third, 1),
 			];
-			return space === "display-p3"
-				? fromLinearRgb(
-						multiply(
-							XYZ_TO_LINEAR_SRGB,
-							multiply(P3_TO_XYZ, mapVector(coordinates, toLinear)),
-						),
-						alpha,
-					)
-				: PREDEFINED_SPACES.has(space)
-					? SPACES[space]?.from(coordinates, alpha)
-					: undefined;
+			return PREDEFINED_SPACES[space]?.from(coordinates, alpha);
 		}
 		case "hsl":
 		case "hsla":
 		case "hwb":
 			return (name === "hwb" ? fromHwb : fromHsl)(
-				[hueOf(first), number(second, 100) / 100, number(third, 100) / 100],
+				[degreesOf(first), number(second, 100) / 100, number(third, 100) / 100],
 				alpha,
 			);
 		case "lab":
@@ -571,7 +570,7 @@ function parseRgba(
 			);
 		case "lch":
 			return fromLab(
-				fromPolar([number(first, 100), number(second, 150), hueOf(third)]),
+				fromPolar([number(first, 100), number(second, 150), degreesOf(third)]),
 				alpha,
 			);
 		case "oklab":
@@ -581,7 +580,7 @@ function parseRgba(
 			);
 		case "oklch":
 			return fromOklab(
-				fromPolar([number(first, 1), number(second, 0.4), hueOf(third)]),
+				fromPolar([number(first, 1), number(second, 0.4), degreesOf(third)]),
 				alpha,
 			);
 		case "rgb":
@@ -595,4 +594,29 @@ function parseRgba(
 		default:
 			return undefined;
 	}
+}
+
+function spreadPositions(positions: (number | undefined)[]) {
+	let floor = -Infinity;
+	const known = positions.map((position, index) => {
+		const fixed =
+			position ??
+			(index === 0 ? 0 : index === positions.length - 1 ? 100 : undefined);
+		return fixed === undefined ? undefined : (floor = Math.max(floor, fixed));
+	});
+	return known.map((position, index) => {
+		if (position !== undefined) {
+			return position;
+		}
+
+		const previous = known.findLastIndex(
+			(other, otherIndex) => otherIndex < index && other !== undefined,
+		);
+		const next = known.findIndex(
+			(other, otherIndex) => otherIndex > index && other !== undefined,
+		);
+		const from = known[previous] ?? 0;
+		const to = known[next] ?? 100;
+		return from + ((to - from) * (index - previous)) / (next - previous);
+	});
 }

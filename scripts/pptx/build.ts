@@ -1,7 +1,4 @@
-/**
- * Builds a native PowerPoint deck from a Slidev deck, with no browser:
- * render (Vite SSR) → lay out (takumi + a static cascade) → extract items → write .pptx.
- */
+import { parseRangeString } from "@slidev/parser/core";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -18,18 +15,21 @@ import type {
 	BuildPptxResult,
 } from "./types.ts";
 
-import { createAssets } from "./assets.ts";
+import { createAssets, isNativeImage } from "./assets.ts";
 import { createCascade } from "./cascade.ts";
-import { extractState, isNativeImage } from "./extract.ts";
+import { extractState } from "./extract.ts";
 import { createFontBook } from "./fonts.ts";
 import { createLayout } from "./layout.ts";
-import { createSlideRenderer } from "./render.ts";
+import {
+	createSlideRenderer,
+	resolveDeck,
+	staticGlobalBottomLayers,
+} from "./render.ts";
 import { transitionInto } from "./transitions.ts";
 import { writePptx } from "./write.ts";
 
 type Layout = ReturnType<typeof createLayout>;
 
-/** A slide on its way to the model: rendered, styled, then prepared for layout. */
 interface PreparedSlide {
 	css: Css;
 	number: number;
@@ -37,17 +37,24 @@ interface PreparedSlide {
 	states: Prepared[];
 }
 
+type Report = (problem: BuildPptxProblem) => void;
+
+/** A problem with the options passed to {@link buildPptx}. */
+export class BuildPptxError extends Error {
+	override name = "BuildPptxError";
+}
+
 export async function buildPptx({
 	work,
 	...options
 }: BuildPptxOptions): Promise<BuildPptxResult> {
 	if (work) {
-		return build(options, path.resolve(work), true);
+		return build(options, path.resolve(work));
 	}
 
 	const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "slidev-pptx-"));
 	try {
-		return await build(options, temporary, false);
+		return await build(options, temporary);
 	} finally {
 		await fs.rm(temporary, { force: true, recursive: true });
 	}
@@ -55,27 +62,40 @@ export async function buildPptx({
 
 async function build(
 	{
-		colorScheme,
+		dark,
 		entry = "slides.md",
-		out,
-		root = process.cwd(),
-		slidePerClick = false,
-		slides: selected,
+		output,
+		range,
+		withClicks = false,
 	}: Omit<BuildPptxOptions, "work">,
 	work: string,
-	keepModel: boolean,
 ) {
+	const deck = await resolveDeck(path.resolve(entry));
+	const { config, slides: deckSlides } = deck.data;
+	const numbers = slideNumbersOf(range, deckSlides.length);
 	await fs.mkdir(path.join(work, "rasters"), { recursive: true });
-	const renderer = await createSlideRenderer(path.resolve(root, entry));
+	const renderer = await createSlideRenderer(deck, path.join(work, "vite"));
 	try {
-		const { config } = renderer;
-		const numbers = slideNumbersOf(selected, renderer.slides.length);
+		const problems: BuildPptxProblem[] = [];
+		const report: Report = (problem) => {
+			if (
+				!problems.some(
+					(existing) =>
+						existing.slide === problem.slide &&
+						existing.click === problem.click &&
+						existing.message === problem.message,
+				)
+			) {
+				problems.push(problem);
+			}
+		};
+
 		const canvas: Canvas = {
 			height: Math.ceil(config.canvasWidth / config.aspectRatio),
 			width: config.canvasWidth,
 		};
-		const scheme =
-			colorScheme ?? (config.colorSchema === "dark" ? "dark" : "light");
+		const colorScheme =
+			(dark ?? config.colorSchema === "dark") ? "dark" : "light";
 		const assets = createAssets({
 			publicDir: renderer.publicDir,
 			root: renderer.root,
@@ -83,158 +103,146 @@ async function build(
 		});
 
 		// Render every slide first, so UnoCSS has seen every class before its CSS is collected.
-		const rendered: RenderedSlide[] = [];
-		for (const number of numbers) {
-			rendered.push(await renderer.renderSlide(number));
-		}
+		const rendered = await eachSlide(
+			numbers.map((number) => ({ number })),
+			report,
+			async ({ number }) => {
+				const slide = await renderer.renderSlide(number);
+				for (const message of slide.problems) {
+					report({ message, severity: "warning", slide: number });
+				}
+
+				return { rendered: slide };
+			},
+		);
 
 		const globalCss = await renderer.globalCss();
-		const styled = [];
-		for (const [index, number] of numbers.entries()) {
+		const styled = await eachSlide(rendered, report, async ({ number }) => {
 			const sheets = [...globalCss, ...(await renderer.slideCss(number))];
-			styled.push({
+			return {
 				css: {
-					rules: createCascade(sheets, {
-						colorScheme: scheme,
-						viewport: canvas,
-					}),
+					rules: createCascade(sheets, { colorScheme, viewport: canvas }),
 					sheets,
 				},
-				number,
-				rendered: rendered[index],
-			});
-		}
+			};
+		});
 
 		const fonts = createFontBook({
 			assets,
 			fonts: config.fonts,
-			sheets: styled.flatMap(({ css }) => css.sheets),
+			sheets: [...new Set(styled.flatMap(({ css }) => css.sheets))],
 		});
-		const layout = createLayout({ assets, canvas, colorScheme: scheme });
-		const staticLayers = await renderer.staticGlobalBottomLayers();
+		const layout = createLayout({ assets, canvas, colorScheme });
+		const staticLayers = staticGlobalBottomLayers(
+			styled.map(({ rendered }) => rendered.globalBottom),
+		);
 
 		// Style every state first, so the fonts their text uses load before any layout.
-		const slides: PreparedSlide[] = styled.map((slide) => {
-			const options = {
-				globalBottom: slide.rendered.globalBottom,
-				globalTop: slide.rendered.globalTop,
-				staticLayers,
-				zoom: Number(slide.rendered.frontmatter.zoom ?? 1),
-			};
-			return {
-				...slide,
+		const prepared: PreparedSlide[] = await eachSlide(
+			styled,
+			report,
+			(slide) => ({
 				states: slide.rendered.states.map((html) =>
-					layout.prepare(slide.number, html, slide.css, options),
+					layout.prepare(slide.number, html, slide.css, {
+						globalBottom: slide.rendered.globalBottom,
+						globalTop: slide.rendered.globalTop,
+						staticLayers,
+						zoom: slide.rendered.zoom,
+					}),
 				),
-			};
-		});
+			}),
+		);
+		const first = prepared.at(0);
+		if (!first) {
+			return { problems, slides: 0 };
+		}
+
 		await layout.registerFonts(
 			await fonts.load(
 				new Set(
-					slides.flatMap(({ states }) =>
+					prepared.flatMap(({ states }) =>
 						states.flatMap((state) => [...state.fontStacks]),
 					),
 				),
 			),
 		);
 
-		const exporter = createStateExporter({
+		const extractor = createStateExtractor({
 			assets,
 			canvas,
 			fonts,
 			layout,
+			report,
 			work,
 		});
-		const deckSlides = [];
-		for (const slide of slides) {
-			const states = [];
-			for (const [clicks, state] of slide.states.entries()) {
-				states.push({
+		const extracted = await eachSlide(prepared, report, async (slide) => {
+			const items = [];
+			for (const [index, state] of slide.states.entries()) {
+				const clicks = slide.rendered.clicksStart + index;
+				items.push({
 					clicks,
-					items: await exporter.exportState(slide, clicks, state),
+					items: await extractor.extract(slide, clicks, state),
 				});
 			}
 
-			deckSlides.push({
-				notes: slide.rendered.note.trim(),
-				number: slide.number,
-				states,
-				transition: transitionInto(slide.number, renderer.slides, config),
+			return { items };
+		});
+
+		const deckModel: Deck = {
+			aspectRatio: config.aspectRatio,
+			author: config.author,
+			background: await writeBackground(layout, first, staticLayers, work),
+			canvas,
+			slides: numbers.map((number) => ({
+				notes: (deckSlides[number - 1].note ?? "").trim(),
+				number,
+				states: extracted.find((slide) => slide.number === number)?.items ?? [
+					{ clicks: 0, items: [] },
+				],
+				transition: transitionInto(number, deckSlides, config),
+			})),
+			title: config.title,
+		};
+		await fs.writeFile(
+			path.join(work, "model.json"),
+			JSON.stringify(deckModel),
+		);
+
+		const written = await writePptx({
+			deck: deckModel,
+			fonts,
+			out: output,
+			slidePerClick: withClicks,
+		});
+		for (const family of await fonts.missingFamilies()) {
+			report({
+				message: `Couldn't find the font ${family}, so its text uses a fallback font.`,
+				severity: "warning",
 			});
 		}
 
-		const deck: Deck = {
-			aspectRatio: config.aspectRatio,
-			author: config.author,
-			background: await writeBackground(layout, slides[0], staticLayers, work),
-			canvas,
-			slides: deckSlides,
-			title: config.title,
-		};
-		if (keepModel) {
-			await fs.writeFile(path.join(work, "model.json"), JSON.stringify(deck));
-		}
-
-		const { slides: written } = await writePptx({
-			deck,
-			fonts,
-			out,
-			slidePerClick,
-		});
-		return { problems: exporter.problems, slides: written };
+		written.problems.forEach(report);
+		return { problems, slides: written.slides };
 	} finally {
 		await renderer.close();
 	}
 }
 
-/** The slides to build, in deck order. */
-function slideNumbersOf(selected: number[] | undefined, count: number) {
-	const all = Array.from({ length: count }, (_, index) => index + 1);
-	if (!selected) {
-		return all;
-	}
-
-	const invalid = selected.filter(
-		(number) => !Number.isInteger(number) || number < 1 || number > count,
-	);
-	if (!selected.length || invalid.length) {
-		throw new Error(
-			`Slides must be numbers from 1 to ${String(count)}; got ${selected.length ? invalid.join(", ") : "none"}.`,
-		);
-	}
-
-	return all.filter((number) => selected.includes(number));
-}
-
-/** Lays out and extracts slide states, rendering what PowerPoint can't draw, and collects their problems. */
-function createStateExporter({
+function createStateExtractor({
 	assets,
 	canvas,
 	fonts,
 	layout,
+	report,
 	work,
 }: {
 	assets: Assets;
 	canvas: Canvas;
 	fonts: FontBook;
 	layout: Layout;
+	report: Report;
 	work: string;
 }) {
-	const problems: BuildPptxProblem[] = [];
-	const report = (problem: BuildPptxProblem) => {
-		if (
-			!problems.some(
-				(existing) =>
-					existing.slide === problem.slide &&
-					existing.click === problem.click &&
-					existing.message === problem.message,
-			)
-		) {
-			problems.push(problem);
-		}
-	};
-
-	// PowerPoint can't show some formats (like SVG and WebP); they become PNGs.
 	const viewable = new Map<string, Promise<string | undefined>>();
 	const viewableFile = (image: ImageItem) => {
 		let file = viewable.get(image.src);
@@ -253,24 +261,21 @@ function createStateExporter({
 		return file;
 	};
 
-	async function exportState(
-		slide: PreparedSlide,
-		click: number,
-		state: Prepared,
-	) {
+	async function extract(slide: PreparedSlide, click: number, state: Prepared) {
 		const laidOut = await layout.layoutState(state, slide.css);
 		for (const mismatch of laidOut.mismatches) {
 			const element = laidOut.byId.get(mismatch.id);
 			report({
 				click,
 				message: `<${element?.tagName.toLowerCase() ?? "?"}> has ${String(mismatch.children)} children but takumi measured ${String(mismatch.measured)}: ${(element?.textContent ?? "").trim().slice(0, 60)}`,
+				severity: "warning",
 				slide: slide.number,
 			});
 		}
 
 		const extracted = extractState(laidOut, { assets, canvas, fonts });
 		for (const message of extracted.problems) {
-			report({ message, slide: slide.number });
+			report({ message, severity: "error", slide: slide.number });
 		}
 
 		const items: Item[] = [];
@@ -284,6 +289,7 @@ function createStateExporter({
 					report({
 						click,
 						message: `Couldn't rasterize ${selector}.`,
+						severity: "error",
 						slide: slide.number,
 					});
 				}
@@ -294,6 +300,7 @@ function createStateExporter({
 				} else {
 					report({
 						message: `Couldn't convert ${item.src} to PNG.`,
+						severity: "error",
 						slide: slide.number,
 					});
 				}
@@ -305,10 +312,51 @@ function createStateExporter({
 		return items;
 	}
 
-	return { exportState, problems };
+	return { extract };
 }
 
-/** Renders the slide background, and finds its average color for the theme. */
+async function eachSlide<
+	Built extends { number: number },
+	Stage extends object,
+>(
+	slides: Built[],
+	report: Report,
+	run: (slide: Built) => Promise<Stage> | Stage,
+) {
+	const succeeded: (Built & Stage)[] = [];
+	for (const slide of slides) {
+		let stage: Stage;
+		try {
+			stage = await run(slide);
+		} catch (error) {
+			report({
+				message: `Couldn't build the slide: ${error instanceof Error ? error.message : String(error)}`,
+				severity: "error",
+				slide: slide.number,
+			});
+			continue;
+		}
+
+		succeeded.push({ ...slide, ...stage });
+	}
+
+	return succeeded;
+}
+
+function slideNumbersOf(range: string | undefined, count: number) {
+	const numbers = parseRangeString(count, range);
+	if (
+		!numbers.length ||
+		numbers.some((number) => !Number.isInteger(number) || number < 1)
+	) {
+		throw new BuildPptxError(
+			`Range "${range ?? "all"}" must select slides from 1 to ${String(count)}.`,
+		);
+	}
+
+	return numbers;
+}
+
 async function writeBackground(
 	layout: Layout,
 	first: PreparedSlide,
@@ -324,7 +372,6 @@ async function writeBackground(
 	return { color: await layout.averageColor(png), file };
 }
 
-/** Writes a rendered PNG, named by content so identical renders share one file (and one shape). */
 async function writePng(work: string, png: Buffer) {
 	const hash = createHash("sha1").update(png).digest("hex").slice(0, 12);
 	const file = path.join(work, "rasters", `${hash}.png`);

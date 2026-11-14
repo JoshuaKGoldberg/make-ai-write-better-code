@@ -42,6 +42,7 @@ describe(parseColor, () => {
 		["color-mix(in srgb, red, blue 25%)", "bf0040"],
 		["color-mix(in hsl, hsl(350 100% 50%), hsl(30 100% 50%))", "ff2b00"],
 		["color-mix(in oklch, red, blue)", "ba00c2"],
+		["color-mix(in display-p3, red, blue)", "800a91"],
 	])("mixes %s", (value, hex) => {
 		expect(parseColor(value)).toEqual({ alpha: 1, hex });
 	});
@@ -65,12 +66,14 @@ describe(parseColor, () => {
 		});
 	});
 
-	it("keeps fully transparent colors' alpha", () => {
-		expect(parseColor("rgba(0, 0, 0, 0)")).toEqual({ alpha: 0, hex: "000000" });
-	});
+	it.each(["rgba(0, 0, 0, 0)", "transparent", "Transparent"])(
+		"parses %s as transparent black",
+		(value) => {
+			expect(parseColor(value)).toEqual({ alpha: 0, hex: "000000" });
+		},
+	);
 
 	it.each([
-		"transparent",
 		"none",
 		"",
 		"rgb(from red r g b)",
@@ -101,8 +104,8 @@ describe(parseLinearGradient, () => {
 		expect(parseLinearGradient("linear-gradient(red, blue)", 1)).toEqual({
 			angle: 180,
 			stops: [
-				{ hex: "ff0000", position: 0, transparency: 0 },
-				{ hex: "0000ff", position: 100, transparency: 0 },
+				{ color: "ff0000", position: 0, transparency: 0 },
+				{ color: "0000ff", position: 100, transparency: 0 },
 			],
 		});
 	});
@@ -113,10 +116,55 @@ describe(parseLinearGradient, () => {
 		).toEqual({
 			angle: 90,
 			stops: [
-				{ hex: "ff0000", position: 20, transparency: 0 },
-				{ hex: "0000ff", position: 80, transparency: 0 },
+				{ color: "ff0000", position: 20, transparency: 0 },
+				{ color: "0000ff", position: 80, transparency: 0 },
 			],
 		});
+	});
+
+	it.each([
+		["to top right", 45],
+		["to bottom right", 135],
+		["to left  bottom", 225],
+		["to top left", 315],
+	])("approximates a corner's angle when it's %s", (direction, angle) => {
+		expect(
+			parseLinearGradient(`linear-gradient(${direction}, red, blue)`, 1)?.angle,
+		).toBe(angle);
+	});
+
+	it("spaces stops without positions between their neighbors' positions", () => {
+		expect(
+			parseLinearGradient("linear-gradient(red 0%, lime, blue 20%)", 1)?.stops,
+		).toEqual([
+			{ color: "ff0000", position: 0, transparency: 0 },
+			{ color: "00ff00", position: 10, transparency: 0 },
+			{ color: "0000ff", position: 20, transparency: 0 },
+		]);
+	});
+
+	it("keeps positions in order when a later stop's is smaller", () => {
+		expect(
+			parseLinearGradient("linear-gradient(red 50%, blue 20%)", 1)?.stops,
+		).toEqual([
+			{ color: "ff0000", position: 50, transparency: 0 },
+			{ color: "0000ff", position: 50, transparency: 0 },
+		]);
+	});
+
+	it("drops color hints", () => {
+		expect(
+			parseLinearGradient("linear-gradient(red, 30%, blue)", 1)?.stops,
+		).toEqual([
+			{ color: "ff0000", position: 0, transparency: 0 },
+			{ color: "0000ff", position: 100, transparency: 0 },
+		]);
+	});
+
+	it("fades a transparent stop", () => {
+		expect(
+			parseLinearGradient("linear-gradient(transparent, red)", 1)?.stops[0],
+		).toEqual({ color: "000000", position: 0, transparency: 100 });
 	});
 
 	it("converts an angle when it's in turns", () => {
@@ -125,10 +173,14 @@ describe(parseLinearGradient, () => {
 		).toBe(90);
 	});
 
-	it("keeps a stop's color when it has two positions", () => {
+	it("makes two stops when a stop has two positions", () => {
 		expect(
-			parseLinearGradient("linear-gradient(red 0% 50%, blue)", 1)?.stops[0],
-		).toEqual({ hex: "ff0000", position: 0, transparency: 0 });
+			parseLinearGradient("linear-gradient(red 0% 50%, blue)", 1)?.stops,
+		).toEqual([
+			{ color: "ff0000", position: 0, transparency: 0 },
+			{ color: "ff0000", position: 50, transparency: 0 },
+			{ color: "0000ff", position: 100, transparency: 0 },
+		]);
 	});
 
 	it("fades stops by an opacity", () => {
@@ -136,8 +188,8 @@ describe(parseLinearGradient, () => {
 			parseLinearGradient("linear-gradient(rgb(255 0 0 / 50%), blue)", 0.5)
 				?.stops,
 		).toEqual([
-			{ hex: "ff0000", position: 0, transparency: 75 },
-			{ hex: "0000ff", position: 100, transparency: 50 },
+			{ color: "ff0000", position: 0, transparency: 75 },
+			{ color: "0000ff", position: 100, transparency: 50 },
 		]);
 	});
 
@@ -145,6 +197,7 @@ describe(parseLinearGradient, () => {
 		"repeating-linear-gradient(red, blue 10%)",
 		"radial-gradient(red, blue)",
 		"linear-gradient(red, blue), linear-gradient(green, blue)",
+		"linear-gradient(red, nonsense, blue)",
 	])("returns undefined for %j", (image) => {
 		expect(parseLinearGradient(image, 1)).toBeUndefined();
 	});
