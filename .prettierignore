@@ -5,4 +5,5 @@
 /pnpm-lock.yaml
 # Prettier's blank-line padding breaks Slidev's --- slide separators
 /slides.md
+/scripts/pptx/fixture/slides.md
 /research

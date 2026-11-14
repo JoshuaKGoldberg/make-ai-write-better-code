@@ -71,7 +71,7 @@ export default defineConfig(
 		},
 	},
 	{
-		files: ["slides.md"],
+		files: ["**/slides.md"],
 		rules: {
 			// Each slide in a Slidev deck gets its own top-level heading.
 			"markdown/no-multiple-h1": "off",

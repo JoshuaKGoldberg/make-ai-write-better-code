@@ -1,7 +1,7 @@
 /**
  * The intermediate model between layout and PowerPoint writing: every slide's
  * click states, each a flat list of positioned, styled items in slide pixels
- * (a 980x552 canvas).
+ * (CSS px on the deck's canvas).
  */
 
 export interface Box {
@@ -20,6 +20,12 @@ export interface BoxItem extends ItemBase {
 	rotation: number;
 }
 
+/** A size in CSS px. */
+export interface Canvas {
+	height: number;
+	width: number;
+}
+
 export interface CodeItem extends ItemBase {
 	baselines: number[];
 	box: Box;
@@ -29,6 +35,10 @@ export interface CodeItem extends ItemBase {
 }
 
 export interface Deck {
+	/** The canvas slides lay out on, as Slidev renders them (its height rounded up to whole px). */
+	canvas: Canvas;
+	/** The PowerPoint slide, in canvas px: the canvas at the deck's exact aspect ratio. */
+	page: Canvas;
 	slides: Record<number, Slide>;
 	total: number;
 }
@@ -61,8 +71,13 @@ export interface GradientStop {
 
 export interface ImageItem extends ItemBase {
 	alt: string;
+	/** The visible frame. */
 	box: Box;
 	circle: boolean;
+	/** Where the whole image is drawn, when the frame shows only part of it (object-fit: cover, background images). */
+	crop?: Box;
+	/** The image file. */
+	file: string;
 	kind: "image";
 	radius: number;
 	src: string;
@@ -93,6 +108,8 @@ export interface ListItem extends ItemBase {
 	bulletColor?: string;
 	indent: number;
 	kind: "list";
+	/** The items' CSS list-style-type, like "disc", "decimal", or a quoted string. */
+	marker: string;
 	paragraphs: ListParagraph[];
 	rotation: number;
 	style: TextStyle;
@@ -102,6 +119,8 @@ export interface ListParagraph extends Paragraph {
 	baselines: number[];
 	bullet: boolean;
 	key: string;
+	/** The item's ordinal, for numbered markers. */
+	number: number;
 	visible: boolean;
 }
 
@@ -173,6 +192,8 @@ export interface Slide {
 	clicksTotal: number;
 	no: number;
 	states: SlideState[];
+	/** The Slidev transition into the slide (from the slide before it), if any. */
+	transition?: string;
 }
 
 export interface SlideState {
@@ -208,6 +229,3 @@ export interface TextStyle {
 	 */
 	wrapWidth?: number;
 }
-
-/** The slide canvas Slidev renders at, in CSS px. */
-export const SLIDE = { height: 552, width: 980 };

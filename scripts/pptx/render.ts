@@ -3,42 +3,51 @@
  * Vite (with Slidev's own plugins) compiles each slide module for SSR, and Vue's
  * server renderer renders it inside a Slidev-like click context.
  */
-import type { ClicksContext, SlideInfo } from "@slidev/types";
+import type { ClicksContext, SlideInfo, SlidevConfig } from "@slidev/types";
 import type { App, Component, ObjectDirective } from "vue";
 
 import { createServer, resolveOptions } from "@slidev/cli";
 import { parseRangeString } from "@slidev/parser/core";
 import { renderToString } from "@vue/server-renderer";
 import { parseHTML } from "linkedom";
-import { existsSync } from "node:fs";
 import { createSSRApp, h, reactive, ref } from "vue";
 
 export interface RenderedSlide {
 	frontmatter: Record<string, unknown>;
-	/** The deck's global-bottom.vue layer for this slide, if any. */
+	/** The global-bottom layers (the deck's, its theme's, and its addons') for this slide. */
 	globalBottom: string;
-	/** The deck's global-top.vue layer for this slide, if any. */
+	/** The global-top layers for this slide. */
 	globalTop: string;
 	note: string;
-	/** HTML for each click state, from 0 to `total`. */
+	/** HTML for each click state, from 0 to `total`, inside its slide-bottom and slide-top layers. */
 	states: string[];
 	total: number;
 }
 
 export interface SlideRenderer {
 	close(): Promise<void>;
+	/** Slidev's resolved deck configuration. */
+	config: SlidevConfig;
 	count: number;
 	/** CSS shared by every slide: Slidev's styles, the deck's styles, and UnoCSS utilities. */
 	globalCss(): Promise<string[]>;
+	/** The directory Vite serves at the root as-is. */
+	publicDir: string;
 	renderSlide(no: number): Promise<RenderedSlide>;
+	/** The deck's directory. */
+	root: string;
 	/** CSS a slide's module pulls in: its scoped &lt;style> blocks and its components' styles. */
 	slideCss(no: number): Promise<string[]>;
 	slides: SlideInfo[];
 }
 
-declare global {
-	var __pptxNav: undefined | { currentPage: number; total: number };
-}
+type Layers = Record<
+	"GlobalBottom" | "GlobalTop" | "SlideBottom" | "SlideTop",
+	Component
+>;
+
+/** Slidev's virtual module of the deck's, theme's, and addons' layer components. */
+const LAYERS = "/@slidev/global-layers";
 
 const CLASS = {
 	current: "slidev-vclick-current",
@@ -109,14 +118,11 @@ export async function createSlideRenderer(
 		) => ClicksContext;
 	}>(`${options.clientRoot}/composables/useClicks.ts`);
 
-	const layers: Record<string, Component | undefined> = {};
-	for (const name of ["global-bottom", "global-top"]) {
-		if (existsSync(`${root}/${name}.vue`)) {
-			layers[name] = (
-				await load<{ default: Component }>(`${root}/${name}.vue`)
-			).default;
-		}
-	}
+	const layers = await load<Layers>(LAYERS);
+	// The stand-in (see ssr/useNav.ts), which the alias swaps in for Slidev's.
+	const { useNav } = await load<{ useNav: () => Record<string, unknown> }>(
+		`${options.clientRoot}/composables/useNav.ts`,
+	);
 
 	function createApp(
 		no: number,
@@ -125,12 +131,12 @@ export async function createSlideRenderer(
 		totalOverride?: number,
 	) {
 		const slide = slides[no - 1];
-		globalThis.__pptxNav = { currentPage: no, total: slides.length };
 		const ctx = createClicksContextBase(
 			ref(clicks),
 			0,
 			totalOverride ?? (slide.frontmatter.clicks as number | undefined),
 		);
+		globalThis.__pptxNav = { clicksContext: ctx, no };
 		const ctxRef = ref(ctx);
 		const app: App = createSSRApp({ render: () => h(component) });
 		app.provide("$$slidev-clicks-context", ctxRef);
@@ -143,7 +149,8 @@ export async function createSlideRenderer(
 			"$$slidev-context",
 			reactive({
 				configs: options.data.config,
-				nav: { clicks, currentPage: no, total: slides.length },
+				nav: useNav(),
+				themeConfigs: options.data.config.themeConfig,
 			}),
 		);
 		app.directive("click", clickDirective(ctx, "click"));
@@ -166,7 +173,13 @@ export async function createSlideRenderer(
 			clicks,
 			totalOverride,
 		);
-		const html = highlightCode(await renderToString(app));
+		const content = await renderToString(app);
+		// Slide layers render around each slide's content, in its click state.
+		const html = highlightCode(
+			(await renderLayer(no, layers.SlideBottom, clicks)) +
+				content +
+				(await renderLayer(no, layers.SlideTop, clicks)),
+		);
 		const total =
 			totalOverride ??
 			(slide.frontmatter.clicks as number | undefined) ??
@@ -174,8 +187,8 @@ export async function createSlideRenderer(
 		return { html, total };
 	}
 
-	const renderLayer = async (no: number, component: Component | undefined) =>
-		component ? renderToString(createApp(no, component, 0).app) : "";
+	const renderLayer = (no: number, component: Component, clicks = 0) =>
+		renderToString(createApp(no, component, clicks).app);
 
 	// Walks the client-side import graph from the given modules and returns their CSS,
 	// as Vite serves it (after PostCSS, UnoCSS directives, and Vue scoping).
@@ -233,8 +246,10 @@ export async function createSlideRenderer(
 
 	return {
 		close: () => server.close(),
+		config: options.data.config,
 		count: slides.length,
 		globalCss: () => collectCss([`${options.clientRoot}/styles/index.ts`]),
+		publicDir: server.config.publicDir,
 		async renderSlide(no) {
 			const first = await renderState(no, 0);
 			const states = [first.html];
@@ -244,18 +259,16 @@ export async function createSlideRenderer(
 
 			return {
 				frontmatter: slides[no - 1].frontmatter,
-				globalBottom: await renderLayer(no, layers["global-bottom"]),
-				globalTop: await renderLayer(no, layers["global-top"]),
+				globalBottom: await renderLayer(no, layers.GlobalBottom),
+				globalTop: await renderLayer(no, layers.GlobalTop),
 				note: slides[no - 1].note ?? "",
 				states,
 				total: first.total,
 			};
 		},
+		root,
 		slideCss: (no) =>
-			collectCss([
-				`${options.entry}__slidev_${String(no)}.md`,
-				...Object.keys(layers).map((name) => `${root}/${name}.vue`),
-			]),
+			collectCss([`${options.entry}__slidev_${String(no)}.md`, LAYERS]),
 		slides,
 	};
 }

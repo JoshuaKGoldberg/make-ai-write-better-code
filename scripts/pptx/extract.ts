@@ -4,13 +4,15 @@
  * shapes, and rasters for anything PowerPoint can't represent natively.
  */
 import { createHash } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 
+import type { Assets } from "./assets.ts";
 import type { ComputedStyle } from "./cascade.ts";
+import type { FontBook } from "./fonts.ts";
 import type { LaidOutBox, LaidOutRun, LaidOutRuns, Layout } from "./layout.ts";
 import type {
 	Box,
+	Canvas,
 	Fill,
 	Gradient,
 	Item,
@@ -22,9 +24,10 @@ import type {
 	TextStyle,
 } from "./model.ts";
 
-import { INITIAL_STYLE, parseColor, toPx } from "./cascade.ts";
-import { BACKGROUND_ONLY, ID } from "./layout.ts";
-import { SLIDE } from "./model.ts";
+import { cssUrls, imageFormat, imageSize } from "./assets.ts";
+import { INITIAL_STYLE, toPx } from "./cascade.ts";
+import { parseColor } from "./color.ts";
+import { ID, isBackgroundOnly } from "./layout.ts";
 import { truncate } from "./text.ts";
 
 export interface Raster {
@@ -67,14 +70,8 @@ interface Paint {
 
 type Side = "bottom" | "left" | "right" | "top";
 
-/** Ascent as a fraction of the glyph box takumi reports for a run (ascent + descent). */
-const ASCENT_RATIOS: [RegExp, number][] = [
-	[/league spartan/i, 0.7 / 0.92],
-	[/impact/i, 1.0088 / 1.2197],
-];
-
-/** Menlo's, the monospace font used for code; close enough for most other fonts. */
-const DEFAULT_ASCENT_RATIO = 0.928 / 1.164;
+/** Image formats PowerPoint shows; build.ts converts others to PNG. */
+const NATIVE_FORMATS = new Set(["bmp", "gif", "jpeg", "png"]);
 
 const ALIGNMENTS: Record<string, TextStyle["align"]> = {
 	center: "center",
@@ -84,30 +81,25 @@ const ALIGNMENTS: Record<string, TextStyle["align"]> = {
 	right: "right",
 	start: "left",
 };
-const WEIGHT_NAMES: Record<number, string> = {
-	100: "Thin",
-	200: "ExtraLight",
-	300: "Light",
-	400: "",
-	500: "Medium",
-	600: "SemiBold",
-	700: "Bold",
-	800: "ExtraBold",
-	900: "Black",
-};
-
-/** Menlo's advance, which is also the no-break space width spacer runs build on. */
-const MONO_ADVANCE = 0.602;
-
 /** Elements with more descendants than this render as one image instead of shapes. */
 const DENSE = 400;
 
-const sizes = new Map<string, undefined | { h: number; w: number }>();
+export interface ExtractOptions {
+	/** Loaded images, by the URLs pages use. */
+	assets: Assets;
+	canvas: Canvas;
+	fonts: FontBook;
+	no: number;
+}
+
+/** Whether PowerPoint can show an image file as-is. */
+export const isNativeImage = (data: Buffer) =>
+	NATIVE_FORMATS.has(imageFormat(data) ?? "");
 
 /** Turns a laid-out slide state into model items, plus the elements that need rasterizing. */
 export function extractState(
 	layout: Layout,
-	{ no, publicDir }: { no: number; publicDir: string },
+	{ assets, canvas, fonts, no }: ExtractOptions,
 ): { items: Item[]; rasters: Raster[] } {
 	const { boxes, byId, document, markers, runs, styles } = layout;
 	const items: Item[] = [];
@@ -115,6 +107,11 @@ export function extractState(
 	let order = 0;
 	const push = (item: ItemInput) => {
 		items.push({ ...item, order: order++ });
+	};
+
+	const ascentRatio = (font: string) => {
+		const { ascent, descent } = fonts.metrics(font);
+		return ascent / (ascent + descent);
 	};
 
 	const styleOf = (el: Element): ComputedStyle =>
@@ -283,7 +280,11 @@ export function extractState(
 			color = { a: 1, hex: gradient.stops[0].hex };
 		}
 
-		const font = pptFont(s["font-family"], s["font-weight"]);
+		const { bold, font } = fonts.resolve(
+			s["font-family"],
+			Number(s["font-weight"]),
+			s["font-style"] === "italic",
+		);
 		const stroke = parseFloat(s["-webkit-text-stroke-width"]) || 0;
 		const shadow = /(-?[\d.]+)px\s+(-?[\d.]+)px\s+([\d.]+)px\s+(\S.*)$/.exec(
 			s["text-shadow"],
@@ -291,8 +292,7 @@ export function extractState(
 		const shadowColor = shadow ? parseColor(shadow[4]) : undefined;
 		const href = el.closest("a[href]")?.getAttribute("href") ?? "";
 		return {
-			bold:
-				!font.startsWith("League Spartan") && Number(s["font-weight"]) >= 600,
+			bold,
 			color: color?.hex ?? "ffffff",
 			font,
 			gradient: gradient && {
@@ -385,6 +385,7 @@ export function extractState(
 		const source = sourceText.toLowerCase();
 		let cursor = 0;
 		let newlineRun = false;
+		const spacer = fonts.spacer();
 		for (const run of entry.runs) {
 			const owner = byId.get(run.owner);
 			if (!owner || /^\n+$/.test(run.text)) {
@@ -433,14 +434,14 @@ export function extractState(
 			}
 
 			// Gaps between runs on a line (padding, margins, borders of inline elements) become
-			// spacer runs: a Menlo no-break space widened to the gap with letter-spacing.
+			// spacer runs: a monospaced no-break space widened to the gap with letter-spacing.
 			if (gap > 0.75 && paragraph.length) {
 				paragraph.push({
 					...style,
 					bold: false,
-					font: "Menlo",
+					font: spacer.font,
 					gradient: undefined,
-					letterSpacing: gap - MONO_ADVANCE * style.size,
+					letterSpacing: gap - spacer.advance * style.size,
 					pad: true,
 					stroke: undefined,
 					text: " ",
@@ -525,6 +526,7 @@ export function extractState(
 		if (
 			(!fill || fill.a === 0) &&
 			s["background-image"].startsWith("linear-gradient") &&
+			splitList(s["background-image"]).length === 1 &&
 			!(s["-webkit-background-clip"] ?? s["background-clip"]).includes("text")
 		) {
 			gradient = linearGradient(s["background-image"], opacity);
@@ -699,7 +701,17 @@ export function extractState(
 		const listStyle = styleOf(list)["list-style-type"];
 		let right = -Infinity;
 		const wraps: boolean[] = [];
-		const paragraphs: ListParagraph[] = lis.map((li) => {
+		// Ordinals, as a browser numbers items: from the list's start, or an item's value.
+		const reversed = list.hasAttribute("reversed");
+		let ordinal =
+			Number(list.getAttribute("start") ?? NaN) || (reversed ? lis.length : 1);
+		const numbers = lis.map((li) => {
+			const value = Number(li.getAttribute("value") ?? NaN);
+			const current = Number.isInteger(value) ? value : ordinal;
+			ordinal = current + (reversed ? -1 : 1);
+			return current;
+		});
+		const paragraphs: ListParagraph[] = lis.map((li, index) => {
 			const entry = runs.get(idOf(li));
 			const converted = entry
 				? runsToParagraphs(entry, () => opacity, li)
@@ -718,6 +730,7 @@ export function extractState(
 				bullet:
 					styleOf(li)["list-style-type"] !== "none" && listStyle !== "none",
 				key: `${pathOf(li)}:${liRuns.map((r) => r.text).join("")}`,
+				number: numbers[index],
 				runs: liRuns,
 				visible: opacityOf(li) > 0.05,
 			};
@@ -731,6 +744,7 @@ export function extractState(
 			indent: px(list, "padding-left") * scale,
 			key: `${pathOf(list)}#list`,
 			kind: "list",
+			marker: (first && styleOf(first)["list-style-type"]) ?? listStyle,
 			paragraphs,
 			rotation: 0,
 			style: {
@@ -746,28 +760,46 @@ export function extractState(
 	const imageItem = (img: Element, opacity: number) => {
 		const laidOut = boxOf(img);
 		const src = img.getAttribute("src");
-		if (!laidOut || !src) {
+		const data = src ? assets.get(src) : undefined;
+		const file = src ? assets.save(src) : undefined;
+		if (!laidOut || !src || !data || !file) {
 			return;
 		}
 
 		const { box, scale } = geometry(laidOut);
-		const natural = imageSize(
-			path.join(publicDir, decodeURIComponent(src.replace(/^\//, ""))),
-		);
+		const style = styleOf(img);
+		const natural = imageSize(data);
+		const fit = style["object-fit"];
 		let content = box;
-		if (styleOf(img)["object-fit"] === "contain" && natural) {
+		let crop: Box | undefined;
+		if (natural && fit !== "fill") {
+			// The image's drawn size, positioned in its box by object-position.
 			const ratio = natural.w / natural.h;
-			content =
+			const contain =
 				box.w / box.h > ratio
-					? { ...box, w: box.h * ratio, x: box.x + (box.w - box.h * ratio) / 2 }
-					: {
-							...box,
-							h: box.w / ratio,
-							y: box.y + (box.h - box.w / ratio) / 2,
-						};
+					? { h: box.h, w: box.h * ratio }
+					: { h: box.w / ratio, w: box.w };
+			const cover =
+				box.w / box.h > ratio
+					? { h: box.w / ratio, w: box.w }
+					: { h: box.h, w: box.h * ratio };
+			const own = { h: natural.h * scale, w: natural.w * scale };
+			const size =
+				fit === "contain"
+					? contain
+					: fit === "cover"
+						? cover
+						: fit === "none"
+							? own
+							: own.w > contain.w
+								? contain
+								: own;
+			const drawn = positionIn(box, size, style["object-position"], img);
+			content = intersect(box, drawn);
+			crop = sameBox(content, drawn) ? undefined : drawn;
 		}
 
-		const radiusValue = styleOf(img)["border-top-left-radius"];
+		const radiusValue = style["border-top-left-radius"];
 		const radius = px(img, "border-top-left-radius") * scale;
 		push({
 			alt: img.getAttribute("alt") ?? "",
@@ -775,19 +807,182 @@ export function extractState(
 			circle: radiusValue.endsWith("%")
 				? parseFloat(radiusValue) >= 50
 				: radius >= Math.min(box.w, box.h) / 2 - 1,
+			crop,
+			file,
 			key: `${pathOf(img)}#img:${src}`,
 			kind: "image",
-			label: decodeURIComponent(path.basename(src)),
+			label: src.startsWith("data:")
+				? labelOf(img)
+				: decodeURIComponent(path.basename(src.replace(/[?#].*$/, ""))),
 			radius,
 			src,
 			transparency: Math.round((1 - opacity) * 100),
 		});
 	};
 
+	/** An element's CSS background images and layered gradients, bottom layer first, as images and boxes. */
+	const backgroundItems = (el: Element, opacity: number) => {
+		const s = styleOf(el);
+		const layers = splitList(s["background-image"]);
+		if (
+			layers.length < 2 &&
+			!layers.some((layer) => layer.startsWith("url("))
+		) {
+			return;
+		}
+
+		const laidOut = boxOf(el);
+		if (!laidOut) {
+			return;
+		}
+
+		const { box: border, rotation, scale } = geometry(laidOut);
+		const area: Box = {
+			h:
+				border.h -
+				(px(el, "border-top-width") + px(el, "border-bottom-width")) * scale,
+			w:
+				border.w -
+				(px(el, "border-left-width") + px(el, "border-right-width")) * scale,
+			x: border.x + px(el, "border-left-width") * scale,
+			y: border.y + px(el, "border-top-width") * scale,
+		};
+		const sizes = splitList(s["background-size"]);
+		const positions = splitList(s["background-position"]);
+		const radius = px(el, "border-top-left-radius") * scale;
+		layers.forEach((layer, index) => {
+			const at = (list: string[]) => list[index % list.length] ?? "";
+			const url = layer.startsWith("url(") ? cssUrls(layer)[0] : undefined;
+			if (url) {
+				const data = assets.get(url);
+				const file = assets.save(url);
+				if (!data || !file) {
+					return;
+				}
+
+				const natural = imageSize(data) ?? { h: area.h, w: area.w };
+				const drawn = positionIn(
+					area,
+					backgroundSize(at(sizes), area, natural, el),
+					at(positions),
+					el,
+				);
+				const visible = intersect(border, drawn);
+				if (visible.w <= 0 || visible.h <= 0) {
+					return;
+				}
+
+				push({
+					alt: "",
+					box: visible,
+					circle: false,
+					crop: sameBox(visible, drawn) ? undefined : drawn,
+					file,
+					key: `${pathOf(el)}#background:${url}`,
+					kind: "image",
+					label: `background of ${labelOf(el) ?? "element"}`,
+					radius,
+					src: url,
+					transparency: Math.round((1 - opacity) * 100),
+				});
+			} else if (layer.startsWith("linear-gradient")) {
+				const gradient = linearGradient(layer, opacity);
+				if (!gradient?.stops.some((stop) => (stop.a ?? 1) > 0.004)) {
+					return;
+				}
+
+				push({
+					box: border,
+					fill: {
+						color: gradient.stops[gradient.stops.length - 1].hex,
+						gradient,
+						transparency: 0,
+					},
+					key: `${pathOf(el)}#background-${String(index)}`,
+					kind: "box",
+					label: `background of ${labelOf(el) ?? "element"}`,
+					radius,
+					rotation,
+				});
+			}
+		});
+	};
+
+	/** Where an image of `size` sits in `area`, by a CSS position (object-position or background-position). */
+	const positionIn = (
+		area: Box,
+		size: { h: number; w: number },
+		position: string,
+		el: Element,
+	): Box => {
+		const parts = position.trim().split(/\s+/).filter(Boolean);
+		let horizontal = parts.find((part) => /^(?:left|right)$/.test(part));
+		let vertical = parts.find((part) => /^(?:top|bottom)$/.test(part));
+		const rest = parts.filter(
+			(part) => part !== horizontal && part !== vertical,
+		);
+		horizontal ??= rest.shift() ?? "center";
+		vertical ??= rest.shift() ?? "center";
+		const offset = (value: string, free: number) => {
+			switch (value) {
+				case "bottom":
+				case "right":
+					return free;
+				case "center":
+					return free / 2;
+				case "left":
+				case "top":
+					return 0;
+				default:
+					return toPx(value, px(el, "font-size"), rootFontSize, free, canvas);
+			}
+		};
+
+		return {
+			h: size.h,
+			w: size.w,
+			x: area.x + offset(horizontal, area.w - size.w),
+			y: area.y + offset(vertical, area.h - size.h),
+		};
+	};
+
+	const backgroundSize = (
+		value: string,
+		area: Box,
+		natural: { h: number; w: number },
+		el: Element,
+	) => {
+		const ratio = natural.w / natural.h;
+		const wider = area.w / area.h > ratio;
+		if (value === "cover") {
+			return wider
+				? { h: area.w / ratio, w: area.w }
+				: { h: area.h, w: area.h * ratio };
+		}
+
+		if (value === "contain") {
+			return wider
+				? { h: area.h, w: area.h * ratio }
+				: { h: area.w / ratio, w: area.w };
+		}
+
+		const [width = "auto", height = "auto"] = value.trim().split(/\s+/);
+		const length = (part: string, base: number) =>
+			part === "auto"
+				? undefined
+				: toPx(part, px(el, "font-size"), rootFontSize, base, canvas);
+		const w = length(width, area.w);
+		const h = length(height, area.h);
+		return {
+			h: h ?? (w === undefined ? natural.h : w / ratio),
+			w: w ?? (h === undefined ? natural.w : h * ratio),
+		};
+	};
+
 	// The whole-pixel area covering an element and everything inside it, or the whole
 	// slide when anything is rotated (its unrotated boxes don't bound what it paints).
 	const rasterBox = (el: Element): Box => {
-		const slide = { h: SLIDE.height, w: SLIDE.width, x: 0, y: 0 };
+		const slide = { h: canvas.height, w: canvas.width, x: 0, y: 0 };
 		let left = Infinity;
 		let top = Infinity;
 		let right = -Infinity;
@@ -817,8 +1012,8 @@ export function extractState(
 		const x = Math.max(0, Math.floor(left - margin));
 		const y = Math.max(0, Math.floor(top - margin));
 		return {
-			h: Math.min(SLIDE.height, Math.ceil(bottom + margin)) - y,
-			w: Math.min(SLIDE.width, Math.ceil(right + margin)) - x,
+			h: Math.min(canvas.height, Math.ceil(bottom + margin)) - y,
+			w: Math.min(canvas.width, Math.ceil(right + margin)) - x,
 			x,
 			y,
 		};
@@ -841,7 +1036,8 @@ export function extractState(
 								...(style[property] ?? "").matchAll(/-?[\d.]+(?:px|r?em)\b/g),
 							].reduce(
 								(sum, [length]) =>
-									sum + Math.abs(toPx(length, fontSize, rootFontSize)),
+									sum +
+									Math.abs(toPx(length, fontSize, rootFontSize, 0, canvas)),
 								0,
 							) *
 							// A filter's blur length is a standard deviation; it shows to about 3x.
@@ -1011,13 +1207,15 @@ export function extractState(
 					Number(shape.getAttribute("x") ?? 0),
 					Number(shape.getAttribute("y") ?? 0),
 				);
-				// dominant-baseline: central centers the em box (0.7 ascent, 0.92 tall) on y.
+				const style = runStyle(shape, shapeOpacity);
+				// dominant-baseline: central centers the font's ascent and descent on y.
+				const { ascent, descent } = fonts.metrics(style.font);
 				const baseline = /central|middle/.test(s["dominant-baseline"] ?? "")
-					? at.y + size * (0.7 - 0.46)
+					? at.y + size * (ascent - (ascent + descent) / 2)
 					: at.y;
 				const width = Math.max(40, text.length * size * 0.7);
 				const run = {
-					...runStyle(shape, shapeOpacity),
+					...style,
 					color: fill?.hex ?? "ffffff",
 					size,
 					text,
@@ -1131,7 +1329,7 @@ export function extractState(
 		if (
 			opacity < 0.05 ||
 			["head", "script", "style", "template"].includes(tag) ||
-			el.matches(BACKGROUND_ONLY)
+			isBackgroundOnly(el, styles)
 		) {
 			return;
 		}
@@ -1141,11 +1339,12 @@ export function extractState(
 			return;
 		}
 
-		const box = boxStyle(el, opacity);
-		if (box && tag !== "img") {
-			const { box: b, rotation, scale } = geometry(laidOut);
-			const { edges, ...shape } = box;
-			const label = labelOf(el);
+		// Paint order: background color, background images, then borders.
+		const box = tag === "img" ? undefined : boxStyle(el, opacity);
+		const { box: b, rotation, scale } = geometry(laidOut);
+		const label = labelOf(el);
+		if (box) {
+			const shape = { border: box.border, fill: box.fill, radius: box.radius };
 			if (shape.fill || shape.border) {
 				push({
 					...shape,
@@ -1161,17 +1360,21 @@ export function extractState(
 					rotation,
 				});
 			}
+		}
 
-			for (const edge of edges ?? []) {
-				push({
-					...edgeBox(b, edge, box.radius * scale, scale, rotation),
-					fill: edge.fill,
-					key: `${pathOf(el)}#border-${edge.side}`,
-					kind: "box",
-					label: `${edge.side} border${label ? ` of ${label}` : ""}`,
-					radius: 0,
-				});
-			}
+		if (tag !== "img") {
+			backgroundItems(el, opacity);
+		}
+
+		for (const edge of box?.edges ?? []) {
+			push({
+				...edgeBox(b, edge, (box?.radius ?? 0) * scale, scale, rotation),
+				fill: edge.fill,
+				key: `${pathOf(el)}#border-${edge.side}`,
+				kind: "box",
+				label: `${edge.side} border${label ? ` of ${label}` : ""}`,
+				radius: 0,
+			});
 		}
 
 		if (tag === "img") {
@@ -1195,6 +1398,20 @@ export function extractState(
 				inlinePills(el, entry, opacity);
 				textItem(el, entry, opacity);
 			}
+
+			// Positioned descendants (like ::after decorations) lay out as boxes of their own.
+			const positioned = (e: Element) =>
+				/^(?:absolute|fixed)$/.test(styleOf(e).position ?? "");
+			for (const child of el.querySelectorAll("*")) {
+				let nested = false;
+				for (let e = child.parentElement; e && e !== el; e = e.parentElement) {
+					nested ||= positioned(e);
+				}
+
+				if (positioned(child) && !nested) {
+					walk(child);
+				}
+			}
 		} else {
 			for (const child of el.children) {
 				walk(child);
@@ -1209,33 +1426,56 @@ export function extractState(
 		}
 	};
 
-	const page = document.querySelector(".slidev-page");
-	const content = document.querySelector("#slide-content");
-	for (const child of content?.children ?? []) {
-		if (child !== page) {
-			walk(child);
-		}
-	}
-
-	if (page) {
-		walk(page);
+	// Global-bottom layers, the slide, then global-top layers, in paint order.
+	for (const child of document.querySelector("#slide-content")?.children ??
+		[]) {
+		walk(child);
 	}
 
 	return { items, rasters };
 }
 
-/** Reads an image's natural size from its header (PNG, GIF, or JPEG). */
-function imageSize(file: string): undefined | { h: number; w: number } {
-	if (!sizes.has(file)) {
-		sizes.set(file, readImageSize(file));
-	}
-
-	return sizes.get(file);
+/** The overlap of two boxes. */
+function intersect(a: Box, b: Box): Box {
+	const x = Math.max(a.x, b.x);
+	const y = Math.max(a.y, b.y);
+	return {
+		h: Math.max(0, Math.min(a.y + a.h, b.y + b.h) - y),
+		w: Math.max(0, Math.min(a.x + a.w, b.x + b.w) - x),
+		x,
+		y,
+	};
 }
 
-const ascentRatio = (font: string) =>
-	ASCENT_RATIOS.find(([pattern]) => pattern.test(font))?.[1] ??
-	DEFAULT_ASCENT_RATIO;
+const sameBox = (a: Box, b: Box) =>
+	(["h", "w", "x", "y"] as const).every((k) => Math.abs(a[k] - b[k]) < 0.01);
+
+/** Splits a comma-separated CSS list (like background layers) outside parentheses. */
+function splitList(value: string): string[] {
+	const out: string[] = [];
+	let depth = 0;
+	let current = "";
+	for (const ch of value) {
+		if (ch === "(") {
+			depth++;
+		} else if (ch === ")") {
+			depth--;
+		}
+
+		if (ch === "," && depth === 0) {
+			out.push(current.trim());
+			current = "";
+		} else {
+			current += ch;
+		}
+	}
+
+	if (current.trim()) {
+		out.push(current.trim());
+	}
+
+	return out;
+}
 
 /**
  * One side's border as its own thin rectangle. Rounded corners shorten it by the radius
@@ -1351,60 +1591,6 @@ function linearGradient(value: string, opacity: number): Gradient | undefined {
 			};
 		}),
 	};
-}
-
-/** Maps a CSS font stack and weight to the font name PowerPoint should use. */
-function pptFont(family: string, weight: string) {
-	const first = family.split(",")[0].replace(/["']/g, "").trim();
-	if (/league spartan/i.test(first)) {
-		// PowerPoint resolves the variable font's named instances, e.g. "League Spartan Light".
-		const name = WEIGHT_NAMES[Math.round(Number(weight) / 100) * 100] ?? "";
-		return name ? `League Spartan ${name}` : "League Spartan";
-	}
-
-	if (/mono|menlo|courier|consolas/i.test(first)) {
-		return "Menlo";
-	}
-
-	if (/impact/i.test(first)) {
-		return "Impact";
-	}
-
-	return first;
-}
-
-function readImageSize(file: string): undefined | { h: number; w: number } {
-	let data: Buffer;
-	try {
-		data = fs.readFileSync(file);
-	} catch {
-		return undefined;
-	}
-
-	if (data.readUInt32BE(0) === 0x89504e47) {
-		return { h: data.readUInt32BE(20), w: data.readUInt32BE(16) };
-	}
-
-	if (data.toString("ascii", 0, 3) === "GIF") {
-		return { h: data.readUInt16LE(8), w: data.readUInt16LE(6) };
-	}
-
-	if (data[0] === 0xff && data[1] === 0xd8) {
-		for (let i = 2; i + 9 < data.length;) {
-			const marker = data[i + 1];
-			if (
-				marker >= 0xc0 &&
-				marker <= 0xcf &&
-				![0xc4, 0xc8, 0xcc].includes(marker)
-			) {
-				return { h: data.readUInt16BE(i + 5), w: data.readUInt16BE(i + 7) };
-			}
-
-			i += 2 + data.readUInt16BE(i + 2);
-		}
-	}
-
-	return undefined;
 }
 
 /** A gradient an SVG shape references, averaged to a color for consumers without gradients. */

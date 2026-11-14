@@ -11,6 +11,8 @@ import path from "node:path";
 
 import type { Gradient } from "./model.ts";
 
+import { transitionXml } from "./transitions.ts";
+
 export interface Effect {
 	/** Set while building the timing XML. */
 	groupId?: number;
@@ -28,6 +30,8 @@ export interface SlidePatch {
 	/** Effects per click number (1-based). */
 	effects: Map<number, Effect[]>;
 	pictureCorners: { name: string; radius: number }[];
+	/** The Slidev transition into the slide, if any. */
+	transition?: string;
 }
 
 /** One placeholder color per gradient, which post-processing swaps for a real gradFill. */
@@ -92,10 +96,9 @@ export function patchSlide(
 		}
 	}
 
-	const transition = `<p:transition spd="fast"><p:fade/></p:transition>`;
 	let out = xml.replace(
 		"</p:clrMapOvr>",
-		`</p:clrMapOvr>${transition}${patch.effects.size ? timingXml(patch.effects, kinds) : ""}`,
+		`</p:clrMapOvr>${transitionXml(patch.transition)}${patch.effects.size ? timingXml(patch.effects, kinds) : ""}`,
 	);
 
 	for (const { name, radius } of patch.pictureCorners) {
@@ -124,12 +127,28 @@ export function patchSlide(
 			continue;
 		}
 
-		// Arial's ● at 60% best matches a browser's disc marker in size and height (measured in PowerPoint).
+		const bulletColor = `<a:buClr><a:srgbClr val="${color.toUpperCase()}"/></a:buClr>`;
 		const shape = out
 			.slice(start, end)
+			// Arial's ● at 60% best matches a browser's disc marker in size and height (measured
+			// in PowerPoint), and its ○ and ■ its circle and square; string markers keep their
+			// text's font and size. A no-break space hides a bullet.
+			.replace(
+				/<a:buSzPct val="100000"\/><a:buChar char="&#x([\dA-F]{4});"/g,
+				(bullet, code: string) => {
+					if (code === "00A0") {
+						return bullet;
+					}
+
+					const shape = code === "2022" ? "25CF" : code;
+					return ["25A0", "25CB", "25CF"].includes(shape)
+						? `${bulletColor}<a:buSzPct val="60000"/><a:buFont typeface="Arial"/><a:buChar char="&#x${shape};"`
+						: `${bulletColor}${bullet}`;
+				},
+			)
 			.replaceAll(
-				'<a:buSzPct val="100000"/><a:buChar char="&#x2022;"',
-				`<a:buClr><a:srgbClr val="${color.toUpperCase()}"/></a:buClr><a:buSzPct val="60000"/><a:buFont typeface="Arial"/><a:buChar char="&#x25CF;"`,
+				'<a:buSzPct val="100000"/><a:buFont typeface="+mj-lt"/><a:buAutoNum',
+				`${bulletColor}<a:buSzPct val="100000"/><a:buFont typeface="+mj-lt"/><a:buAutoNum`,
 			);
 		out = out.slice(0, start) + shape + out.slice(end);
 	}
@@ -182,7 +201,10 @@ function singleParagraphProperties(xml: string) {
 }
 
 /** Package-wide cleanup: deduplicates identical media, splits notes into paragraphs, prunes content types, and drops folder entries. */
-export async function tidyPackage(zip: JSZip) {
+export async function tidyPackage(
+	zip: JSZip,
+	{ monoFont }: { monoFont: string },
+) {
 	const canonical = new Map<string, string>();
 	const replacements = new Map<string, string>();
 	for (const name of Object.keys(zip.files).sort()) {
@@ -229,7 +251,7 @@ export async function tidyPackage(zip: JSZip) {
 	}
 
 	await tidyContentTypes(zip);
-	await splitNotesParagraphs(zip);
+	await splitNotesParagraphs(zip, monoFont);
 
 	// Folder entries break some cloud editors; removing the entries keeps their files.
 	for (const [name, entry] of Object.entries(zip.files)) {
@@ -243,7 +265,7 @@ export async function tidyPackage(zip: JSZip) {
  * Splits speaker notes into one paragraph per line: pptxgenjs writes them as a single
  * run with raw line breaks. Blank lines stay as empty paragraphs between paragraphs.
  */
-async function splitNotesParagraphs(zip: JSZip) {
+async function splitNotesParagraphs(zip: JSZip, monoFont: string) {
 	for (const name of Object.keys(zip.files)) {
 		const file = zip.file(name);
 		if (!file || !/^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(name)) {
@@ -259,7 +281,7 @@ async function splitNotesParagraphs(zip: JSZip) {
 							.split(/\r?\n/)
 							.map((line) =>
 								line
-									? `<a:p>${notesRuns(line, properties)}</a:p>`
+									? `<a:p>${notesRuns(line, properties, monoFont)}</a:p>`
 									: `<a:p>${end}</a:p>`,
 							)
 							.join("")
@@ -272,11 +294,14 @@ async function splitNotesParagraphs(zip: JSZip) {
 }
 
 /** A notes line's runs, with Markdown's inline `code`, **bold**, and *italic* formatted. */
-function notesRuns(line: string, properties: string) {
+function notesRuns(line: string, properties: string, monoFont: string) {
 	const run = (text: string, format: "b" | "code" | "i" | undefined) => {
 		const rPr =
 			format === "code"
-				? properties.replace("/>", '><a:latin typeface="Menlo"/></a:rPr>')
+				? properties.replace(
+						"/>",
+						`><a:latin typeface="${escapeXml(monoFont)}"/></a:rPr>`,
+					)
 				: format
 					? properties.replace("<a:rPr ", `<a:rPr ${format}="1" `)
 					: properties;

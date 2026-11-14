@@ -2,26 +2,26 @@
  * Writes a native .pptx from the deck model (see model.ts): text boxes, bulleted
  * lists, code, shapes, images, click animations, transitions, and speaker notes.
  */
-import * as fontkit from "fontkit";
 import JSZip from "jszip";
 import fs from "node:fs";
 import path from "node:path";
 import pptxgen from "pptxgenjs";
 
+import type { FontBook } from "./fonts.ts";
+import type {
+	Box,
+	CodeItem,
+	Deck,
+	Item,
+	ListItem,
+	Paragraph,
+	Run,
+	Slide,
+	TextItem,
+} from "./model.ts";
 import type { Effect, SlidePatch } from "./ooxml.ts";
 
-import {
-	type Box,
-	type CodeItem,
-	type Deck,
-	type Item,
-	type ListItem,
-	type Paragraph,
-	type Run,
-	SLIDE,
-	type Slide,
-	type TextItem,
-} from "./model.ts";
+import { unescapeCss } from "./cascade.ts";
 import {
 	DECORATIVE,
 	GradientRegistry,
@@ -39,17 +39,16 @@ export interface WriteOptions {
 	deck: Deck;
 
 	/**
-	 * The font Chrome falls back to for symbols the deck's sans font lacks (e.g. ✓),
+	 * The font Chrome falls back to for symbols the deck's fonts lack (e.g. ✓),
 	 * named explicitly because PowerPoint's fallback differs.
 	 */
 	fallbackFont?: string;
+	/** The deck's fonts, for their metrics and glyph coverage. */
+	fonts: FontBook;
 	notes: string[];
 	out: string;
-	publicDir: string;
 	/** Write one static slide per click state instead of animations, for fidelity checks. */
 	review?: boolean;
-	/** The deck's sans-serif font file, for its glyph coverage. */
-	sansFont: string;
 	title?: string;
 }
 
@@ -68,29 +67,65 @@ interface Entry {
 type TextParagraph = Paragraph & {
 	bullet?: boolean;
 	hidden?: boolean;
+	number?: number;
 	spaceAfter?: number;
 };
+
+/** Converts canvas px to PowerPoint's units. */
+interface Units {
+	inches: (px: number) => number;
+	pixels: (pt: number) => number;
+	points: (px: number) => number;
+}
+
+/** A list's marker in PowerPoint: a character bullet, or automatic numbering. */
+type Marker =
+	{ code?: string; kind: "char" } | { kind: "number"; style: string };
 
 // pptxgenjs's types describe its CommonJS build, but Node loads its ES build, whose
 // default export is the class itself.
 const PptxGenJS = pptxgen as unknown as typeof pptxgen.default;
 type Presentation = pptxgen.default;
 
-const LAYOUT_WIDTH_INCHES = 13.333;
+/** PowerPoint's standard slide height; widths follow the deck's aspect ratio (13.333" for 16:9). */
+const PAGE_HEIGHT_INCHES = 7.5;
 const EMU_PER_INCH = 914400;
-const inches = (px: number) => (px * LAYOUT_WIDTH_INCHES) / SLIDE.width;
-const points = (px: number) => inches(px) * 72;
-const pixels = (pt: number) => (pt / 72 / LAYOUT_WIDTH_INCHES) * SLIDE.width;
 /** A rotation in [0, 360), as PowerPoint writes them. */
 const degrees = (rotation: number) => ((rotation % 360) + 360) % 360;
 
-/**
- * PowerPoint rounds exact line spacing to whole points, so text uses multiples: a
- * line's pitch is multiple × 1.2 × its largest font size, and its baseline sits this
- * fraction of the way down that pitch (measured per font in PowerPoint).
- */
-const baselineRatio = (font = "") =>
-	font.startsWith("Impact") ? 0.782 : font.startsWith("Menlo") ? 0.745 : 0.753;
+const NUMBER_STYLES: Partial<Record<string, string>> = {
+	decimal: "arabicPeriod",
+	"decimal-leading-zero": "arabicPeriod",
+	"lower-alpha": "alphaLcPeriod",
+	"lower-latin": "alphaLcPeriod",
+	"lower-roman": "romanLcPeriod",
+	"upper-alpha": "alphaUcPeriod",
+	"upper-latin": "alphaUcPeriod",
+	"upper-roman": "romanUcPeriod",
+};
+
+/** The PowerPoint marker for a CSS list-style-type. */
+function markerFor(listStyle: string): Marker {
+	switch (listStyle) {
+		case "circle":
+			return { code: "25CB", kind: "char" };
+		case "disc":
+			return { kind: "char" };
+		case "square":
+			return { code: "25A0", kind: "char" };
+	}
+
+	const quoted = /^(["'])(.*)\1$/s.exec(listStyle)?.[2];
+	const text = quoted === undefined ? undefined : unescapeCss(quoted).trim();
+	if (text !== undefined) {
+		const code = text.codePointAt(0) ?? 0x2022;
+		return code <= 0xffff
+			? { code: code.toString(16).toUpperCase().padStart(4, "0"), kind: "char" }
+			: { kind: "char" };
+	}
+
+	return { kind: "number", style: NUMBER_STYLES[listStyle] ?? "arabicPeriod" };
+}
 
 /** Bulleted paragraphs render about 0.035 lines lower in PowerPoint (measured). */
 const LIST_LIFT = 0.035;
@@ -109,30 +144,31 @@ export async function writePptx({
 	background,
 	deck,
 	fallbackFont = "Lucida Grande",
+	fonts,
 	notes,
 	out,
-	publicDir,
 	review = false,
-	sansFont,
 	title = "",
 }: WriteOptions) {
 	const pres = new PptxGenJS();
-	pres.layout = "LAYOUT_WIDE";
+	const widthInches = (PAGE_HEIGHT_INCHES * deck.page.width) / deck.page.height;
+	pres.defineLayout({
+		height: PAGE_HEIGHT_INCHES,
+		name: SLIDE_LAYOUT,
+		width: widthInches,
+	});
+	pres.layout = SLIDE_LAYOUT;
 	pres.title = title;
 	pres.author = author;
 	pres.subject = "";
+	const units: Units = {
+		inches: (px) => (px * widthInches) / deck.canvas.width,
+		pixels: (pt) => (pt / 72 / widthInches) * deck.canvas.width,
+		points: (px) => ((px * widthInches) / deck.canvas.width) * 72,
+	};
 	const gradients = new GradientRegistry();
-	const font = fontkit.openSync(sansFont);
-	const coverage = new Set("characterSet" in font ? font.characterSet : []);
 	// New text and new slides in PowerPoint start from the deck's font and background.
-	// A variable font's family name can carry its default instance's weight ("… Thin").
-	const family =
-		"familyName" in font
-			? font.familyName.replace(
-					/\s+(?:Thin|Hairline|ExtraLight|UltraLight|Light|Regular|Medium|SemiBold|DemiBold|Bold|ExtraBold|UltraBold|Black|Heavy)$/i,
-					"",
-				)
-			: undefined;
+	const family = fonts.theme();
 	if (family) {
 		pres.theme = { bodyFontFace: family, headFontFace: family };
 	}
@@ -142,11 +178,12 @@ export async function writePptx({
 		title: SLIDE_LAYOUT,
 	});
 	const writer = createItemWriter({
-		coverage,
+		deck,
 		fallbackFont,
+		fonts,
 		gradients,
 		pres,
-		publicDir,
+		units,
 	});
 	const patches: SlidePatch[] = [];
 
@@ -166,6 +203,7 @@ export async function writePptx({
 				bullets: [],
 				effects: new Map(),
 				pictureCorners: [],
+				transition: slide.transition,
 			};
 			const add = (click: number, effect: Effect) => {
 				patch.effects.set(click, [...(patch.effects.get(click) ?? []), effect]);
@@ -235,13 +273,13 @@ export async function writePptx({
 					await file.async("string"),
 					patch,
 					gradients,
-					EMU_PER_INCH * inches(1),
+					EMU_PER_INCH * units.inches(1),
 				),
 			);
 		}
 	}
 
-	await tidyPackage(zip);
+	await tidyPackage(zip, { monoFont: fonts.spacer().font });
 	fs.mkdirSync(path.dirname(out), { recursive: true });
 	fs.writeFileSync(
 		out,
@@ -251,18 +289,48 @@ export async function writePptx({
 }
 
 function createItemWriter({
-	coverage,
+	deck,
 	fallbackFont,
+	fonts,
 	gradients,
 	pres,
-	publicDir,
+	units,
 }: {
-	coverage: Set<number>;
+	deck: Deck;
 	fallbackFont: string;
+	fonts: FontBook;
 	gradients: GradientRegistry;
 	pres: Presentation;
-	publicDir: string;
+	units: Units;
 }) {
+	const { inches, pixels, points } = units;
+
+	/**
+	 * PowerPoint rounds exact line spacing to whole points, so text uses multiples: a
+	 * line's pitch is multiple × 1.2 × its largest font size, and its baseline sits a
+	 * font's fraction of the way down that pitch (see fonts.ts).
+	 */
+	const baselineRatio = (font = "") => fonts.metrics(font).baseline;
+	const position = (box: Box) => ({
+		h: inches(box.h),
+		w: inches(box.w),
+		x: inches(box.x),
+		y: inches(box.y),
+	});
+	const emptyRun = (code: boolean): Run => ({
+		bold: false,
+		color: "ffffff",
+		font: (code ? fonts.spacer().font : fonts.theme()) ?? "Arial",
+		italic: false,
+		letterSpacing: 0,
+		size: 16,
+		superscript: false,
+		text: "",
+		transparency: 100,
+		underline: false,
+		upper: false,
+	});
+
 	const fillFor = (
 		fill:
 			| undefined
@@ -291,10 +359,10 @@ function createItemWriter({
 				}
 			: { type: "none" };
 
-	// Characters the sans font lacks: Chrome falls back to a system font for symbols like ✓,
+	// Characters a font lacks: Chrome falls back to a system font for symbols like ✓,
 	// while PowerPoint picks something else, so name the fallback explicitly. Emoji are left alone.
 	const splitFallback = (run: Run): Run[] => {
-		if (!run.font.startsWith("League Spartan")) {
+		if (run.pad || fonts.covers(run.font, 0x61) === undefined) {
 			return [run];
 		}
 
@@ -302,7 +370,7 @@ function createItemWriter({
 		for (const ch of run.text) {
 			// Emoji and invisible format characters (like zero-width spaces) need no fallback.
 			const missing =
-				!coverage.has(ch.codePointAt(0) ?? 0) &&
+				fonts.covers(run.font, ch.codePointAt(0) ?? 0) === false &&
 				!/[\p{Extended_Pictographic}\p{Cf}]/u.test(ch);
 			const font = missing ? fallbackFont : run.font;
 			const last = pieces.at(-1);
@@ -326,12 +394,20 @@ function createItemWriter({
 	const textRuns = (
 		paragraphs: TextParagraph[],
 		{
-			bullets = false,
 			code = false,
 			indent = 0,
 			lineHeight = 0,
+			marker,
 			strokeLayer = false,
 			wrap = true,
+		}: {
+			code?: boolean;
+			indent?: number;
+			lineHeight?: number;
+			/** For lists: their marker, and its numbering start if it numbers consecutively. */
+			marker?: Marker & { start?: number };
+			strokeLayer?: boolean;
+			wrap?: boolean;
 		},
 	): pptxgen.default.TextProps[] => {
 		const runs: pptxgen.default.TextProps[] = [];
@@ -388,13 +464,24 @@ function createItemWriter({
 					};
 				}
 
-				if (bullets) {
+				if (marker) {
+					const hanging = Math.max(1, points(indent));
 					// A hidden paragraph (review decks) keeps its indent but shows no bullet.
-					options.bullet = paragraph.bullet
-						? paragraph.hidden
-							? { characterCode: "00A0", indent: Math.max(1, points(indent)) }
-							: { indent: Math.max(1, points(indent)) }
-						: false;
+					options.bullet = !paragraph.bullet
+						? false
+						: paragraph.hidden
+							? { characterCode: "00A0", indent: hanging }
+							: marker.kind === "number"
+								? {
+										indent: hanging,
+										// Consecutive numbers share their list's start; others each start at their own.
+										numberStartAt: marker.start ?? paragraph.number ?? 1,
+										style: marker.style,
+										type: "number",
+									}
+								: marker.code
+									? { characterCode: marker.code, indent: hanging }
+									: { indent: hanging };
 				}
 
 				runs.push({ options, text: run.text || (code ? " " : "") });
@@ -473,13 +560,14 @@ function createItemWriter({
 		let top = box.y;
 		let height = box.h;
 		if (rotation && style.lineHeight) {
-			// Rotated text has no measured baselines; CSS centers League Spartan's 0.92em glyph
-			// cell (0.7em ascent) in its line.
+			// Rotated text has no measured baselines; CSS centers the font's ascent and descent
+			// in its line.
 			const size = firstRun?.size ?? 16;
+			const { ascent, descent } = fonts.metrics(firstRun?.font ?? "");
 			top =
 				box.y +
-				(style.lineHeight - 0.92 * size) / 2 +
-				0.7 * size -
+				(style.lineHeight - (ascent + descent) * size) / 2 +
+				ascent * size -
 				baselineRatio(firstRun?.font) * style.lineHeight;
 			height = box.h + (box.y - top);
 		} else if (baselines?.length && style.lineHeight) {
@@ -512,7 +600,7 @@ function createItemWriter({
 		// One-line text gets room to grow, but only as far as the slide's edges allow, on the
 		// side(s) its alignment grows it toward.
 		const roomLeft = Math.max(0, box.x);
-		const roomRight = Math.max(0, SLIDE.width - (box.x + box.w));
+		const roomRight = Math.max(0, deck.page.width - (box.x + box.w));
 		const extra =
 			style.nowrap && !rotation
 				? Math.min(
@@ -524,8 +612,20 @@ function createItemWriter({
 								: roomRight,
 					)
 				: 0;
+		const marker = item.kind === "list" ? markerFor(item.marker) : undefined;
+		const numbers =
+			item.kind === "list" ? item.paragraphs.map((p) => p.number) : [];
+		// Numbers sit in the hanging indent: room for the widest one and its period.
 		const bulletGap =
-			item.kind === "list" ? BULLET_GAP * (firstRun?.size ?? 16) : 0;
+			item.kind !== "list"
+				? 0
+				: marker?.kind === "number"
+					? (String(Math.max(...numbers.map(Math.abs))).length * 0.55 + 0.6) *
+						(firstRun?.size ?? 16)
+					: BULLET_GAP * (firstRun?.size ?? 16);
+		const consecutive =
+			!visibleParagraphs?.includes(false) &&
+			numbers.every((n, i) => n === numbers[0] + i);
 		const shift =
 			style.align === "center"
 				? (slack + extra) / 2
@@ -558,10 +658,13 @@ function createItemWriter({
 			y: inches(top),
 		};
 		const runOptions = {
-			bullets: item.kind === "list",
 			code: item.kind === "code",
 			indent: bulletGap,
 			lineHeight: style.lineHeight,
+			marker: marker && {
+				...marker,
+				start: consecutive ? numbers[0] : undefined,
+			},
 			wrap: !style.nowrap,
 		};
 		if (paragraphs.some((p) => p.runs.some((run) => run.stroke))) {
@@ -614,19 +717,26 @@ function createItemWriter({
 					});
 					return [name];
 				case "image":
-				case "raster":
+				case "raster": {
+					const crop = item.kind === "image" ? item.crop : undefined;
 					slide.addImage({
 						...position(item.box),
+						// pptxgenjs crops from the whole image's size to the frame's.
+						...(crop && {
+							h: inches(crop.h),
+							sizing: {
+								h: inches(item.box.h),
+								type: "crop" as const,
+								w: inches(item.box.w),
+								x: inches(item.box.x - crop.x),
+								y: inches(item.box.y - crop.y),
+							},
+							w: inches(crop.w),
+						}),
 						// pptxgenjs falls back to the file path for empty alt text; mark it decorative instead.
 						altText: item.alt || DECORATIVE,
 						objectName: name,
-						path:
-							item.kind === "image"
-								? path.join(
-										publicDir,
-										decodeURIComponent(item.src.replace(/^\//, "")),
-									)
-								: path.resolve(item.file ?? ""),
+						path: path.resolve(item.file ?? ""),
 						rounding: item.kind === "image" && item.circle ? true : undefined,
 						transparency:
 							item.kind === "image" && item.transparency
@@ -634,6 +744,7 @@ function createItemWriter({
 								: undefined,
 					});
 					return [name];
+				}
 				case "polygon": {
 					const xs = item.points.map((p) => p.x);
 					const ys = item.points.map((p) => p.y);
@@ -671,27 +782,6 @@ function createItemWriter({
 		},
 	};
 }
-
-const emptyRun = (code: boolean): Run => ({
-	bold: false,
-	color: "ffffff",
-	font: code ? "Menlo" : "League Spartan",
-	italic: false,
-	letterSpacing: 0,
-	size: 16,
-	superscript: false,
-	text: "",
-	transparency: 100,
-	underline: false,
-	upper: false,
-});
-
-const position = (box: Box) => ({
-	h: inches(box.h),
-	w: inches(box.w),
-	x: inches(box.x),
-	y: inches(box.y),
-});
 
 /**
  * Joins neighboring runs that look alike (as takumi splits text per line), so each
