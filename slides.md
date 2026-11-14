@@ -61,14 +61,6 @@ layout: cover
 </style>
 
 <!--
-Timing targets (20 minutes):
-Intro: 0-2
-Design Thought: 2-7
-Static Analysis: 7-12
-Dynamic Analysis: 12-16
-Peer Review: 16-18.5
-Closing: 18.5-20
-
 Hi everyone, last talk of the day! We feeling good?
 
 Thanks to Ken for that talk. He's right: you can build anything now. This talk is about how to build it *well*.
@@ -268,8 +260,6 @@ layout: center
 
 <!--
 Part one of four: design thought. What should it be?
-
-Start minute target: ~2
 -->
 
 ---
@@ -812,8 +802,6 @@ layout: center
 
 <!--
 Part two of four: static analysis. Is it written right?
-
-Start minute target: ~7
 -->
 
 ---
@@ -1751,8 +1739,6 @@ layout: center
 
 <!--
 Part three of four: dynamic analysis. Does it match the spec?
-
-Start minute target: ~12
 -->
 
 ---
@@ -2346,8 +2332,6 @@ layout: center
 
 <!--
 Part four of four: peer review. Is the spec correct?
-
-Start minute target: ~16
 -->
 
 ---
@@ -2769,8 +2753,6 @@ layout: default
 
 <!--
 Part four, recapped. The theme: tools check the code, and people check the spec. Let's close out.
-
-Start minute target: ~18.5
 -->
 
 ---
