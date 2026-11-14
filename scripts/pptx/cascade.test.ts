@@ -132,6 +132,9 @@ describe(createCascade, () => {
 		["(prefers-contrast: more)", "red"],
 		["(hover: none)", "red"],
 		["(hover: hover)", "lime"],
+		["(any-hover: hover)", "lime"],
+		["(pointer: fine)", "lime"],
+		["(any-pointer: coarse)", "red"],
 		["(monochrome)", "red"],
 		["(color)", "lime"],
 		["(min-aspect-ratio: 1/1)", "lime"],
@@ -268,6 +271,18 @@ describe(computeStyles, () => {
 			`p { color: var(--missing, var(--also-missing, lime)) }`,
 		);
 		expect(of("p")?.color).toBe("lime");
+	});
+
+	it.each([
+		["initial", "lime"],
+		["inherit", "blue"],
+		["unset", "blue"],
+	])("resolves a custom property set to %s as CSS does", (keyword, color) => {
+		const { of } = stylesOf(
+			`<div><p>a</p></div>`,
+			`div { --c: blue } p { --c: ${keyword}; color: var(--c, lime) }`,
+		);
+		expect(of("p")?.color).toBe(color);
 	});
 
 	it.each([
@@ -562,6 +577,11 @@ describe(computeStyles, () => {
 			expect.objectContaining({ fill: "red", "stroke-width": "3" }),
 			expect.objectContaining({ fill: "lime", "stroke-width": "3" }),
 		]);
+	});
+
+	it("applies SVG presentation attributes above user-agent rules", () => {
+		const { of } = stylesOf(`<svg display="none"></svg>`, "");
+		expect(of("svg")?.display).toBe("none");
 	});
 
 	it("computes ::before and ::after content with its declarations", () => {

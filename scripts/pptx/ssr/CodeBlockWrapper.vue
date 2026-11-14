@@ -40,7 +40,7 @@ const target = useHighlightRange(props, (element, range, hidden) => {
 		}"
 		:style="{
 			'max-height': maxHeight,
-			'overflow-y': maxHeight ? 'scroll' : undefined,
+			'overflow-y': maxHeight ? 'hidden' : undefined,
 			'--start': startLine,
 		}"
 		:data-title="title"

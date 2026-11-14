@@ -168,7 +168,7 @@ function localFile(
 
 function rasterOf(data: Buffer) {
 	try {
-		// image-size reads past the end of a Buffer that shares Node's pool, so measure a copy.
+		// image-size's DataViews ignore the input's length (types/utils.js getView), so a truncated pooled Buffer reads its neighbors' bytes instead of throwing.
 		const { height, type, width } = measureImage(Uint8Array.from(data));
 		return { format: type === "jpg" ? "jpeg" : type, height, width };
 	} catch {

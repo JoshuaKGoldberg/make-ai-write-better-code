@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type * as Render from "./render.ts";
 
+import { BuildPptxError } from "./error.ts";
 import {
 	createSlideRenderer,
 	resolveDeck,
@@ -14,7 +15,6 @@ import {
 const entry = path.join(import.meta.dirname, "fixture/slides.md");
 
 describe(createSlideRenderer, () => {
-	let cacheDir: string;
 	let deck: Awaited<ReturnType<typeof resolveDeck>>;
 	let renderer: Awaited<ReturnType<typeof createSlideRenderer>>;
 	const renderSlideTitled = (title: string) =>
@@ -23,27 +23,21 @@ describe(createSlideRenderer, () => {
 		);
 
 	beforeAll(async () => {
-		cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "pptx-render-"));
 		deck = await resolveDeck(entry);
-		renderer = await createSlideRenderer(deck, cacheDir);
+		renderer = await createSlideRenderer(deck);
 	}, 60_000);
 
 	afterAll(async () => {
 		await renderer.close();
-		await fs.rm(cacheDir, { force: true, recursive: true });
-	});
-
-	it("keeps Vite's cache in the given directory", async () => {
-		expect(await fs.readdir(cacheDir)).toEqual([
-			expect.stringMatching(/^deps/),
-		]);
 	});
 
 	it("throws when Slidev's client lacks a file it stands in for", async () => {
 		await expect(
-			createSlideRenderer({ ...deck, clientRoot: cacheDir }, cacheDir),
+			createSlideRenderer({ ...deck, clientRoot: import.meta.dirname }),
 		).rejects.toThrow(
-			"This version of Slidev isn't supported: its client has no builtin/CodeBlockWrapper.vue, builtin/CodeGroup.vue, builtin/KaTexBlockWrapper.vue, builtin/Monaco.vue, builtin/ShikiMagicMove.vue, builtin/VClickGap.vue, builtin/VSwitch.ts, composables/useNav.ts to stand in for.",
+			new BuildPptxError(
+				"This version of Slidev isn't supported: its client has no builtin/CodeBlockWrapper.vue, builtin/CodeGroup.vue, builtin/KaTexBlockWrapper.vue, builtin/Monaco.vue, builtin/ShikiMagicMove.vue, builtin/VClickGap.vue, builtin/VSwitch.ts, composables/useNav.ts to stand in for.",
+			),
 		);
 	});
 
@@ -56,7 +50,9 @@ describe(createSlideRenderer, () => {
 	it("reports a v-mark and counts its click when a slide uses one", async () => {
 		expect(await renderSlideTitled("Directives")).toEqual(
 			expect.objectContaining({
-				problems: ["Couldn't draw a v-mark: Marked"],
+				problems: [
+					{ message: "Couldn't draw a v-mark: Marked", severity: "warning" },
+				],
 				states: [expect.any(String), expect.any(String)],
 			}),
 		);
@@ -105,9 +101,15 @@ describe(createSlideRenderer, () => {
 		});
 	});
 
-	it("shows an element only within its range when v-click has one, and never registers v-click=false", async () => {
+	it("shows an element only within its range when v-click has one", async () => {
 		expect((await renderSlideTitled("Click Order")).states[2]).toContain(
-			'<div data-slidev-clicks-end="2" data-slidev-clicks-start="1" class="slidev-vclick-target slidev-vclick-hidden">Ranged</div><div>Unclicked</div>',
+			'<div data-slidev-clicks-end="2" data-slidev-clicks-start="1" class="slidev-vclick-target slidev-vclick-hidden">Ranged</div>',
+		);
+	});
+
+	it("never registers a click when v-click is false", async () => {
+		expect((await renderSlideTitled("Click Order")).states[0]).toContain(
+			"<div>Unclicked</div>",
 		);
 	});
 
@@ -130,9 +132,15 @@ describe(createSlideRenderer, () => {
 		});
 	});
 
-	it("renders Monaco and twoslash code statically when a slide has them", async () => {
+	it("renders Monaco code statically when a slide has it", async () => {
+		expect((await renderSlideTitled("Code Blocks")).states[0]).toContain(
+			'<span class="line">const edited = 1;</span>',
+		);
+	});
+
+	it("renders a twoslash query's type when a slide has one", async () => {
 		expect((await renderSlideTitled("Code Blocks")).states[0]).toMatch(
-			/<span class="line">const edited = 1;<\/span>.*>hovered</s,
+			/<span>hovered<\/span><!--\]--><!--\[--><span class="twoslash-popup-container[^"]*">.*>hovered<\/span>.*>: <\/span>.*> ?1<\/span><\/code><\/span>/s,
 		);
 	});
 
@@ -140,9 +148,85 @@ describe(createSlideRenderer, () => {
 		const { states } = await renderSlideTitled("Code Blocks");
 
 		expect({ first: states[0], last: states.at(-1) }).toEqual({
-			first: expect.not.stringMatching(/>after</),
-			last: expect.not.stringMatching(/>before</),
+			first: expect.stringMatching(/^(?!.*>after<).*>before</s),
+			last: expect.stringMatching(/^(?!.*>before<).*>after</s),
 		});
+	});
+
+	it("reports an error when a slide has Monaco content it can't export", async () => {
+		expect((await renderSlideTitled("Embeds")).problems).toEqual(
+			expect.arrayContaining([
+				{
+					message: "Couldn't export the modified side of a monaco-diff block.",
+					severity: "error",
+				},
+				{
+					message: "Couldn't export the output of a monaco-run block.",
+					severity: "error",
+				},
+			]),
+		);
+	});
+
+	it("reports an error when a slide uses a component Vue can't resolve", async () => {
+		expect((await renderSlideTitled("Embeds")).problems).toContainEqual({
+			message:
+				"Couldn't render the component Unregistered: Vue couldn't resolve it.",
+			severity: "error",
+		});
+	});
+
+	it("counts a code block's clicks after its wrapping v-click when a v-click wraps it", async () => {
+		const { states } = await renderSlideTitled("Wrapped Code");
+
+		expect({ count: states.length, first: states[0] }).toEqual({
+			count: 6,
+			first: expect.stringMatching(
+				/<div data-slidev-clicks-start="1" class="slidev-code-wrapper [^"]*slidev-vclick-hidden".*<div data-slidev-clicks-start="4" class="slidev-vclick-target slidev-vclick-hidden">After the code<\/div>/s,
+			),
+		});
+	});
+
+	it("hides a Monaco block until its click when a v-click wraps it", async () => {
+		expect((await renderSlideTitled("Wrapped Code")).states[0]).toContain(
+			'<div data-slidev-clicks-start="5" class="slidev-code-wrapper relative group slidev-vclick-target slidev-vclick-hidden"><pre class="shiki slidev-code"><code><!--[--><!--[--><!----><span class="line">const wrapped = 1;</span>',
+		);
+	});
+
+	it("renders one state when clicksStart is past the slide's clicks", async () => {
+		expect(await renderSlideTitled("Started Late")).toEqual(
+			expect.objectContaining({
+				clicksStart: 2,
+				states: [expect.stringContaining("<p>Shown from the start</p>")],
+			}),
+		);
+	});
+
+	it("renders components and directives the deck's setup and floating-vue register", async () => {
+		expect((await renderSlideTitled("Deck Setup")).states[0]).toContain(
+			'<p>Registered in setup</p><p class="themed">Themed</p><p><span>Tipped</span></p>',
+		);
+	});
+
+	it("keeps the states that rendered and reports an error when a click fails", async () => {
+		expect(await renderSlideTitled("Late Failure")).toEqual(
+			expect.objectContaining({
+				problems: [
+					{
+						click: 1,
+						message: "Couldn't render the click: It failed on a click.",
+						severity: "error",
+					},
+				],
+				states: [expect.stringContaining("<p>Before the click</p>"), ""],
+			}),
+		);
+	});
+
+	it("sets Slidev's theme variables when the deck has a themeConfig", async () => {
+		expect((await renderer.globalCss()).at(-1)).toBe(
+			"body{--slidev-theme-primary:#5d8392;}",
+		);
 	});
 
 	describe("from a directory with a space", () => {
@@ -156,21 +240,21 @@ describe(createSlideRenderer, () => {
 				path.join(directory, "ssr"),
 				{ recursive: true },
 			);
-			await fs.copyFile(
-				path.join(import.meta.dirname, "render.ts"),
-				path.join(directory, "render.ts"),
-			);
+			for (const file of ["error.ts", "render.ts", "types.ts"]) {
+				await fs.copyFile(
+					path.join(import.meta.dirname, file),
+					path.join(directory, file),
+				);
+			}
+
 			await fs.symlink(
-				path.resolve("node_modules"),
+				path.join(import.meta.dirname, "../../node_modules"),
 				path.join(directory, "node_modules"),
 			);
 			const copy = (await import(
 				path.join(directory, "render.ts")
 			)) as typeof Render;
-			copied = await copy.createSlideRenderer(
-				await copy.resolveDeck(entry),
-				path.join(directory, "cache"),
-			);
+			copied = await copy.createSlideRenderer(await copy.resolveDeck(entry));
 		}, 60_000);
 
 		afterAll(async () => {

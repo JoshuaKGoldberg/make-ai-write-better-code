@@ -1,6 +1,5 @@
-import type { LaidOutRuns } from "../layout.ts";
 import type { ListParagraph } from "../model.ts";
-import type { ExtractContext } from "./context.ts";
+import type { ExtractContext, TextRuns } from "./context.ts";
 
 import { lineHeightOf } from "../cascade.ts";
 import { parseColor } from "../color.ts";
@@ -8,11 +7,16 @@ import { hasMarker } from "../layout.ts";
 import { availableWidthOf } from "./boxes.ts";
 import { MIN_OPACITY, pathOf } from "./context.ts";
 import { geometryOf, insetBox } from "./geometry.ts";
-import { alignOf, isInvisible, runsToParagraph } from "./runs.ts";
+import {
+	alignOf,
+	isInvisible,
+	isRightToLeft,
+	runsToParagraph,
+} from "./runs.ts";
 
 /** A piece of a list item: some of its text, or a nested list. */
 type ItemBlock =
-	| { entry: LaidOutRuns; kind: "text"; owner?: Element; y: number }
+	| { entry: TextRuns; kind: "text"; y: number }
 	| { kind: "list"; list: Element; y: number };
 
 export const isListElement = (element: Element) =>
@@ -64,6 +68,7 @@ export function listItem(
 			availableWidth: availableWidthOf(context, list, box.x),
 			lineHeight: lineHeightOf(context.styleOf(styled)) * scale,
 			nowrap: false,
+			rtl: isRightToLeft(context, styled),
 			wrapWidth: converted.some(({ wrapped }) => wrapped)
 				? Math.max(...converted.map(({ right }) => right)) - box.x
 				: undefined,
@@ -86,7 +91,7 @@ export function ordinalsOf(list: Element, items: Element[]) {
 function itemBlocks(context: ExtractContext, item: Element): ItemBlock[] {
 	const own = context.ownRunsOf(item);
 	if (own) {
-		return [{ entry: own, kind: "text", owner: item, y: own.box.y }];
+		return [{ entry: own, kind: "text", y: own.box.y }];
 	}
 
 	return [
@@ -98,8 +103,8 @@ function itemBlocks(context: ExtractContext, item: Element): ItemBlock[] {
 			const entry = context.ownRunsOf(child);
 			return isListElement(child) && box
 				? [{ kind: "list", list: child, y: box.y }]
-				: entry
-					? [{ entry, kind: "text", owner: child, y: entry.box.y }]
+				: entry && !context.drawsApart(child)
+					? [{ entry, kind: "text", y: entry.box.y }]
 					: [];
 		}),
 	].toSorted((first, second) => first.y - second.y);
@@ -120,7 +125,7 @@ function listParagraphs(
 			level,
 			marker: style["list-style-type"],
 			number: numbers[index],
-			visible: context.opacityOf(item) > MIN_OPACITY,
+			visible: context.opacityOf(item) >= MIN_OPACITY,
 		};
 		const blocks = itemBlocks(context, item);
 		let bullet = hasMarker(style);
@@ -142,11 +147,10 @@ function listParagraphs(
 				continue;
 			}
 
-			// Hidden items keep the list's opacity, so states that reveal them match.
 			const { baselines, left, right, runs, wrapRight } = runsToParagraph(
 				context,
 				block.entry,
-				block.owner,
+				item,
 				shared.visible ? context.opacityOf : () => opacity,
 			);
 			converted.push({

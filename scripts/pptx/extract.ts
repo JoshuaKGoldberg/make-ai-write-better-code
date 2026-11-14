@@ -1,23 +1,21 @@
 import type { ExtractOptions } from "./extract/context.ts";
 import type { LaidOutBox, Layout } from "./layout.ts";
 
-import { isOutOfFlow } from "./cascade.ts";
 import { paintItems } from "./extract/boxes.ts";
-import { createExtractContext, MIN_OPACITY } from "./extract/context.ts";
+import {
+	createExtractContext,
+	isMath,
+	MIN_OPACITY,
+} from "./extract/context.ts";
 import { geometryOf } from "./extract/geometry.ts";
 import { imageItem, rasterItem } from "./extract/images.ts";
 import { isListElement, isNativeList, listItem } from "./extract/lists.ts";
 import { svgItems } from "./extract/svg.ts";
 import { codeItem, inlinePills, textItem } from "./extract/text.ts";
-import { isAtomicInline, isBackgroundOnly } from "./layout.ts";
+import { isBackgroundOnly } from "./layout.ts";
 
 /** Elements with more descendants than this render as one image instead of shapes. */
 const MAX_NATIVE_DESCENDANTS = 400;
-
-/** Elements drawn as their own items, apart from the text they sit in. */
-const REPLACED_ELEMENTS = new Set(["img", "svg"]);
-
-const UNRENDERED_ELEMENTS = new Set(["head", "script", "style", "template"]);
 
 /** Elements that render only in a browser, which PowerPoint can't show. */
 const UNSUPPORTED_EMBEDS = [
@@ -27,8 +25,6 @@ const UNSUPPORTED_EMBEDS = [
 	["video", "a video"],
 ] as const;
 
-const isMath = (element: Element) => element.classList.contains("katex");
-
 /** Turns a laid-out slide state into model items, and descriptions of what it left out. */
 export function extractState(layout: Layout, options: ExtractOptions) {
 	const context = createExtractContext(layout, options);
@@ -36,16 +32,6 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 
 	const isDense = (element: Element) =>
 		element.querySelectorAll("*").length > MAX_NATIVE_DESCENDANTS;
-
-	const drawsApart = (element: Element) => {
-		const style = styleOf(element);
-		return (
-			isOutOfFlow(style) ||
-			isAtomicInline(style) ||
-			REPLACED_ELEMENTS.has(element.localName) ||
-			isMath(element)
-		);
-	};
 
 	const isClippedAway = (element: Element, laidOut: LaidOutBox) => {
 		const style = styleOf(element);
@@ -62,7 +48,7 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 
 	const walkApart = (element: Element) => {
 		for (const child of element.children) {
-			if (drawsApart(child)) {
+			if (context.drawsApart(child)) {
 				walk(child);
 			} else {
 				walkApart(child);
@@ -71,12 +57,18 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 	};
 
 	const walk = (element: Element) => {
+		if (isBackgroundOnly(element, layout.styles)) {
+			return;
+		}
+
 		const opacity = context.opacityOf(element);
-		if (
-			opacity < MIN_OPACITY ||
-			UNRENDERED_ELEMENTS.has(element.localName) ||
-			isBackgroundOnly(element, layout.styles)
-		) {
+		if (opacity < MIN_OPACITY) {
+			if (styleOf(element).visibility === "hidden") {
+				for (const child of element.children) {
+					walk(child);
+				}
+			}
+
 			return;
 		}
 
@@ -120,9 +112,7 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 			return;
 		}
 
-		for (const item of paint) {
-			context.push(element, item);
-		}
+		context.push(element, ...paint);
 
 		if (element.localName === "img") {
 			imageItem(context, element, opacity, geometry);

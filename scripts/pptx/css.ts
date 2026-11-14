@@ -16,10 +16,7 @@ export function declarationsOf(children: csstree.List<csstree.CssNode>) {
 				property: node.property.startsWith("--")
 					? node.property
 					: node.property.toLowerCase(),
-				value: (node.value.type === "Raw"
-					? withoutComments(node.value.value)
-					: csstree.generate(node.value)
-				).trim(),
+				value: withoutComments(csstree.generate(node.value)).trim(),
 			});
 		}
 	});

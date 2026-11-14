@@ -98,23 +98,9 @@ const HUE_UNITS: Partial<Record<string, number>> = {
 	turn: 360,
 };
 
-const ANGLE = /^-?[\d.]+(?:deg|grad|rad|turn)$/;
-const COLOR_HINT = /^(?:[-+.\d]|calc\()/;
+const ANGLE = /^(?:-?[\d.]+(?:deg|grad|rad|turn)|0)$/;
 const GRADIENT = /^(?:repeating-)?(?:conic|linear|radial)-gradient\(/;
-const SIDE_ANGLES: Partial<Record<string, number>> = {
-	"to bottom": 180,
-	"to bottom left": 225,
-	"to bottom right": 135,
-	"to left": 270,
-	"to left bottom": 225,
-	"to left top": 315,
-	"to right": 90,
-	"to right bottom": 135,
-	"to right top": 45,
-	"to top": 0,
-	"to top left": 315,
-	"to top right": 45,
-};
+const LENGTH_START = /^(?:[-+.\d]|calc\()/;
 
 /** Below this alpha, paint can't be seen. */
 export const MIN_VISIBLE_ALPHA = 0.004;
@@ -339,25 +325,41 @@ export const isGradient = (image: string) => GRADIENT.test(image);
 export const hasVisibleStop = ({ stops }: Gradient) =>
 	stops.some((stop) => stop.transparency < transparencyOf(MIN_VISIBLE_ALPHA));
 
-/** Parses one `linear-gradient()`, faded by an opacity, or undefined for any other image, more than one, or an invalid one. */
-export function parseLinearGradient(image: string, opacity: number) {
+/** Parses one `linear-gradient()` painted over a box of the given size, faded by an opacity, or undefined for any other image, more than one, or an invalid one. */
+export function parseLinearGradient(
+	image: string,
+	opacity: number,
+	size: { height: number; width: number },
+) {
 	const body = /^linear-gradient\((.*)\)$/s.exec(image.trim())?.[1];
 	if (body === undefined || splitTopLevel(image, ",").length > 1) {
 		return undefined;
 	}
 
-	const [direction = "", ...rest] = splitTopLevel(body, ",");
-	const sideAngle = direction.startsWith("to ")
-		? (SIDE_ANGLES[direction.replace(/\s+/g, " ")] ?? 180)
-		: undefined;
-	const angle = ANGLE.test(direction) ? degreesOf(direction) : sideAngle;
-	const stops = (angle === undefined ? [direction, ...rest] : rest)
+	const [first = "", ...rest] = splitTopLevel(body, ",");
+	const direction = withoutInterpolation(first);
+	const hasDirection =
+		direction !== first || ANGLE.test(direction) || direction.startsWith("to ");
+	const angle = hasDirection ? directionAngle(direction, size) : 180;
+	if (angle === undefined) {
+		return undefined;
+	}
+
+	const radians = (angle * Math.PI) / 180;
+	const length =
+		Math.abs(size.width * Math.sin(radians)) +
+		Math.abs(size.height * Math.cos(radians));
+	const stops = (hasDirection ? rest : [first, ...rest])
 		.map((stop) => splitTopLevel(stop, " "))
-		.filter((parts) => parts.length > 1 || !COLOR_HINT.test(parts[0] ?? ""))
+		.filter((parts) => parts.length > 1 || !LENGTH_START.test(parts[0] ?? ""))
 		.flatMap(([color = "", ...positions]) => {
-			const percentages = positions
-				.filter((part) => part.endsWith("%"))
-				.map(parseFloat);
+			const percentages = positions.flatMap((part) =>
+				part.endsWith("%")
+					? [parseFloat(part)]
+					: part.endsWith("px") && length
+						? [(parseFloat(part) / length) * 100]
+						: [],
+			);
 			return (percentages.length ? percentages : [undefined]).map(
 				(position) => ({ color: parseColor(color), position }),
 			);
@@ -375,7 +377,7 @@ export function parseLinearGradient(image: string, opacity: number) {
 			: [],
 	);
 	return parsed.length === stops.length
-		? ({ angle: angle ?? 180, stops: parsed } satisfies Gradient)
+		? ({ angle, stops: parsed } satisfies Gradient)
 		: undefined;
 }
 
@@ -387,7 +389,7 @@ export function parseShadow(
 ) {
 	const [layer = ""] = splitTopLevel(value, ",");
 	const parts = splitTopLevel(layer, " ");
-	const lengths = parts.filter((part) => /^(?:[-+.\d]|calc\()/.test(part));
+	const lengths = parts.filter((part) => LENGTH_START.test(part));
 	const color = parseColor(
 		parts.find((part) => !lengths.includes(part)) ?? "currentcolor",
 		current,
@@ -410,6 +412,26 @@ function degreesOf(part: string) {
 	return part === "none"
 		? 0
 		: parseFloat(part) * (HUE_UNITS[/[a-z]*$/.exec(part)?.[0] ?? ""] ?? NaN);
+}
+
+function directionAngle(
+	direction: string,
+	{ height, width }: { height: number; width: number },
+) {
+	if (ANGLE.test(direction)) {
+		return degreesOf(direction);
+	}
+
+	if (!direction.startsWith("to ")) {
+		return direction ? undefined : 180;
+	}
+
+	const words = direction.split(/\s+/).slice(1);
+	const x = words.includes("right") ? 1 : words.includes("left") ? -1 : 0;
+	const y = words.includes("bottom") ? 1 : words.includes("top") ? -1 : 0;
+	return words.length === Math.abs(x) + Math.abs(y)
+		? ((Math.atan2(x * height, -y * width) * 180) / Math.PI + 360) % 360
+		: undefined;
 }
 
 function mix(parts: string[], current: string | undefined) {
@@ -619,4 +641,12 @@ function spreadPositions(positions: (number | undefined)[]) {
 		const to = known[next] ?? 100;
 		return from + ((to - from) * (index - previous)) / (next - previous);
 	});
+}
+
+function withoutInterpolation(part: string) {
+	const words = splitTopLevel(part, " ");
+	const start = words.indexOf("in");
+	return start < 0
+		? part
+		: words.toSpliced(start, words[start + 3] === "hue" ? 4 : 2).join(" ");
 }

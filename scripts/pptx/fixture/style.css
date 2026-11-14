@@ -156,3 +156,6 @@
 .dark h1 {
 	color: tomato;
 }
+.themed {
+	color: var(--slidev-theme-primary);
+}

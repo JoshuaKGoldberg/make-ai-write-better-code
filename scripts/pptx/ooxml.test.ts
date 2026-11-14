@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import type { SlidePatch } from "./ooxml.ts";
+import type { SlidePatch, Theme, TitleLook } from "./ooxml.ts";
 
 import {
 	createGradients,
 	createNumbering,
+	masterXml,
 	normalizeDegrees,
+	notesParagraphs,
 	patchSlide,
+	themeXml,
 } from "./ooxml.ts";
 
 const slideXml = (shapes: string) =>
@@ -15,13 +18,33 @@ const slideXml = (shapes: string) =>
 const shapeXml = (id: number, name: string, body = "") =>
 	`<p:sp><p:nvSpPr><p:cNvPr id="${String(id)}" name="${name}"></p:cNvPr><p:cNvSpPr txBox="1"/><p:nvPr></p:nvPr></p:nvSpPr>${body}</p:sp>`;
 
-const theme = {
+const title: TitleLook = {
+	align: "l",
+	bold: false,
+	color: "336699",
+	cx: 1,
+	cy: 1,
+	font: "Display",
+	italic: false,
+	letterSpacing: 0,
+	size: 1800,
+	upper: false,
+	x: 0,
+	y: 0,
+};
+
+const theme: Theme = {
 	accents: [],
 	background: "000000",
 	fonts: [],
+	majorFont: "Heading",
+	minorFont: "Body",
 	name: "Deck",
 	text: "FFFFFF",
+	title,
 };
+
+const lightTheme: Theme = { ...theme, background: "FFFFFF", text: "000000" };
 
 const patch = (xml: string, changes: Partial<SlidePatch>) =>
 	patchSlide(
@@ -97,22 +120,60 @@ describe(patchSlide, () => {
 	it("finds shapes when their names need escaping", () => {
 		expect(
 			patch(slideXml(shapeXml(2, "Tom &amp; Jerry")), {
-				title: {
-					look: {
-						align: "l",
-						color: "FFFFFF",
-						cx: 1,
-						cy: 1,
-						font: "Body",
-						size: 1800,
-						x: 0,
-						y: 0,
-					},
-					name: "Tom & Jerry",
-					text: "Tom & Jerry",
-				},
+				title: { look: title, name: "Tom & Jerry", text: "Tom & Jerry" },
 			}),
 		).toContain('<p:nvPr><p:ph type="title"/></p:nvPr>');
+	});
+
+	it("builds nothing when only pictures animate", () => {
+		expect(
+			buildList(
+				patch(
+					slideXml(
+						'<p:pic><p:nvPicPr><p:cNvPr id="2" name="Photo"/></p:nvPicPr></p:pic>',
+					),
+					{ effects: [{ click: 1, name: "Photo", type: "entr" }] },
+				),
+			),
+		).toBeUndefined();
+	});
+
+	it("throws when a decorative picture's stand-in description is left", () => {
+		expect(() =>
+			patch(
+				slideXml(
+					'<p:pic><p:nvPicPr><p:cNvPr id="2" name="Photo" descr="pptx:decorative"/></p:nvPicPr></p:pic>',
+				),
+				{},
+			),
+		).toThrow(
+			'Expected no descr="pptx:decorative" left in the package\'s XML.',
+		);
+	});
+
+	it("throws when a gradient's placeholder color is left", () => {
+		const gradients = createGradients(new Set());
+		const sentinel = gradients.sentinel({ angle: 0, stops: [] });
+
+		expect(() =>
+			patchSlide(
+				slideXml(
+					shapeXml(
+						2,
+						"A",
+						`<a:solidFill><a:srgbClr val="${sentinel}"><a:lumMod val="50000"/></a:srgbClr></a:solidFill>`,
+					),
+				),
+				{
+					decorative: [],
+					effects: [],
+					lists: [],
+					notes: "",
+					pictureCorners: [],
+				},
+				{ gradients, theme },
+			),
+		).toThrow('Expected no val="FEA000" left in the package\'s XML.');
 	});
 
 	it("throws when a shape to patch isn't written as pptxgenjs writes it", () => {
@@ -220,5 +281,85 @@ describe(normalizeDegrees, () => {
 		[725, 5],
 	])("normalizes %d to %d", (rotation, normalized) => {
 		expect(normalizeDegrees(rotation)).toBe(normalized);
+	});
+});
+
+describe(themeXml, () => {
+	const original =
+		'<a:theme name="Office Theme"><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText"/></a:dk1><a:lt1><a:sysClr val="window"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Arial Black"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:objectDefaults/><thm15:themeFamily name="Office Theme"/></a:theme>';
+
+	it("gives titles the dark second text color when the background is light", () => {
+		expect(themeXml(original, lightTheme)).toBe(
+			'<a:theme name="Deck"><a:clrScheme name="Deck"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="336699"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2></a:clrScheme><a:fontScheme name="Deck"><a:majorFont><a:latin typeface="Heading"/><a:ea typeface="Heading"/><a:cs typeface="Heading"/></a:majorFont><a:minorFont><a:latin typeface="Body"/><a:ea typeface="Body"/><a:cs typeface="Body"/></a:minorFont></a:fontScheme><a:objectDefaults/><thm15:themeFamily name="Deck"/></a:theme>',
+		);
+	});
+
+	it("gives new shapes no outline when the deck's most common box has none", () => {
+		expect(
+			themeXml(original, {
+				...theme,
+				shape: { fill: { color: "1B2130", transparency: 0 } },
+			}),
+		).toContain(
+			'<a:spPr><a:solidFill><a:srgbClr val="1B2130"/></a:solidFill><a:ln><a:noFill/></a:ln></a:spPr>',
+		);
+	});
+});
+
+describe(masterXml, () => {
+	const original =
+		'<p:sldMaster><p:cSld><p:spTree><p:grpSpPr></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"/><p:txStyles><p:titleStyle><a:lvl1pPr algn="ctr"><a:spcBef><a:spcPct val="0"/></a:spcBef><a:defRPr sz="4400" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mj-lt"/><a:ea typeface="+mj-ea"/><a:cs typeface="+mj-cs"/></a:defRPr></a:lvl1pPr></p:titleStyle><p:otherStyle></p:otherStyle></p:txStyles></p:sldMaster>';
+
+	it("names the title's font and keeps the color mapping when the background is light and the font isn't the theme's", () => {
+		expect(masterXml(original, lightTheme, "rId9")).toBe(
+			'<p:sldMaster><p:cSld><p:bg><p:bgPr><a:blipFill dpi="0" rotWithShape="1"><a:blip r:embed="rId9"/><a:srcRect/><a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:grpSpPr></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title Placeholder 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1" cy="1"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr lIns="0" tIns="0" rIns="0" bIns="0" rtlCol="0" anchor="t"/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"/><p:txStyles><p:titleStyle><a:lvl1pPr algn="l"><a:spcBef><a:spcPct val="0"/></a:spcBef><a:defRPr sz="1800" kern="1200"><a:solidFill><a:schemeClr val="tx2"/></a:solidFill><a:latin typeface="Display"/><a:ea typeface="Display"/><a:cs typeface="Display"/></a:defRPr></a:lvl1pPr></p:titleStyle><p:otherStyle></p:otherStyle></p:txStyles></p:sldMaster>',
+		);
+	});
+});
+
+describe(notesParagraphs, () => {
+	const paragraphs = (notes: string) =>
+		notesParagraphs(notes, "Mono", () => "rId1");
+
+	it("writes an HTML block's text when the notes have one", () => {
+		expect(paragraphs("<div>A whole <b>block</b></div>")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>A whole block</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("writes each element of an HTML block as a paragraph", () => {
+		expect(paragraphs("<p>One</p><p>Two &amp; three</p>")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>One</a:t></a:r></a:p>',
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Two &amp; three</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("writes nothing when an HTML block is a comment", () => {
+		expect(paragraphs("<!-- hidden -->")).toEqual([]);
+	});
+
+	it("breaks the line when inline HTML has a br", () => {
+		expect(paragraphs("Line one<br>Line two")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Line one</a:t></a:r><a:br><a:rPr lang="en-US" dirty="0"/></a:br><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Line two</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("bolds and italicizes text when inline HTML tags format it", () => {
+		expect(paragraphs("Say <b>this</b> and <em>that</em>")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Say </a:t></a:r><a:r><a:rPr lang="en-US" b="1" dirty="0"/><a:t>this</a:t></a:r><a:r><a:rPr lang="en-US" dirty="0"/><a:t> and </a:t></a:r><a:r><a:rPr lang="en-US" i="1" dirty="0"/><a:t>that</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("keeps a heading bold when inline HTML closes a bold tag in it", () => {
+		expect(paragraphs("# A <strong>B</strong> C")).toEqual([
+			'<a:p><a:r><a:rPr lang="en-US" b="1" dirty="0"/><a:t>A B C</a:t></a:r></a:p>',
+		]);
+	});
+
+	it("continues a list item without a marker when the item has a second paragraph", () => {
+		expect(paragraphs("- one\n\n  more")).toEqual([
+			'<a:p><a:pPr marL="285750" indent="-285750"><a:buChar char="•"/></a:pPr><a:r><a:rPr lang="en-US" dirty="0"/><a:t>one</a:t></a:r></a:p>',
+			'<a:p><a:pPr marL="285750" indent="0"><a:buNone/></a:pPr><a:r><a:rPr lang="en-US" dirty="0"/><a:t>more</a:t></a:r></a:p>',
+		]);
 	});
 });

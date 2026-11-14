@@ -195,6 +195,8 @@ img, svg, video, canvas { display: inline-block }
 `;
 
 const USER_AGENT_LAYER = "<user agent>";
+const USER_AGENT_LAYER_RANK = -1;
+const PRESENTATION_HINT_LAYER_RANK = -0.5;
 
 const BORDER_STYLES = new Set([
 	"dashed",
@@ -209,6 +211,7 @@ const BORDER_STYLES = new Set([
 	"solid",
 ]);
 const CSS_WIDE_KEYWORDS = new Set([
+	"inherit",
 	"initial",
 	"revert",
 	"revert-layer",
@@ -230,8 +233,13 @@ const RELATIVE_SIZES: Partial<Record<string, number>> = {
 };
 const NORMAL_LINE_HEIGHT = 1.2;
 const SIDES = ["top", "right", "bottom", "left"] as const;
-const TEXT_DECORATION_LINE =
-	/^(?:blink|line-through|none|overline|underline|inherit|initial|unset|revert|revert-layer)$/;
+const TEXT_DECORATION_LINES = new Set([
+	"blink",
+	"line-through",
+	"none",
+	"overline",
+	"underline",
+]);
 const UNITLESS = /^[\d.]+$/;
 const MAX_VAR_DEPTH = 20;
 
@@ -276,26 +284,16 @@ const LEGACY_PSEUDO_ELEMENTS = new Set([
 const CONDITIONAL_RULES = new Set(["container", "media", "supports"]);
 const SCREEN_MEDIA_TYPES = new Set(["all", "screen"]);
 
-const DESKTOP_MEDIA: Partial<Record<string, number | string>> = {
+const DESKTOP_MEDIA = {
 	"any-hover": "hover",
 	"any-pointer": "fine",
 	color: 8,
-	"color-gamut": "srgb",
-	"color-index": 0,
-	"display-mode": "browser",
-	"dynamic-range": "standard",
 	"forced-colors": "none",
-	grid: 0,
 	hover: "hover",
-	"inverted-colors": "none",
 	monochrome: 0,
 	pointer: "fine",
 	"prefers-contrast": "no-preference",
-	"prefers-reduced-data": "no-preference",
 	"prefers-reduced-motion": "no-preference",
-	"prefers-reduced-transparency": "no-preference",
-	scripting: "enabled",
-	update: "fast",
 };
 const FALSE_IN_BOOLEAN_CONTEXT = new Set([0, "no-preference", "none"]);
 
@@ -336,7 +334,19 @@ const VIEWPORT_UNITS: Record<string, (viewport: Viewport) => number> = {
 	vw: ({ width }) => width,
 };
 
-const LENGTH_SOURCE = String.raw`(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(rem|em|ex|ch|cap|px|pt|pc|in|cm|mm|q|%|[sld]?v(?:min|max|[whib]))?`;
+const longestFirst = (units: string[]) =>
+	units
+		.filter(Boolean)
+		.toSorted((first, second) => second.length - first.length);
+const LENGTH_SOURCE = String.raw`(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(${[
+	...longestFirst([
+		...Object.keys(ABSOLUTE_UNITS),
+		...Object.keys(FONT_UNITS),
+		"rem",
+	]),
+	"%",
+	`[sld]?(?:${longestFirst(Object.keys(VIEWPORT_UNITS)).join("|")})`,
+].join("|")})?`;
 const LENGTH = new RegExp(`^${LENGTH_SOURCE}$`, "i");
 const LENGTHS_IN_TEXT = new RegExp(LENGTH_SOURCE, "gi");
 const MATH_FUNCTION = /^(?:calc|min|max|clamp)\(/;
@@ -510,7 +520,7 @@ export function createCascade(sheets: string[], environment: CascadeOptions) {
 		return secondParts.length - firstParts.length;
 	});
 	const ranks = new Map([
-		[USER_AGENT_LAYER, -1],
+		[USER_AGENT_LAYER, USER_AGENT_LAYER_RANK],
 		...ranked.map((name, index): [string, number] => [name, index]),
 	]);
 	return rules.map(({ layerName, ...rule }) => ({
@@ -539,7 +549,7 @@ export function computeStyles(
 		before: rulesFor("before"),
 		marker: rulesFor("marker"),
 	};
-	let rootFontSize = parseFloat(INITIAL["font-size"]);
+	let rootFontSize = parseFloat(INITIAL_STYLE["font-size"]);
 	const length = (value: string, fontSize: number, percentBase?: number) =>
 		resolveLength(value, { fontSize, percentBase, rootFontSize, viewport });
 	const matching = (element: Element, candidates: CascadeRule[]) =>
@@ -551,10 +561,9 @@ export function computeStyles(
 			first.order - second.order;
 
 	const resolve = (
-		element: Element,
 		parent: StyleMap,
 		applying: CascadeRule[],
-		pseudo = false,
+		inline: Declaration[] = [],
 	) => {
 		const style: StyleMap = {};
 		for (const [key, value] of Object.entries(parent)) {
@@ -563,10 +572,7 @@ export function computeStyles(
 			}
 		}
 
-		const inlineStyle = pseudo ? undefined : element.getAttribute("style");
-		const inline = inlineStyle ? parseDeclarations(inlineStyle) : [];
 		const ordered = [
-			...(pseudo ? [] : presentationHints(element)),
 			...applying
 				.toSorted(byPrecedence(1))
 				.flatMap((rule) =>
@@ -583,7 +589,12 @@ export function computeStyles(
 
 		for (const { property, value } of ordered) {
 			if (property.startsWith("--")) {
-				style[property] = value;
+				style[property] =
+					value === "initial"
+						? undefined
+						: CSS_WIDE_KEYWORDS.has(value)
+							? parent[property]
+							: value;
 			}
 		}
 
@@ -616,16 +627,18 @@ export function computeStyles(
 					: value;
 		}
 
-		const parentSize = parseFloat(parent["font-size"] ?? INITIAL["font-size"]);
+		const parentSize = parseFloat(
+			parent["font-size"] ?? INITIAL_STYLE["font-size"],
+		);
 		const fontSize = resolveFontSize(
-			style["font-size"] ?? INITIAL["font-size"],
+			style["font-size"] ?? INITIAL_STYLE["font-size"],
 			parentSize,
 			(value) => length(value, parentSize, parentSize),
 		);
 		style["font-size"] = pixels(fontSize);
 		style["font-weight"] = resolveWeight(
-			style["font-weight"] ?? INITIAL["font-weight"],
-			Number(parent["font-weight"] ?? INITIAL["font-weight"]),
+			style["font-weight"] ?? INITIAL_STYLE["font-weight"],
+			Number(parent["font-weight"] ?? INITIAL_STYLE["font-weight"]),
 		);
 
 		const letterSpacing = style["letter-spacing"];
@@ -649,7 +662,7 @@ export function computeStyles(
 			}
 		}
 
-		const computed: ComputedStyle = { ...INITIAL, ...style };
+		const computed: ComputedStyle = { ...INITIAL_STYLE, ...style };
 
 		if (
 			(/flex|grid/.test(parent.display ?? "") ||
@@ -682,7 +695,12 @@ export function computeStyles(
 	};
 
 	const walk = (element: Element, parent: StyleMap) => {
-		const { style } = resolve(element, parent, matching(element, elementRules));
+		const inlineStyle = element.getAttribute("style");
+		const { style } = resolve(
+			parent,
+			[...matching(element, elementRules), ...presentationHints(element)],
+			inlineStyle ? parseDeclarations(inlineStyle) : [],
+		);
 		styles.set(element, style);
 		if (element === document.documentElement) {
 			rootFontSize = parseFloat(style["font-size"]);
@@ -691,8 +709,7 @@ export function computeStyles(
 		if (element.localName === "li") {
 			markers.set(
 				element,
-				resolve(element, style, matching(element, pseudoRules.marker), true)
-					.style,
+				resolve(style, matching(element, pseudoRules.marker)).style,
 			);
 		}
 
@@ -707,12 +724,7 @@ export function computeStyles(
 					continue;
 				}
 
-				const { declared, style: pseudoStyle } = resolve(
-					element,
-					style,
-					applying,
-					true,
-				);
+				const { declared, style: pseudoStyle } = resolve(style, applying);
 				const text = contentText(pseudoStyle.content, element);
 				if (text !== undefined && pseudoStyle.display !== "none") {
 					const css = declared
@@ -792,7 +804,7 @@ export function resolveLength(
 
 /** Resolves a length against the initial font size, as media queries and SVG attributes do. */
 export function resolveInitialLength(value: string, viewport: Viewport) {
-	const fontSize = parseFloat(INITIAL["font-size"]);
+	const fontSize = parseFloat(INITIAL_STYLE["font-size"]);
 	return resolveLength(value, { fontSize, rootFontSize: fontSize, viewport });
 }
 
@@ -977,7 +989,10 @@ function expand(property: string, value: string) {
 			return {
 				"text-decoration-line":
 					splitTopLevel(value, " ")
-						.filter((part) => TEXT_DECORATION_LINE.test(part))
+						.filter(
+							(part) =>
+								TEXT_DECORATION_LINES.has(part) || CSS_WIDE_KEYWORDS.has(part),
+						)
 						.join(" ") || "none",
 			};
 		default:
@@ -1191,24 +1206,16 @@ function lineHeightFactor(lineHeight: string) {
 			: undefined;
 }
 
-function mediaValue(
-	name: string,
-	{ colorScheme, viewport }: CascadeOptions,
-): number | string | undefined {
-	switch (name) {
-		case "aspect-ratio":
-			return viewport.width / viewport.height;
-		case "height":
-			return viewport.height;
-		case "orientation":
-			return viewport.width >= viewport.height ? "landscape" : "portrait";
-		case "prefers-color-scheme":
-			return colorScheme;
-		case "width":
-			return viewport.width;
-		default:
-			return DESKTOP_MEDIA[name];
-	}
+function mediaValue(name: string, { colorScheme, viewport }: CascadeOptions) {
+	const features: Partial<Record<string, number | string>> = {
+		...DESKTOP_MEDIA,
+		"aspect-ratio": viewport.width / viewport.height,
+		height: viewport.height,
+		orientation: viewport.width >= viewport.height ? "landscape" : "portrait",
+		"prefers-color-scheme": colorScheme,
+		width: viewport.width,
+	};
+	return features[name];
 }
 
 function preludeMatches(
@@ -1227,15 +1234,25 @@ function preludeMatches(
 	);
 }
 
-function presentationHints(element: Element) {
-	if (element.namespaceURI !== SVG_NAMESPACE) {
-		return [];
-	}
-
-	return PRESENTATION_ATTRIBUTES.flatMap((property): Declaration[] => {
-		const value = element.getAttribute(property);
-		return value === null ? [] : [{ important: false, property, value }];
-	});
+function presentationHints(element: Element): CascadeRule[] {
+	const declarations =
+		element.namespaceURI === SVG_NAMESPACE
+			? PRESENTATION_ATTRIBUTES.flatMap((property): Declaration[] => {
+					const value = element.getAttribute(property);
+					return value === null ? [] : [{ important: false, property, value }];
+				})
+			: [];
+	return declarations.length
+		? [
+				{
+					declarations,
+					layer: PRESENTATION_HINT_LAYER_RANK,
+					order: 0,
+					selector: "",
+					specificity: 0,
+				},
+			]
+		: [];
 }
 
 function queryMatches(

@@ -2,15 +2,25 @@ import JSZip from "jszip";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 
 import type { BuildPptxResult } from "./types.ts";
 
-import { buildPptx, BuildPptxError } from "./build.ts";
+import { buildPptx } from "./build.ts";
+import { BuildPptxError } from "./error.ts";
 
 describe(buildPptx, () => {
 	const entry = path.join(import.meta.dirname, "fixture/slides.md");
 	let directory: string;
+	let output: string;
 	let result: BuildPptxResult;
 	let zip: JSZip;
 
@@ -32,7 +42,7 @@ describe(buildPptx, () => {
 
 	beforeAll(async () => {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "pptx-build-"));
-		const output = path.join(directory, "fixture.pptx");
+		output = path.join(directory, "fixture.pptx");
 		result = await buildPptx({ entry, output });
 		zip = await JSZip.loadAsync(await fs.readFile(output));
 	}, 120_000);
@@ -43,6 +53,7 @@ describe(buildPptx, () => {
 
 	it("reports content it couldn't export as errors when a slide embeds a page and a video", () => {
 		expect(result).toEqual({
+			output,
 			problems: expect.arrayContaining([
 				{
 					message:
@@ -56,8 +67,31 @@ describe(buildPptx, () => {
 					slide: 7,
 				},
 			]),
-			slides: 17,
+			slides: 21,
 		});
+	});
+
+	it("reports an error and keeps the states that rendered when a click fails", async () => {
+		expect({
+			problems: result.problems,
+			slide: await slide(21),
+		}).toEqual({
+			problems: expect.arrayContaining([
+				{
+					click: 1,
+					message: "Couldn't render the click: It failed on a click.",
+					severity: "error",
+					slide: 21,
+				},
+			]),
+			slide: expect.stringContaining("<a:t>Before the click</a:t>"),
+		});
+	});
+
+	it("colors text by the deck's themeConfig when its CSS uses a theme variable", async () => {
+		expect(await slide(20)).toMatch(
+			/<a:srgbClr val="5D8392"\/>(?:(?!<\/a:r>).)*<a:t>Themed<\/a:t>/s,
+		);
 	});
 
 	it("reports a warning when a slide has a v-mark", () => {
@@ -95,22 +129,55 @@ describe(buildPptx, () => {
 	});
 
 	it("writes the same bytes when built twice", async () => {
-		const output = path.join(directory, "again.pptx");
-		await buildPptx({ entry, output });
+		const again = path.join(directory, "again.pptx");
+		await buildPptx({ entry, output: again });
 
-		expect(
-			(await fs.readFile(output)).equals(
-				await fs.readFile(path.join(directory, "fixture.pptx")),
-			),
-		).toBe(true);
+		expect((await fs.readFile(again)).equals(await fs.readFile(output))).toBe(
+			true,
+		);
 	}, 120_000);
 
+	it("writes the failed slides blank when every slide fails", async () => {
+		const failed = path.join(directory, "failed.pptx");
+
+		expect({
+			result: await buildPptx({ entry, output: failed, range: "17" }),
+			written: (await fs.stat(failed)).isFile(),
+		}).toEqual({
+			result: {
+				output: failed,
+				problems: expect.arrayContaining([
+					expect.objectContaining({ severity: "error", slide: 17 }),
+				]),
+				slides: 1,
+			},
+			written: true,
+		});
+	}, 120_000);
+
+	describe("when given no output", () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		it("names the file by the deck's exportFilename", async () => {
+			vi.spyOn(process, "cwd").mockReturnValue(directory);
+
+			expect(await buildPptx({ entry, range: "1" })).toEqual(
+				expect.objectContaining({
+					output: path.join(directory, "fixture-deck.pptx"),
+				}),
+			);
+		}, 120_000);
+	});
+
 	it("writes one slide per click state when withClicks is set", async () => {
-		const output = path.join(directory, "clicks.pptx");
+		const clicks = path.join(directory, "clicks.pptx");
 
 		expect(
-			await buildPptx({ entry, output, range: "2", withClicks: true }),
+			await buildPptx({ entry, output: clicks, range: "2", withClicks: true }),
 		).toEqual({
+			output: clicks,
 			problems: [
 				{
 					message:
@@ -122,7 +189,7 @@ describe(buildPptx, () => {
 		});
 	}, 120_000);
 
-	it("keeps the model, numbering states by click, and Vite's cache when given a work directory", async () => {
+	it("keeps the model, numbering states by click, and rendered images when given a work directory", async () => {
 		const work = path.join(directory, "work");
 		await buildPptx({
 			entry,
@@ -137,7 +204,7 @@ describe(buildPptx, () => {
 				await fs.readFile(path.join(work, "model.json"), "utf8"),
 			) as unknown,
 		}).toEqual({
-			files: expect.arrayContaining(["model.json", "vite"]),
+			files: ["background.png", "model.json", "rasters"],
 			model: expect.objectContaining({
 				slides: [
 					expect.objectContaining({
@@ -149,25 +216,62 @@ describe(buildPptx, () => {
 		});
 	}, 120_000);
 
-	it("styles slides in dark mode when dark is set", async () => {
-		const output = path.join(directory, "dark.pptx");
-		await buildPptx({ dark: true, entry, output, range: "1" });
-		const dark = await JSZip.loadAsync(await fs.readFile(output));
+	it("styles slides and renders Slidev's dark content in dark mode when dark is set", async () => {
+		const darkOutput = path.join(directory, "dark.pptx");
+		await buildPptx({ dark: true, entry, output: darkOutput, range: "1" });
+		const dark = await JSZip.loadAsync(await fs.readFile(darkOutput));
 
-		expect(await dark.file("ppt/slides/slide1.xml")?.async("string")).toMatch(
-			/<a:srgbClr val="FF6347"\/>(?:(?!<\/a:r>).)*<a:t>Fixture Cover<\/a:t>/s,
-		);
+		expect({
+			cover: await dark.file("ppt/slides/slide1.xml")?.async("string"),
+			theme: await dark.file("ppt/theme/theme1.xml")?.async("string"),
+		}).toEqual({
+			cover: expect.stringMatching(/^(?!.*Light only).*<a:t>Dark only<\/a:t>/s),
+			theme: expect.stringContaining('<a:srgbClr val="FF6347"/>'),
+		});
 	}, 120_000);
+
+	it("throws when dark is set and the deck's colorSchema is light", async () => {
+		const light = path.join(directory, "light.md");
+		await fs.writeFile(
+			light,
+			"---\ntheme: none\ncolorSchema: light\n---\n\n# Light\n",
+		);
+
+		await expect(
+			buildPptx({
+				dark: true,
+				entry: light,
+				output: path.join(directory, "light.pptx"),
+			}),
+		).rejects.toThrow(
+			new BuildPptxError(
+				"The deck's colorSchema is \"light\", so it can't export in dark mode.",
+			),
+		);
+	});
+
+	it("throws when the entry doesn't exist", async () => {
+		const missing = path.join(directory, "missing.md");
+
+		await expect(
+			buildPptx({
+				entry: missing,
+				output: path.join(directory, "missing.pptx"),
+			}),
+		).rejects.toThrow(
+			new BuildPptxError(`The entry ${missing} doesn't exist.`),
+		);
+	});
 
 	it("throws when a range selects no slides", async () => {
 		await expect(
 			buildPptx({
 				entry,
 				output: path.join(directory, "invalid.pptx"),
-				range: "18",
+				range: "22",
 			}),
 		).rejects.toThrow(
-			new BuildPptxError('Range "18" must select slides from 1 to 17.'),
+			new BuildPptxError('Range "22" must select slides from 1 to 21.'),
 		);
 	});
 
@@ -179,7 +283,7 @@ describe(buildPptx, () => {
 				range: "two",
 			}),
 		).rejects.toThrow(
-			new BuildPptxError('Range "two" must select slides from 1 to 17.'),
+			new BuildPptxError('Range "two" must select slides from 1 to 21.'),
 		);
 	});
 
@@ -200,12 +304,12 @@ describe(buildPptx, () => {
 			"Box: mix",
 			"Text: Layered: lime",
 			"Text: Unlayered: teal",
-			"Text: 3 / 17 · default",
+			"Text: 3 / 21 · default",
 		]);
 	});
 
 	it("renders global-top layers with Slidev's navigation", async () => {
-		expect(await slide(5)).toContain("<a:t>5 / 17 · image-right</a:t>");
+		expect(await slide(5)).toContain("<a:t>5 / 21 · image-right</a:t>");
 	});
 
 	it("names fonts by the font file when the deck loads one", async () => {

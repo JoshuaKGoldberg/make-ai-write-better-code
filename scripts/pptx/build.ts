@@ -1,5 +1,8 @@
+import type { SlidevConfig } from "@slidev/types";
+
 import { parseRangeString } from "@slidev/parser/core";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,7 +10,7 @@ import path from "node:path";
 import type { Assets } from "./assets.ts";
 import type { FontBook } from "./fonts.ts";
 import type { Css, Prepared } from "./layout.ts";
-import type { Canvas, Deck, ImageItem, Item } from "./model.ts";
+import type { Canvas, Deck, ImageItem, Item, Slide } from "./model.ts";
 import type { RenderedSlide } from "./render.ts";
 import type {
 	BuildPptxOptions,
@@ -17,6 +20,7 @@ import type {
 
 import { createAssets, isNativeImage } from "./assets.ts";
 import { createCascade } from "./cascade.ts";
+import { BuildPptxError } from "./error.ts";
 import { extractState } from "./extract.ts";
 import { createFontBook } from "./fonts.ts";
 import { createLayout } from "./layout.ts";
@@ -38,11 +42,6 @@ interface PreparedSlide {
 }
 
 type Report = (problem: BuildPptxProblem) => void;
-
-/** A problem with the options passed to {@link buildPptx}. */
-export class BuildPptxError extends Error {
-	override name = "BuildPptxError";
-}
 
 export async function buildPptx({
 	work,
@@ -70,11 +69,25 @@ async function build(
 	}: Omit<BuildPptxOptions, "work">,
 	work: string,
 ) {
-	const deck = await resolveDeck(path.resolve(entry));
+	const entryFile = path.resolve(entry);
+	if (!existsSync(entryFile)) {
+		throw new BuildPptxError(`The entry ${entryFile} doesn't exist.`);
+	}
+
+	const deck = await resolveDeck(entryFile);
 	const { config, slides: deckSlides } = deck.data;
 	const numbers = slideNumbersOf(range, deckSlides.length);
+	const colorScheme = colorSchemeOf(dark, config.colorSchema);
+	config.colorSchema = colorScheme;
+	const outputFile = path.resolve(
+		pptxFileName(
+			output ??
+				config.exportFilename ??
+				`${path.basename(entry, ".md")}-export`,
+		),
+	);
 	await fs.mkdir(path.join(work, "rasters"), { recursive: true });
-	const renderer = await createSlideRenderer(deck, path.join(work, "vite"));
+	const renderer = await createSlideRenderer(deck);
 	try {
 		const problems: BuildPptxProblem[] = [];
 		const report: Report = (problem) => {
@@ -94,8 +107,6 @@ async function build(
 			height: Math.ceil(config.canvasWidth / config.aspectRatio),
 			width: config.canvasWidth,
 		};
-		const colorScheme =
-			(dark ?? config.colorSchema === "dark") ? "dark" : "light";
 		const assets = createAssets({
 			publicDir: renderer.publicDir,
 			root: renderer.root,
@@ -108,8 +119,8 @@ async function build(
 			report,
 			async ({ number }) => {
 				const slide = await renderer.renderSlide(number);
-				for (const message of slide.problems) {
-					report({ message, severity: "warning", slide: number });
+				for (const problem of slide.problems) {
+					report({ ...problem, slide: number });
 				}
 
 				return { rendered: slide };
@@ -117,15 +128,13 @@ async function build(
 		);
 
 		const globalCss = await renderer.globalCss();
-		const styled = await eachSlide(rendered, report, async ({ number }) => {
-			const sheets = [...globalCss, ...(await renderer.slideCss(number))];
-			return {
-				css: {
-					rules: createCascade(sheets, { colorScheme, viewport: canvas }),
-					sheets,
-				},
-			};
-		});
+		const styled = await eachSlide(rendered, report, async ({ number }) => ({
+			css: cssOf(
+				[...globalCss, ...(await renderer.slideCss(number))],
+				colorScheme,
+				canvas,
+			),
+		}));
 
 		const fonts = createFontBook({
 			assets,
@@ -138,25 +147,17 @@ async function build(
 		);
 
 		// Style every state first, so the fonts their text uses load before any layout.
-		const prepared: PreparedSlide[] = await eachSlide(
-			styled,
-			report,
-			(slide) => ({
-				states: slide.rendered.states.map((html) =>
-					layout.prepare(slide.number, html, slide.css, {
-						globalBottom: slide.rendered.globalBottom,
-						globalTop: slide.rendered.globalTop,
-						staticLayers,
-						zoom: slide.rendered.zoom,
-					}),
-				),
-			}),
-		);
-		const first = prepared.at(0);
-		if (!first) {
-			return { problems, slides: 0 };
-		}
-
+		const prepared: PreparedSlide[] = styled.map((slide) => ({
+			...slide,
+			states: slide.rendered.states.map((html) =>
+				layout.prepare(slide.number, html, slide.css, {
+					globalBottom: slide.rendered.globalBottom,
+					globalTop: slide.rendered.globalTop,
+					staticLayers,
+					zoom: slide.rendered.zoom,
+				}),
+			),
+		}));
 		await layout.registerFonts(
 			await fonts.load(
 				new Set(
@@ -175,30 +176,35 @@ async function build(
 			report,
 			work,
 		});
-		const extracted = await eachSlide(prepared, report, async (slide) => {
-			const items = [];
+		const extracted = new Map<number, Slide["states"]>();
+		for (const slide of prepared) {
+			const states = [];
 			for (const [index, state] of slide.states.entries()) {
 				const clicks = slide.rendered.clicksStart + index;
-				items.push({
+				states.push({
 					clicks,
 					items: await extractor.extract(slide, clicks, state),
 				});
 			}
 
-			return { items };
-		});
+			extracted.set(slide.number, states);
+		}
 
+		const first = styled.at(0);
 		const deckModel: Deck = {
 			aspectRatio: config.aspectRatio,
 			author: config.author,
-			background: await writeBackground(layout, first, staticLayers, work),
+			background: await writeBackground(
+				layout,
+				first?.css ?? cssOf(globalCss, colorScheme, canvas),
+				{ globalBottom: first?.rendered.globalBottom ?? "", staticLayers },
+				work,
+			),
 			canvas,
 			slides: numbers.map((number) => ({
 				notes: (deckSlides[number - 1].note ?? "").trim(),
 				number,
-				states: extracted.find((slide) => slide.number === number)?.items ?? [
-					{ clicks: 0, items: [] },
-				],
+				states: extracted.get(number) ?? [{ clicks: 0, items: [] }],
 				transition: transitionInto(number, deckSlides, config),
 			})),
 			title: config.title,
@@ -211,8 +217,8 @@ async function build(
 		const written = await writePptx({
 			deck: deckModel,
 			fonts,
-			out: output,
-			slidePerClick: withClicks,
+			output: outputFile,
+			withClicks,
 		});
 		for (const family of await fonts.missingFamilies()) {
 			report({
@@ -222,10 +228,27 @@ async function build(
 		}
 
 		written.problems.forEach(report);
-		return { problems, slides: written.slides };
+		return { output: outputFile, problems, slides: written.slides };
 	} finally {
 		await renderer.close();
 	}
+}
+
+function colorSchemeOf(
+	dark: boolean | undefined,
+	colorSchema: SlidevConfig["colorSchema"],
+) {
+	const scheme = (dark ?? colorSchema === "dark") ? "dark" : "light";
+	if (
+		(colorSchema === "dark" || colorSchema === "light") &&
+		scheme !== colorSchema
+	) {
+		throw new BuildPptxError(
+			`The deck's colorSchema is "${colorSchema}", so it can't export in ${scheme} mode.`,
+		);
+	}
+
+	return scheme;
 }
 
 function createStateExtractor({
@@ -315,6 +338,14 @@ function createStateExtractor({
 	return { extract };
 }
 
+function cssOf(
+	sheets: string[],
+	colorScheme: "dark" | "light",
+	viewport: Canvas,
+) {
+	return { rules: createCascade(sheets, { colorScheme, viewport }), sheets };
+}
+
 async function eachSlide<
 	Built extends { number: number },
 	Stage extends object,
@@ -343,6 +374,10 @@ async function eachSlide<
 	return succeeded;
 }
 
+function pptxFileName(output: string) {
+	return output.endsWith(".pptx") ? output : `${output}.pptx`;
+}
+
 function slideNumbersOf(range: string | undefined, count: number) {
 	const numbers = parseRangeString(count, range);
 	if (
@@ -359,14 +394,11 @@ function slideNumbersOf(range: string | undefined, count: number) {
 
 async function writeBackground(
 	layout: Layout,
-	first: PreparedSlide,
-	staticLayers: number[],
+	css: Css,
+	layers: { globalBottom: string; staticLayers: number[] },
 	work: string,
 ) {
-	const png = await layout.renderBackground(first.css, {
-		globalBottom: first.rendered.globalBottom,
-		staticLayers,
-	});
+	const png = await layout.renderBackground(css, layers);
 	const file = path.join(work, "background.png");
 	await fs.writeFile(file, png);
 	return { color: await layout.averageColor(png), file };

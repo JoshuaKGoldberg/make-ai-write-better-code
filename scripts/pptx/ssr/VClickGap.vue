@@ -6,8 +6,8 @@ const props = defineProps({
 });
 
 const delta = Number.isNaN(Number(props.size)) ? 1 : Number(props.size);
-const target = useClickTarget((clicks, element) => {
-	clicks.register(element, { delta, max: clicks.currentOffset + delta - 1 });
+const target = useClickTarget((clicks, element, id) => {
+	clicks.register(id, { delta, max: clicks.currentOffset + delta - 1 });
 	element.remove();
 });
 </script>

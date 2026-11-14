@@ -1,15 +1,28 @@
 <script setup lang="ts">
-import { createRequire } from "node:module";
-
-defineOptions({ inheritAttrs: false });
-
-// Slidev aliases lz-string to its CommonJS file when process.argv[1] makes it think it was installed globally, which Vite can't evaluate.
-const require = createRequire(import.meta.url);
-const lzString = require("lz-string");
+import { lzString } from "./lzString.ts";
+import { useSlideProblems } from "./problems.ts";
 
 const props = defineProps({
 	codeLz: { default: "", type: String },
+	diffLz: { default: "", type: String },
+	lang: { default: "typescript", type: String },
+	runnable: Boolean,
 });
+
+const problems = useSlideProblems();
+if (props.diffLz) {
+	problems.push({
+		message: "Couldn't export the modified side of a monaco-diff block.",
+		severity: "error",
+	});
+}
+
+if (props.runnable) {
+	problems.push({
+		message: "Couldn't export the output of a monaco-run block.",
+		severity: "error",
+	});
+}
 
 const lines = lzString.decompressFromBase64(props.codeLz).trimEnd().split("\n");
 </script>

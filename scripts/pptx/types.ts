@@ -1,15 +1,15 @@
 export interface BuildPptxOptions {
-	/** Whether to export in dark mode; defaults to whether the deck's `colorSchema` is "dark". */
+	/** Whether to export in dark mode; defaults to whether the deck's `colorSchema` is "dark". Throws when the deck's `colorSchema` is the other mode. */
 	dark?: boolean;
 	/** The deck's Markdown entry, relative to the working directory; defaults to "slides.md". */
 	entry?: string;
-	/** The .pptx file to write. */
-	output: string;
+	/** The .pptx file to write, relative to the working directory, adding ".pptx" when it's missing; defaults to the deck's `exportFilename`, else "{entry}-export". */
+	output?: string;
 	/** The slides to build, as a Slidev range such as "1,4-6"; defaults to all of them. */
 	range?: string;
 	/** Whether to write one static slide per click state instead of animating clicks. */
 	withClicks?: boolean;
-	/** A directory to keep intermediate files in: the model, rendered images, and Vite's cache. Defaults to a temporary directory, removed once built. */
+	/** A directory to keep intermediate files in: the model and rendered images. Defaults to a temporary directory, removed once built. */
 	work?: string;
 }
 
@@ -25,6 +25,8 @@ export interface BuildPptxProblem {
 }
 
 export interface BuildPptxResult {
+	/** The absolute path of the .pptx file written. */
+	output: string;
 	problems: BuildPptxProblem[];
 	/** How many PowerPoint slides were written: one per Slidev slide, or one per click state with `withClicks`. */
 	slides: number;

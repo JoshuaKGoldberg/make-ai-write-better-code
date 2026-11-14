@@ -1,14 +1,14 @@
 import type { ClicksContext } from "@slidev/types";
 
 import { useFixedNav } from "@slidev/client/composables/useNav.ts?pptx-original";
-import { computed, inject, ref, toRaw } from "vue";
+import { computed, inject, ref } from "vue";
 
 // eslint-disable-next-line n/no-missing-import -- Slidev's virtual module, which Vite resolves.
 import { slides } from "#slidev/slides";
 
 export * from "@slidev/client/composables/useNav.ts?pptx-original";
 
-const injectionSlidevContext = "$$slidev-context";
+export const injectionSlideNav = "$$slidev-pptx-nav";
 
 export function createSlideContext(
 	slideNumber: number,
@@ -38,12 +38,11 @@ export function createSlideContext(
 }
 
 export function useNav() {
-	const context = inject<
-		Pick<ReturnType<typeof createSlideContext>, "nav"> | undefined
-	>(injectionSlidevContext, undefined);
-	if (!context) {
+	const nav =
+		inject<ReturnType<typeof createSlideContext>["nav"]>(injectionSlideNav);
+	if (!nav) {
 		throw new Error("useNav() was called outside of a slide render.");
 	}
 
-	return toRaw(context).nav;
+	return nav;
 }

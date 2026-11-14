@@ -4,8 +4,13 @@ import type { LaidOutRuns, Layout } from "../layout.ts";
 import type { Canvas, ExtractedItem } from "../model.ts";
 import type { Insets, Side } from "./geometry.ts";
 
-import { INITIAL_STYLE, resolveLength } from "../cascade.ts";
-import { ID } from "../layout.ts";
+import { INITIAL_STYLE, isOutOfFlow, resolveLength } from "../cascade.ts";
+import {
+	GENERATED_ELEMENTS,
+	ID,
+	isAtomicInline,
+	laysOutApart,
+} from "../layout.ts";
 import { scaleOf, SIDES } from "./geometry.ts";
 
 export type ExtractContext = ReturnType<typeof createExtractContext>;
@@ -19,13 +24,20 @@ export interface ExtractOptions {
 
 export type ItemInput = WithoutDerived<ExtractedItem>;
 
+/** Laid-out text and the element whose content box it's measured in, which loose text (beside block-level siblings) has none of. */
+export interface TextRuns extends LaidOutRuns {
+	element?: Element;
+}
+
 type WithoutDerived<Item> = Item extends unknown
 	? Omit<Item, "decorative">
 	: never;
 
 export const MIN_OPACITY = 0.05;
 
-const GENERATED_CONTENT = new Set(["pptx-after", "pptx-before"]);
+const GENERATED_CONTENT = new Set<string>(Object.values(GENERATED_ELEMENTS));
+
+const SEPARATE_ITEM_ELEMENTS = new Set(["img", "svg"]);
 
 const insetsOf = (widthOf: (side: Side) => number): Insets => ({
 	bottom: widthOf("bottom"),
@@ -40,23 +52,15 @@ const isElement = (node: Node): node is Element =>
 const isDecoration = (item: ItemInput) =>
 	!("paragraphs" in item) && !("alt" in item && item.alt.trim());
 
+export const isMath = (element: Element) => element.classList.contains("katex");
+
 export function createExtractContext(
 	layout: Layout,
 	{ assets, canvas, fonts }: ExtractOptions,
 ) {
-	const { boxes, byId, document, markers, runs, styles } = layout;
+	const { boxes, byId, document, looseRuns, markers, runs, styles } = layout;
 	const items: ExtractedItem[] = [];
 	const problems: string[] = [];
-	const looseRuns = new Map<string, LaidOutRuns[]>();
-	for (const entry of runs.values()) {
-		if (entry.anonymous) {
-			looseRuns.set(entry.parent, [
-				...(looseRuns.get(entry.parent) ?? []),
-				entry,
-			]);
-		}
-	}
-
 	const styleOf = (element: Element) => styles.get(element) ?? INITIAL_STYLE;
 	const idOf = (element: Element) => element.getAttribute(ID) ?? "";
 	const boxOf = (element: Element) => boxes.get(idOf(element));
@@ -117,8 +121,7 @@ export function createExtractContext(
 		return box.width - left - right;
 	};
 
-	/** The scale (like Slidev's per-slide zoom) of an element's nearest laid-out ancestor. */
-	const scaleAt = (element: Element) => {
+	const boxAt = (element: Element) => {
 		for (
 			let current: Element | null = element;
 			current;
@@ -126,11 +129,16 @@ export function createExtractContext(
 		) {
 			const box = boxOf(current);
 			if (box) {
-				return scaleOf(box);
+				return box;
 			}
 		}
 
-		return 1;
+		return undefined;
+	};
+
+	const ownRunsOf = (element: Element): TextRuns | undefined => {
+		const entry = runs.get(idOf(element));
+		return entry && { ...entry, element };
 	};
 
 	const opacityOf = (element: Element) => {
@@ -141,7 +149,10 @@ export function createExtractContext(
 			current = current.parentElement
 		) {
 			const style = styleOf(current);
-			if (style.display === "none" || style.visibility === "hidden") {
+			if (
+				style.display === "none" ||
+				(current === element && style.visibility === "hidden")
+			) {
 				return 0;
 			}
 
@@ -154,12 +165,28 @@ export function createExtractContext(
 	const isInline = (element: Element) =>
 		styleOf(element).display.startsWith("inline");
 
+	const drawsApart = (element: Element) => {
+		const style = styleOf(element);
+		const parent = element.parentElement;
+		const inLine =
+			parent !== null && (isInline(parent) || ownRunsOf(parent) !== undefined);
+		return (
+			SEPARATE_ITEM_ELEMENTS.has(element.localName) ||
+			isMath(element) ||
+			(inLine
+				? laysOutApart(style)
+				: isOutOfFlow(style) || isAtomicInline(style))
+		);
+	};
+
 	const blocksOf = (element: Element) => {
 		const blocks = [""];
 		const visit = (parent: Element) => {
 			for (const node of parent.childNodes) {
 				if (node.nodeType === node.TEXT_NODE) {
 					blocks[blocks.length - 1] += node.textContent ?? "";
+				} else if (isElement(node) && node.classList.contains("katex-mathml")) {
+					continue;
 				} else if (isElement(node) && isInline(node)) {
 					visit(node);
 				} else if (isElement(node)) {
@@ -179,10 +206,12 @@ export function createExtractContext(
 	return {
 		assets,
 		borderInsets,
+		boxAt,
 		boxOf,
 		byId,
 		canvas,
 		contentInsets,
+		drawsApart,
 		fonts,
 		idOf,
 		isInline,
@@ -197,19 +226,23 @@ export function createExtractContext(
 		looseRunsOf: (element: Element) => looseRuns.get(idOf(element)) ?? [],
 		markers,
 		opacityOf,
-		ownRunsOf: (element: Element) => runs.get(idOf(element)),
+		ownRunsOf,
 		problems,
-		push: (element: Element, item: ItemInput) => {
-			items.push({
-				...item,
-				decorative:
-					element.closest('[aria-hidden="true"]') !== null ||
-					isDecoration(item),
-			});
+		push: (element: Element, ...added: ItemInput[]) => {
+			const hidden = element.closest('[aria-hidden="true"]') !== null;
+			items.push(
+				...added.map((item) => ({
+					...item,
+					decorative: hidden || isDecoration(item),
+				})),
+			);
 		},
 		radiusOf,
 		resolve,
-		scaleAt,
+		scaleAt: (element: Element) => {
+			const box = boxAt(element);
+			return box ? scaleOf(box) : 1;
+		},
 		styleOf,
 		textOf: (element: Element) => blocksOf(element).join(" "),
 	};

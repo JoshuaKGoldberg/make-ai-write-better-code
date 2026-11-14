@@ -25,6 +25,7 @@ import type {
 import type {
 	Gradients,
 	ListMarker,
+	ShapeLook,
 	SlidePatch,
 	Theme,
 	TitleLook,
@@ -44,9 +45,9 @@ interface WriteOptions {
 	deck: Deck;
 	/** The deck's fonts, for their metrics. */
 	fonts: FontBook;
-	out: string;
+	output: string;
 	/** Whether to write one static slide per click state instead of animating clicks. */
-	slidePerClick: boolean;
+	withClicks: boolean;
 }
 
 /** A model item merged across click states. */
@@ -55,7 +56,6 @@ interface Entry {
 	item: Item;
 	/** What the item looks like, apart from where it is and (for lists) which paragraphs show. */
 	look: string;
-	order: number;
 	/** For lists: the states each paragraph is visible in. */
 	paragraphStates?: Set<number>[];
 	states: Set<number>;
@@ -72,13 +72,13 @@ type TextParagraph = Paragraph & {
 	/** For list items: the marker, and the hanging indent it sits in. */
 	bullet?: pptxgen.default.TextPropsOptions["bullet"];
 	indentLevel?: number;
-	marker?: ListMarker;
 	/** pt */
 	spaceAfter?: number;
 };
 
 /** Converts canvas px to PowerPoint's units. */
 interface Units {
+	emu: (pixels: number) => number;
 	inches: (pixels: number) => number;
 	points: (pixels: number) => number;
 }
@@ -91,6 +91,17 @@ type Presentation = pptxgen.default;
 const PAGE_HEIGHT_INCHES = 7.5;
 const PAGE_LAYOUT = "Slidev";
 const EMU_PER_INCH = 914400;
+const EMU_PER_POINT = 12700;
+
+/** The master's title when no slide has one: its box as fractions of the slide, and PowerPoint's default alignment and size. */
+const DEFAULT_TITLE = {
+	align: "ctr",
+	height: 0.15,
+	size: 4400,
+	width: 0.9,
+	x: 0.05,
+	y: 0.05,
+} as const;
 
 /** Bulleted paragraphs render about 0.035 lines lower in PowerPoint (measured). */
 const LIST_LIFT = 0.035;
@@ -117,9 +128,6 @@ const NEAR_FULL_TURN = 359;
 /** Width (px, or a fraction of the box's) one-line text grows by, so PowerPoint's slightly different measuring never wraps it. */
 const ONE_LINE_SLACK = { minimum: 10, ratio: 0.06 };
 
-/** Width text that can't wrap grows by, toward the side(s) its alignment grows it. */
-const NOWRAP_SLACK = { minimum: 8, ratio: 0.08 };
-
 /** Width wrapped text grows by, enough for rounding without PowerPoint's lines taking words the browser wrapped. */
 const ROUNDING_SLACK = { minimum: 2, ratio: 0.01 };
 
@@ -133,9 +141,6 @@ const LINE_PITCH_TOLERANCE = 0.3;
 
 /** px an item may move or resize between click states and still be the same shape. */
 const SAME_PLACE_TOLERANCE = 1.5;
-
-/** Orders an item from a later click state just after one at the same paint order. */
-const LATER_STATE_ORDER = 0.001;
 
 const MIN_ROUNDED_RADIUS = 0.5;
 const NAME_LENGTH = 48;
@@ -176,8 +181,8 @@ const ROMAN_LENGTHS = [0, 1, 2, 3, 2, 1, 2, 3, 4, 2];
 export async function writePptx({
 	deck,
 	fonts,
-	out,
-	slidePerClick,
+	output,
+	withClicks,
 }: WriteOptions) {
 	const presentation = new PptxGenJS();
 	const widthInches = PAGE_HEIGHT_INCHES * deck.aspectRatio;
@@ -192,31 +197,45 @@ export async function writePptx({
 	presentation.subject = "";
 	presentation.title = deck.title;
 
+	const inches = (pixels: number) => (pixels * widthInches) / deck.canvas.width;
 	const units: Units = {
-		inches: (pixels) => (pixels * widthInches) / deck.canvas.width,
-		points: (pixels) => ((pixels * widthInches) / deck.canvas.width) * 72,
+		emu: (pixels) => Math.round(inches(pixels) * EMU_PER_INCH),
+		inches,
+		points: (pixels) => inches(pixels) * 72,
 	};
 	const gradients = createGradients(colorsOf(deck));
 	const addItem = createItemWriter({ fonts, gradients, presentation, units });
-	const patches = deck.slides.flatMap((slide) =>
-		slidePerClick
-			? writeClickSlides(presentation, slide, addItem)
-			: [writeAnimatedSlide(presentation, slide, addItem)],
+	const timelines = deck.slides.map((slide) => ({
+		entries: timeline(slide),
+		slide,
+	}));
+	const patches = timelines.flatMap(({ entries, slide }) =>
+		withClicks
+			? writeClickSlides(presentation, slide, entries, addItem)
+			: [writeAnimatedSlide(presentation, slide, entries, addItem)],
 	);
 
 	const zip = await JSZip.loadAsync(
 		await presentation.write({ outputType: "nodebuffer" }),
 	);
 	const monospace = fonts.spacer().font;
-	await fs.mkdir(path.dirname(out), { recursive: true });
+	await fs.mkdir(path.dirname(output), { recursive: true });
 	await fs.writeFile(
-		out,
+		output,
 		await finishPackage(zip, {
 			background: await fs.readFile(deck.background.file),
 			gradients,
 			monospace,
 			slides: patches,
-			theme: themeOf(deck, patches, monospace, units.points),
+			theme: themeOf({
+				deck,
+				items: timelines.flatMap(({ entries }) =>
+					entries.map(({ item }) => item),
+				),
+				monospace,
+				patches,
+				units,
+			}),
 		}),
 	);
 	return { problems: numberingProblems(deck), slides: patches.length };
@@ -226,12 +245,13 @@ export async function writePptx({
 function writeAnimatedSlide(
 	presentation: Presentation,
 	slide: Slide,
+	entries: Entry[],
 	addItem: ItemWriter,
 ) {
 	const powerPointSlide = presentation.addSlide();
 	const patch = slidePatch(slide.notes, slide.transition);
 	const used = new Set<string>();
-	for (const entry of timeline(slide)) {
+	for (const entry of entries) {
 		const name = uniqueName(entry.item, used);
 		const shapes = addItem(powerPointSlide, patch, entry.item, name);
 
@@ -268,9 +288,9 @@ function writeAnimatedSlide(
 function writeClickSlides(
 	presentation: Presentation,
 	slide: Slide,
+	entries: Entry[],
 	addItem: ItemWriter,
 ) {
-	const entries = timeline(slide);
 	return slide.states.map((_, click) => {
 		const powerPointSlide = presentation.addSlide();
 		const patch = slidePatch(
@@ -361,6 +381,7 @@ function createItemWriter({
 			firstRun,
 			lineHeight,
 			outline,
+			rtl,
 			wrap,
 		}: {
 			code: boolean;
@@ -368,13 +389,14 @@ function createItemWriter({
 			lineHeight: number;
 			/** Whether this is the outlined copy behind a text stroke. */
 			outline: boolean;
+			rtl: boolean;
 			wrap: boolean;
 		},
 	) =>
 		paragraphs.flatMap((paragraph, paragraphIndex) => {
 			const last = paragraphIndex === paragraphs.length - 1;
 			const pieces = paragraph.runs.length
-				? mergeRuns(paragraph.runs, wrap)
+				? mergeRuns(withoutLinkedEdgeSpaces(paragraph.runs), wrap)
 				: [blankRun(firstRun)];
 			const baseSize = baseSizeOf(pieces);
 			const multiple = lineSpacingOf(lineHeight, baseSize);
@@ -408,6 +430,7 @@ function createItemWriter({
 								}
 							: undefined,
 					paraSpaceAfter: paragraph.spaceAfter,
+					rtlMode: rtl || undefined,
 					softBreakBefore: breaksBefore(run, wrap) || undefined,
 					strike: run.strike ? "sngStrike" : undefined,
 					subscript: run.script === "sub" || undefined,
@@ -440,10 +463,19 @@ function createItemWriter({
 			item.kind === "list"
 				? markerGapOf(item, firstRunOf(item.paragraphs).size)
 				: 0;
-		const paragraphs: TextParagraph[] =
+		const list =
 			item.kind === "list"
-				? listParagraphs(item, visibleParagraphs, markerGap, points)
-				: item.paragraphs;
+				? {
+						color: item.bulletColor?.toUpperCase(),
+						paragraphs: listParagraphs(
+							item,
+							visibleParagraphs,
+							markerGap,
+							points,
+						),
+					}
+				: undefined;
+		const paragraphs: TextParagraph[] = list?.paragraphs ?? item.paragraphs;
 		const firstRun = firstRunOf(paragraphs);
 		const { height, top } = verticalPlacement(
 			item,
@@ -479,6 +511,7 @@ function createItemWriter({
 			code: item.kind === "code",
 			firstRun,
 			lineHeight: style.lineHeight,
+			rtl: style.rtl,
 			wrap: !style.nowrap,
 		};
 		const names = [name];
@@ -500,10 +533,10 @@ function createItemWriter({
 			structuredClone(options),
 		);
 
-		if (item.kind === "list") {
+		if (list) {
 			patch.lists.push({
-				color: item.bulletColor,
-				markers: paragraphs.map(({ marker }) => marker ?? "none"),
+				color: list.color,
+				markers: list.paragraphs.map(({ marker }) => marker),
 				name,
 			});
 		}
@@ -663,24 +696,27 @@ function titleLook(
 	box: Box,
 	style: TextStyle,
 	run: Run,
-	{ inches, points }: Units,
+	{ emu, points }: Units,
 ): TitleLook {
-	const emu = (pixels: number) => Math.round(inches(pixels) * EMU_PER_INCH);
 	return {
 		align: ALIGNMENTS[style.align],
+		bold: run.bold,
 		color: run.color.toUpperCase(),
 		cx: emu(box.width),
 		cy: emu(box.height),
 		font: run.font,
+		italic: run.italic,
+		letterSpacing: Math.round(points(run.letterSpacing) * 100),
 		lineSpacing: spacingPercent(lineSpacingOf(style.lineHeight, run.size)),
 		size: Math.round(fontSizeOf(points(run.size)) * 100),
+		upper: run.upper,
 		x: emu(box.x),
 		y: emu(box.y),
 	};
 }
 
 /** The line pitch of a code block, measured from its baselines; blank lines make some gaps span several lines. */
-function codePitch({ baselines, style }: CodeItem) {
+export function codePitch({ baselines, style }: CodeItem) {
 	const pitches = baselines
 		.slice(1)
 		.map((baseline, index) => baseline - baselines[index])
@@ -723,7 +759,7 @@ function listParagraphs(
 	visibleParagraphs: boolean[] | undefined,
 	markerGap: number,
 	points: Units["points"],
-): TextParagraph[] {
+): (TextParagraph & { marker: ListMarker })[] {
 	const numbering = createNumbering();
 	return spacedListParagraphs(item, points).map((paragraph, index) => {
 		const { level, number } = paragraph;
@@ -801,8 +837,12 @@ function verticalPlacement(
 	return { height: box.height, top: box.y };
 }
 
-/** How wide the box is and where it starts, with slack toward the side(s) its alignment grows it, within the room its container leaves. */
-function horizontalPlacement(box: Box, style: TextStyle, rotation: number) {
+/** How wide the box is and where it starts, with slack toward the side(s) its alignment grows it, within the room its container leaves; text that can't wrap needs none. */
+export function horizontalPlacement(
+	box: Box,
+	style: TextStyle,
+	rotation: number,
+) {
 	const width =
 		style.wrapWidth !== undefined && style.align === "left" && !rotation
 			? Math.min(box.width, style.wrapWidth)
@@ -817,10 +857,9 @@ function horizontalPlacement(box: Box, style: TextStyle, rotation: number) {
 				: roomRight;
 	const slackOf = ({ minimum, ratio }: typeof ONE_LINE_SLACK) =>
 		Math.max(minimum, box.width * ratio);
-	const grown = rotation
-		? 0
-		: style.nowrap
-			? Math.min(slackOf(NOWRAP_SLACK), room)
+	const grown =
+		rotation || style.nowrap
+			? 0
 			: style.wrapWidth === undefined
 				? Math.max(
 						slackOf(ROUNDING_SLACK),
@@ -833,7 +872,7 @@ function horizontalPlacement(box: Box, style: TextStyle, rotation: number) {
 }
 
 /** The PowerPoint marker for a CSS list-style-type, if it shows one. */
-function markerFor(listStyle: string): Marker | undefined {
+export function markerFor(listStyle: string): Marker | undefined {
 	const keyword = KEYWORD_MARKERS[listStyle];
 	if (keyword) {
 		return { code: keyword, kind: "keyword" };
@@ -870,7 +909,7 @@ function markerGapOf(list: ListItem, size: number) {
 }
 
 /** How many characters a number marker shows before its period, in a list-style-type. */
-function numberLength(number: number, listStyle: string) {
+export function numberLength(number: number, listStyle: string) {
 	const digits = String(Math.abs(number));
 	if (listStyle.endsWith("roman")) {
 		return Array.from(digits, (digit) => ROMAN_LENGTHS[Number(digit)]).reduce(
@@ -953,6 +992,21 @@ const spacingPercent = (multiple: number | undefined) =>
 const breaksBefore = (run: Run, wrap: boolean) =>
 	run.lineBreak === "forced" || (!wrap && run.lineBreak === "wrap");
 
+/** Runs without the link at whitespace on a link's edges, as takumi can lay out the space before a link inside it. */
+function withoutLinkedEdgeSpaces(runs: Run[]) {
+	const texts = runs.filter((run) => !run.pad);
+	return runs.map((run) => {
+		const index = texts.indexOf(run);
+		const linked = (neighbor: Run | undefined) => neighbor?.href === run.href;
+		return run.href &&
+			!run.pad &&
+			!run.text.trim() &&
+			!(linked(texts[index - 1]) && linked(texts[index + 1]))
+			? { ...run, href: undefined }
+			: run;
+	});
+}
+
 /** Joins neighboring runs that look alike (as takumi splits text per line) into one run to edit, except where a line break is kept. */
 function mergeRuns(runs: Run[], wrap: boolean) {
 	const breakAndText = new Set(["lineBreak", "text"]);
@@ -992,34 +1046,26 @@ function appearanceOf(item: Item) {
 	);
 }
 
-/** Merges a slide's click states into items, each with the states it's visible in; anything that moves, resizes, or restyles becomes a new item. */
-function timeline(slide: Slide) {
-	const byKey = new Map<string, Entry[]>();
-	slide.states.forEach((state, index) => {
-		for (const [order, item] of state.items.entries()) {
-			const anchor = item.box;
+/** Merges a slide's click states into items in paint order, each with the states it's visible in; anything that moves, resizes, or restyles becomes a new item. */
+export function timeline(slide: Slide) {
+	const entries: Entry[] = [];
+	const paintOrders = slide.states.map((state, index) =>
+		state.items.map((item) => {
 			const look = appearanceOf(item);
-			const candidates = byKey.get(item.key) ?? [];
-			let entry = candidates.find(
+			let entry = entries.find(
 				(candidate) =>
+					candidate.item.key === item.key &&
 					!candidate.states.has(index) &&
 					candidate.look === look &&
 					(["height", "width", "x", "y"] as const).every(
 						(side) =>
-							Math.abs(candidate.anchor[side] - anchor[side]) <
+							Math.abs(candidate.anchor[side] - item.box[side]) <
 							SAME_PLACE_TOLERANCE,
 					),
 			);
 			if (!entry) {
-				entry = {
-					anchor,
-					item,
-					look,
-					order: order + index * LATER_STATE_ORDER,
-					states: new Set(),
-				};
-				candidates.push(entry);
-				byKey.set(item.key, candidates);
+				entry = { anchor: item.box, item, look, states: new Set() };
+				entries.push(entry);
 			}
 
 			entry.states.add(index);
@@ -1041,9 +1087,41 @@ function timeline(slide: Slide) {
 					}
 				});
 			}
+
+			return entry;
+		}),
+	);
+	return paintOrder(entries, paintOrders);
+}
+
+/** Entries ordered so every state paints its own in its order, as far as the states agree; ties go to the entry that showed first. */
+function paintOrder(entries: Entry[], paintOrders: Entry[][]) {
+	const above = entries.map(() => new Set<number>());
+	const beneathCounts = entries.map(() => 0);
+	for (const order of paintOrders) {
+		const indices = order.map((entry) => entries.indexOf(entry));
+		indices.slice(1).forEach((upper, position) => {
+			const lower = indices[position];
+			if (!above[lower].has(upper)) {
+				above[lower].add(upper);
+				beneathCounts[upper]++;
+			}
+		});
+	}
+
+	const remaining = entries.map((_, index) => index);
+	const ordered: Entry[] = [];
+	while (remaining.length) {
+		const next =
+			remaining.find((index) => !beneathCounts[index]) ?? remaining[0];
+		remaining.splice(remaining.indexOf(next), 1);
+		ordered.push(entries[next]);
+		for (const upper of above[next]) {
+			beneathCounts[upper]--;
 		}
-	});
-	return [...byKey.values()].flat().sort((a, b) => a.order - b.order);
+	}
+
+	return ordered;
 }
 
 /** An item's text, or what it's labeled as, on one line. */
@@ -1086,7 +1164,7 @@ function uniqueName(item: Item, used: Set<string>) {
 	const base =
 		cut === full
 			? full
-			: `${(space > 0 ? cut.slice(0, space) : cut).trimEnd()}…`;
+			: `${(space > label.length + 1 ? cut.slice(0, space) : cut).trimEnd()}…`;
 	let name = base;
 	for (let count = 2; used.has(name); count++) {
 		name = `${base} (${String(count)})`;
@@ -1135,99 +1213,140 @@ function ranked<T, Value>(
 
 const characters = (run: Run) => run.text.length;
 
-/** The deck's theme: its most used colors, fonts, body text, and title look. */
-function themeOf(
-	deck: Deck,
-	patches: SlidePatch[],
-	monospace: string,
-	points: Units["points"],
-): Theme {
-	const items = deck.slides.flatMap(({ states }) =>
-		states.flatMap((state) => state.items),
+/** Runs with text, rather than spacers. */
+const contentRunsOf = (items: (ListItem | TextItem)[]) =>
+	items.flatMap(({ paragraphs }) =>
+		paragraphs.flatMap(({ runs }) => runs.filter((run) => !run.pad)),
 	);
-	const isHeading = (item: Item) => item.kind === "text" && item.heading;
+
+const isHeading = (item: Item) => item.kind === "text" && item.heading;
+
+/** The deck's theme: its most used colors, fonts, body text, title look, and box look. */
+function themeOf({
+	deck,
+	items,
+	monospace,
+	patches,
+	units,
+}: {
+	deck: Deck;
+	/** Each slide's items, once across its click states. */
+	items: Item[];
+	monospace: string;
+	patches: SlidePatch[];
+	units: Units;
+}): Theme {
 	const texts = items.filter(
 		(item) => item.kind === "list" || item.kind === "text",
 	);
-	const body = texts.filter((item) => !isHeading(item));
-	const runsOf = (textItems: (ListItem | TextItem)[]) =>
-		textItems.flatMap(({ paragraphs }) =>
-			paragraphs.flatMap(({ runs }) => runs.filter((run) => !run.pad)),
-		);
-	const runs = runsOf(texts);
-	const bodyRuns = runsOf(body);
-	const text = ranked(runs, (run) => run.color, characters).at(0) ?? "000000";
-	const minorFont = ranked(bodyRuns, (run) => run.font, characters).at(0);
-	const title = titleLookOf(patches);
+	const runs = contentRunsOf(texts);
+	const text =
+		ranked(runs, (run) => run.color.toUpperCase(), characters).at(0) ??
+		"000000";
+	const fonts = fontsOf(items, monospace);
+	const title =
+		titleLookOf(patches) ??
+		defaultTitle(deck, { color: text, font: fonts.majorFont }, units);
+	const background = deck.background.color.toUpperCase();
 	return {
-		accents: accentsOf(
-			items,
-			new Set(
-				[deck.background.color, text, title?.color].flatMap((color) =>
-					color ? [color.toUpperCase()] : [],
-				),
-			),
+		...bodyStyleOf(
+			texts.filter((item) => !isHeading(item)),
+			units,
 		),
-		background: deck.background.color,
-		bodyLineSpacing: ranked(
-			body.flatMap(({ paragraphs, style }) =>
-				paragraphs.map(({ runs: paragraphRuns }) => ({
-					lineHeight: style.lineHeight,
-					runs: paragraphRuns,
-				})),
-			),
-			({ lineHeight, runs: paragraphRuns }) =>
-				paragraphRuns.length
-					? spacingPercent(lineSpacingOf(lineHeight, baseSizeOf(paragraphRuns)))
-					: undefined,
-			({ runs: paragraphRuns }) =>
-				paragraphRuns.reduce((sum, run) => sum + characters(run), 0),
-		).at(0),
-		bodySize: ranked(
-			bodyRuns.filter((run) => !run.script),
-			(run) => Math.round(fontSizeOf(points(run.size)) * 100),
-			characters,
-		).at(0),
-		fonts: [
-			...new Set([
-				...items.flatMap((item) =>
-					"paragraphs" in item
-						? item.paragraphs.flatMap(({ runs: paragraphRuns }) =>
-								paragraphRuns.map((run) => run.font),
-							)
-						: [],
-				),
-				monospace,
-			]),
-		].sort(),
+		...fonts,
+		accents: accentsOf(items, new Set([background, text, title.color])),
+		background,
 		link: ranked(
 			runs.filter((run) => run.href),
-			(run) => run.color,
+			(run) => run.color.toUpperCase(),
 			characters,
 		).at(0),
-		majorFont:
-			ranked(runsOf(texts.filter(isHeading)), (run) => run.font, characters).at(
-				0,
-			) ?? minorFont,
-		minorFont,
 		name: deck.title,
+		shape: shapeLookOf(items, units),
 		text,
 		title,
 	};
 }
 
+/** Every font the slides use, and the most used heading and body fonts. */
+function fontsOf(items: Item[], monospace: string) {
+	const texts = items.filter(
+		(item) => item.kind === "list" || item.kind === "text",
+	);
+	const mostUsedFont = (textItems: (ListItem | TextItem)[]) =>
+		ranked(contentRunsOf(textItems), (run) => run.font, characters).at(0);
+	const headingFont = mostUsedFont(texts.filter(isHeading));
+	const minorFont =
+		mostUsedFont(texts.filter((item) => !isHeading(item))) ??
+		headingFont ??
+		monospace;
+	return {
+		fonts: [
+			...new Set([
+				...items.flatMap((item) =>
+					"paragraphs" in item
+						? item.paragraphs.flatMap(({ runs }) => runs.map((run) => run.font))
+						: [],
+				),
+				monospace,
+			]),
+		].sort(),
+		majorFont: headingFont ?? minorFont,
+		minorFont,
+	};
+}
+
+/** Body text's most used line spacing and size. */
+function bodyStyleOf(body: (ListItem | TextItem)[], { points }: Units) {
+	const lines = body.flatMap((item) =>
+		item.paragraphs.map(({ runs }) => ({
+			lineHeight: item.style.lineHeight,
+			runs,
+		})),
+	);
+	return {
+		bodyLineSpacing: ranked(
+			lines,
+			({ lineHeight, runs }) =>
+				runs.length
+					? spacingPercent(lineSpacingOf(lineHeight, baseSizeOf(runs)))
+					: undefined,
+			({ runs }) => runs.reduce((sum, run) => sum + characters(run), 0),
+		).at(0),
+		bodySize: ranked(
+			contentRunsOf(body).filter((run) => !run.script),
+			(run) => Math.round(fontSizeOf(points(run.size)) * 100),
+			characters,
+		).at(0),
+	};
+}
+
+/** The master's title for a deck whose slides have none. */
+function defaultTitle(
+	{ canvas }: Deck,
+	{ color, font }: Pick<TitleLook, "color" | "font">,
+	{ emu }: Units,
+): TitleLook {
+	return {
+		align: DEFAULT_TITLE.align,
+		bold: false,
+		color,
+		cx: emu(canvas.width * DEFAULT_TITLE.width),
+		cy: emu(canvas.height * DEFAULT_TITLE.height),
+		font,
+		italic: false,
+		letterSpacing: 0,
+		size: DEFAULT_TITLE.size,
+		upper: false,
+		x: emu(canvas.width * DEFAULT_TITLE.x),
+		y: emu(canvas.height * DEFAULT_TITLE.y),
+	};
+}
+
 /** The slides' most common title style, at its most common place (the topmost, when places tie). */
 function titleLookOf(patches: SlidePatch[]) {
-	const styleOf = ({
-		align,
-		color,
-		cx,
-		font,
-		lineSpacing,
-		size,
-		x,
-	}: TitleLook) =>
-		JSON.stringify([align, color, cx, font, lineSpacing, size, x]);
+	const styleOf = (look: TitleLook) =>
+		JSON.stringify({ ...look, cy: undefined, y: undefined });
 	const looks = patches.flatMap(({ title }) => (title ? [title.look] : []));
 	const style = ranked(looks, styleOf).at(0);
 	const group = looks.filter((look) => styleOf(look) === style);
@@ -1236,6 +1355,32 @@ function titleLookOf(patches: SlidePatch[]) {
 		(look) => look.y,
 	).at(0);
 	return group.find((look) => look.y === y);
+}
+
+/** The look of the deck's most common box with a solid fill, for new shapes. */
+function shapeLookOf(items: Item[], { points }: Units) {
+	const looks = items.flatMap((item): ShapeLook[] =>
+		item.kind === "box" && item.fill && !item.fill.gradient
+			? [
+					{
+						fill: {
+							color: item.fill.color.toUpperCase(),
+							transparency: item.fill.transparency,
+						},
+						line: item.border && {
+							color: item.border.color.toUpperCase(),
+							transparency: item.border.transparency,
+							width: Math.round(
+								Math.max(MIN_LINE_WIDTH, points(item.border.width)) *
+									EMU_PER_POINT,
+							),
+						},
+					},
+				]
+			: [],
+	);
+	const top = ranked(looks, (look) => JSON.stringify(look)).at(0);
+	return looks.find((look) => JSON.stringify(look) === top);
 }
 
 /** The colors the deck uses most for shapes, borders, markers, and text, other than its text and background colors. */

@@ -142,7 +142,7 @@ export function createFontBook({
 	sheets,
 }: {
 	assets: Assets;
-	fonts?: Partial<ResolvedFontOptions>;
+	fonts: ResolvedFontOptions;
 	sheets: string[];
 }): FontBook {
 	const declaredFaces = new Map<string, Face[]>();
@@ -169,11 +169,7 @@ export function createFontBook({
 			await addSheet(sheet);
 		}
 
-		if (
-			fontOptions?.webfonts?.length &&
-			fontOptions.provider &&
-			fontOptions.provider !== "none"
-		) {
+		if (fontOptions.webfonts.length && fontOptions.provider !== "none") {
 			await addSheet(await loadWebFonts(fontOptions, assets));
 		}
 	};
@@ -262,12 +258,12 @@ export function createFontBook({
 			const used: Face[][] = [];
 			const texts = [...stacks];
 			const candidates = [
-				fontOptions?.sans?.join(","),
-				fontOptions?.mono?.join(","),
+				fontOptions.sans.join(","),
+				fontOptions.mono.join(","),
 				...texts,
 				"monospace",
 				"emoji",
-			].filter((stack) => stack !== undefined);
+			];
 			for (const stack of candidates) {
 				for (const family of splitStack(stack)) {
 					const list = await loadFamily(family);
@@ -314,9 +310,7 @@ export function createFontBook({
 			await addSheetsOnce();
 
 			const named = new Set(
-				[...(fontOptions?.webfonts ?? []), ...(fontOptions?.local ?? [])].map(
-					unquote,
-				),
+				[...fontOptions.webfonts, ...fontOptions.local].map(unquote),
 			);
 			const missing: string[] = [];
 			for (const family of named) {
@@ -462,17 +456,14 @@ function installedFaces(family: string, generic?: Generic): Face[] {
 	});
 }
 
-async function loadWebFonts(
-	options: Partial<ResolvedFontOptions>,
-	assets: Assets,
-) {
-	const weights = (options.weights ?? ["200", "400", "600"])
+async function loadWebFonts(options: ResolvedFontOptions, assets: Assets) {
+	const weights = options.weights
 		.flatMap((weight) =>
 			options.italic ? [`0,${weight}`, `1,${weight}`] : [weight],
 		)
 		.sort()
 		.join(";");
-	const query = (options.webfonts ?? [])
+	const query = options.webfonts
 		.map(
 			(family) =>
 				`family=${unquote(family).replace(/\s+/g, "+")}:${options.italic ? "ital," : ""}wght@${weights}`,
@@ -601,14 +592,11 @@ function powerPointName(font: fontkit.Font, weight: number): ResolvedFont {
 		};
 	}
 
-	const windowsMetrics = windowsMetricsOf(font);
-	const standardStyle = /^(?:regular|bold|italic|bold italic)$/i.test(
-		font.subfamilyName,
-	);
 	return {
 		bold:
 			weight >= 600 &&
-			(standardStyle || (windowsMetrics?.usWeightClass ?? 400) < 600),
+			(/^bold(?: italic)?$/i.test(font.subfamilyName) ||
+				(windowsMetricsOf(font)?.usWeightClass ?? 400) < 600),
 		font: font.familyName,
 	};
 }
@@ -795,7 +783,6 @@ function splitStack(stack: string) {
 	return splitTopLevel(stack, ",").map(unquote).filter(Boolean);
 }
 
-/** A font's OS/2 table, which some fonts lack, though fontkit's types say otherwise. */
 function weightTier(weight: number, nearest: number) {
 	const heavier = nearest > weight;
 	if (weight > 500) {
@@ -809,6 +796,7 @@ function weightTier(weight: number, nearest: number) {
 	return !heavier ? 1 : nearest <= 500 ? 0 : 2;
 }
 
+/** A font's OS/2 table, which some fonts lack, though fontkit's types say otherwise. */
 function windowsMetricsOf(font: fontkit.Font): fontkit.Os2Table | undefined {
 	return font["OS/2"];
 }

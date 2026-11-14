@@ -37,12 +37,12 @@ for (const [range, slot] of Object.entries(useSlots()).sort(
 	}
 }
 
-const target = useClickTarget((clicks, element) => {
+const target = useClickTarget((clicks, element, id) => {
 	const info = clicks.calculateSince(
 		props.at,
 		Math.max(...contents.map(({ end }) => end)) - 1,
 	);
-	clicks.register(element, info);
+	clicks.register(id, info);
 	const offset = info ? info.currentOffset.value + 1 : CLICKS_MAX;
 	for (const [index, child] of [...element.children].entries()) {
 		const { end, start } = contents[index];

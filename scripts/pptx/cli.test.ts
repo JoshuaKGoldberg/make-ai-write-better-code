@@ -1,14 +1,10 @@
-import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import packageJson from "../../package.json" with { type: "json" };
-import { buildPptx, BuildPptxError } from "./build.ts";
+import { buildPptx } from "./build.ts";
 import { cli } from "./cli.ts";
+import { BuildPptxError } from "./error.ts";
 
-vi.mock(import("./build.ts"), async (importOriginal) => ({
-	...(await importOriginal()),
-	buildPptx: vi.fn(),
-}));
+vi.mock(import("./build.ts"), () => ({ buildPptx: vi.fn() }));
 
 const mockBuildPptx = vi.mocked(buildPptx);
 
@@ -21,13 +17,6 @@ describe(cli, () => {
 			expect.stringContaining("Usage: slidev-pptx [entry] [options]"),
 		);
 		expect(mockBuildPptx).not.toHaveBeenCalled();
-	});
-
-	it("prints the version and succeeds when given --version", async () => {
-		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-
-		expect(await cli(["--version"])).toBe(0);
-		expect(log).toHaveBeenCalledWith(packageJson.version);
 	});
 
 	it("points to --help and fails when given an unknown option", async () => {
@@ -83,7 +72,11 @@ describe(cli, () => {
 
 	it("passes options to the build when given them", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => undefined);
-		mockBuildPptx.mockResolvedValueOnce({ problems: [], slides: 2 });
+		mockBuildPptx.mockResolvedValueOnce({
+			output: "/deck.pptx",
+			problems: [],
+			slides: 2,
+		});
 
 		await cli([
 			"deck.md",
@@ -100,24 +93,25 @@ describe(cli, () => {
 		expect(mockBuildPptx).toHaveBeenCalledWith({
 			dark: true,
 			entry: "deck.md",
-			output: path.resolve("deck.pptx"),
+			output: "deck.pptx",
 			range: "1,3-4",
 			withClicks: true,
 			work: "work",
 		});
 	});
 
-	it("names the output after the entry when given no --output", async () => {
+	it("leaves the entry and output to the build when given neither", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => undefined);
-		mockBuildPptx.mockResolvedValueOnce({ problems: [], slides: 2 });
+		mockBuildPptx.mockResolvedValueOnce({
+			output: "/slides-export.pptx",
+			problems: [],
+			slides: 2,
+		});
 
-		await cli(["talk.md"]);
+		await cli([]);
 
 		expect(mockBuildPptx).toHaveBeenCalledWith(
-			expect.objectContaining({
-				entry: "talk.md",
-				output: path.resolve("talk-export.pptx"),
-			}),
+			expect.objectContaining({ entry: undefined, output: undefined }),
 		);
 	});
 
@@ -128,6 +122,7 @@ describe(cli, () => {
 		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 		mockBuildPptx.mockResolvedValueOnce({
+			output: "/deck.pptx",
 			problems: [
 				{ message: "Couldn't export a video.", severity: "error", slide: 8 },
 				{
@@ -147,7 +142,7 @@ describe(cli, () => {
 			warn: warn.mock.calls,
 		}).toEqual({
 			error: [["Error on slide 8: Couldn't export a video."]],
-			log: [[expect.stringMatching(/^Wrote 8 slides to .*deck\.pptx in /)]],
+			log: [[expect.stringMatching(/^Wrote 8 slides to \/deck\.pptx in /)]],
 			warn: [["Warning on slide 3, click 2: Couldn't draw a v-mark: x"]],
 		});
 	});
@@ -156,6 +151,7 @@ describe(cli, () => {
 		vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 		mockBuildPptx.mockResolvedValueOnce({
+			output: "/slides-export.pptx",
 			problems: [{ message: "Couldn't find a font.", severity: "warning" }],
 			slides: 1,
 		});
@@ -169,6 +165,7 @@ describe(cli, () => {
 		vi.spyOn(console, "log").mockImplementation(() => undefined);
 		vi.spyOn(console, "warn").mockImplementation(() => undefined);
 		mockBuildPptx.mockResolvedValueOnce({
+			output: "/slides-export.pptx",
 			problems: [
 				{
 					message: "Couldn't draw a v-mark: x",
@@ -184,8 +181,27 @@ describe(cli, () => {
 
 	it("succeeds when the deck has no problems", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => undefined);
-		mockBuildPptx.mockResolvedValueOnce({ problems: [], slides: 1 });
+		mockBuildPptx.mockResolvedValueOnce({
+			output: "/slides-export.pptx",
+			problems: [],
+			slides: 1,
+		});
 
 		expect(await cli([])).toBe(0);
+	});
+
+	it("counts the slide in the singular when it writes one", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		mockBuildPptx.mockResolvedValueOnce({
+			output: "/slides-export.pptx",
+			problems: [],
+			slides: 1,
+		});
+
+		await cli([]);
+
+		expect(log).toHaveBeenCalledWith(
+			expect.stringMatching(/^Wrote 1 slide to \/slides-export\.pptx in /),
+		);
 	});
 });

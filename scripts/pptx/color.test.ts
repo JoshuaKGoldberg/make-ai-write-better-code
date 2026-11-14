@@ -100,8 +100,13 @@ describe(isGradient, () => {
 });
 
 describe(parseLinearGradient, () => {
+	const square = { height: 100, width: 100 };
+	const wide = { height: 552, width: 980 };
+
 	it("spreads stops evenly when they have no positions", () => {
-		expect(parseLinearGradient("linear-gradient(red, blue)", 1)).toEqual({
+		expect(
+			parseLinearGradient("linear-gradient(red, blue)", 1, square),
+		).toEqual({
 			angle: 180,
 			stops: [
 				{ color: "ff0000", position: 0, transparency: 0 },
@@ -112,7 +117,11 @@ describe(parseLinearGradient, () => {
 
 	it("reads a side and positions when the gradient has them", () => {
 		expect(
-			parseLinearGradient("linear-gradient(to right, red 20%, blue 80%)", 1),
+			parseLinearGradient(
+				"linear-gradient(to right, red 20%, blue 80%)",
+				1,
+				square,
+			),
 		).toEqual({
 			angle: 90,
 			stops: [
@@ -123,19 +132,76 @@ describe(parseLinearGradient, () => {
 	});
 
 	it.each([
-		["to top right", 45],
-		["to bottom right", 135],
-		["to left  bottom", 225],
-		["to top left", 315],
-	])("approximates a corner's angle when it's %s", (direction, angle) => {
+		["to top", 0],
+		["to right", 90],
+		["to bottom", 180],
+		["to left", 270],
+		["to top right", 29.39],
+		["to bottom right", 150.61],
+		["to left  bottom", 209.39],
+		["to top left", 330.61],
+	])(
+		"angles the gradient by the box's size when it's %s",
+		(direction, angle) => {
+			expect(
+				parseLinearGradient(`linear-gradient(${direction}, red, blue)`, 1, wide)
+					?.angle,
+			).toBeCloseTo(angle);
+		},
+	);
+
+	it.each([
+		["to right in oklab", 90],
+		["in oklch longer hue to right", 90],
+		["90deg in srgb", 90],
+		["in oklab", 180],
+	])(
+		"ignores the interpolation method when the direction is %j",
+		(direction, angle) => {
+			expect(
+				parseLinearGradient(
+					`linear-gradient(${direction}, red, blue)`,
+					1,
+					wide,
+				),
+			).toEqual({
+				angle,
+				stops: [
+					{ color: "ff0000", position: 0, transparency: 0 },
+					{ color: "0000ff", position: 100, transparency: 0 },
+				],
+			});
+		},
+	);
+
+	it("reads a unitless 0 as an angle", () => {
 		expect(
-			parseLinearGradient(`linear-gradient(${direction}, red, blue)`, 1)?.angle,
-		).toBe(angle);
+			parseLinearGradient("linear-gradient(0, red, blue)", 1, square),
+		).toEqual({
+			angle: 0,
+			stops: [
+				{ color: "ff0000", position: 0, transparency: 0 },
+				{ color: "0000ff", position: 100, transparency: 0 },
+			],
+		});
+	});
+
+	it("resolves px positions along the gradient line", () => {
+		expect(
+			parseLinearGradient("linear-gradient(red 10px, blue 30px)", 1, {
+				height: 40,
+				width: 100,
+			})?.stops,
+		).toEqual([
+			{ color: "ff0000", position: expect.closeTo(25), transparency: 0 },
+			{ color: "0000ff", position: expect.closeTo(75), transparency: 0 },
+		]);
 	});
 
 	it("spaces stops without positions between their neighbors' positions", () => {
 		expect(
-			parseLinearGradient("linear-gradient(red 0%, lime, blue 20%)", 1)?.stops,
+			parseLinearGradient("linear-gradient(red 0%, lime, blue 20%)", 1, square)
+				?.stops,
 		).toEqual([
 			{ color: "ff0000", position: 0, transparency: 0 },
 			{ color: "00ff00", position: 10, transparency: 0 },
@@ -145,7 +211,8 @@ describe(parseLinearGradient, () => {
 
 	it("keeps positions in order when a later stop's is smaller", () => {
 		expect(
-			parseLinearGradient("linear-gradient(red 50%, blue 20%)", 1)?.stops,
+			parseLinearGradient("linear-gradient(red 50%, blue 20%)", 1, square)
+				?.stops,
 		).toEqual([
 			{ color: "ff0000", position: 50, transparency: 0 },
 			{ color: "0000ff", position: 50, transparency: 0 },
@@ -154,7 +221,7 @@ describe(parseLinearGradient, () => {
 
 	it("drops color hints", () => {
 		expect(
-			parseLinearGradient("linear-gradient(red, 30%, blue)", 1)?.stops,
+			parseLinearGradient("linear-gradient(red, 30%, blue)", 1, square)?.stops,
 		).toEqual([
 			{ color: "ff0000", position: 0, transparency: 0 },
 			{ color: "0000ff", position: 100, transparency: 0 },
@@ -163,19 +230,22 @@ describe(parseLinearGradient, () => {
 
 	it("fades a transparent stop", () => {
 		expect(
-			parseLinearGradient("linear-gradient(transparent, red)", 1)?.stops[0],
+			parseLinearGradient("linear-gradient(transparent, red)", 1, square)
+				?.stops[0],
 		).toEqual({ color: "000000", position: 0, transparency: 100 });
 	});
 
 	it("converts an angle when it's in turns", () => {
 		expect(
-			parseLinearGradient("linear-gradient(0.25turn, red, blue)", 1)?.angle,
+			parseLinearGradient("linear-gradient(0.25turn, red, blue)", 1, square)
+				?.angle,
 		).toBe(90);
 	});
 
 	it("makes two stops when a stop has two positions", () => {
 		expect(
-			parseLinearGradient("linear-gradient(red 0% 50%, blue)", 1)?.stops,
+			parseLinearGradient("linear-gradient(red 0% 50%, blue)", 1, square)
+				?.stops,
 		).toEqual([
 			{ color: "ff0000", position: 0, transparency: 0 },
 			{ color: "ff0000", position: 50, transparency: 0 },
@@ -185,8 +255,11 @@ describe(parseLinearGradient, () => {
 
 	it("fades stops by an opacity", () => {
 		expect(
-			parseLinearGradient("linear-gradient(rgb(255 0 0 / 50%), blue)", 0.5)
-				?.stops,
+			parseLinearGradient(
+				"linear-gradient(rgb(255 0 0 / 50%), blue)",
+				0.5,
+				square,
+			)?.stops,
 		).toEqual([
 			{ color: "ff0000", position: 0, transparency: 75 },
 			{ color: "0000ff", position: 100, transparency: 50 },
@@ -198,8 +271,11 @@ describe(parseLinearGradient, () => {
 		"radial-gradient(red, blue)",
 		"linear-gradient(red, blue), linear-gradient(green, blue)",
 		"linear-gradient(red, nonsense, blue)",
+		"linear-gradient(to sideways, red, blue)",
+		"linear-gradient(to left right, red, blue)",
+		"linear-gradient(in oklab red, blue)",
 	])("returns undefined for %j", (image) => {
-		expect(parseLinearGradient(image, 1)).toBeUndefined();
+		expect(parseLinearGradient(image, 1, square)).toBeUndefined();
 	});
 });
 

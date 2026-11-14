@@ -1,9 +1,9 @@
 import type { ComputedStyle } from "../cascade.ts";
 import type { Color } from "../color.ts";
 import type { FontBook } from "../fonts.ts";
-import type { LaidOutRun, LaidOutRuns } from "../layout.ts";
+import type { LaidOutRun } from "../layout.ts";
 import type { Paragraph, Point, Run, TextStyle } from "../model.ts";
-import type { ExtractContext } from "./context.ts";
+import type { ExtractContext, TextRuns } from "./context.ts";
 
 import { isOutOfFlow } from "../cascade.ts";
 import {
@@ -13,7 +13,7 @@ import {
 	transparencyOf,
 } from "../color.ts";
 import { isAtomicInline, ZERO_WIDTH_SPACE } from "../layout.ts";
-import { clipsToText } from "./boxes.ts";
+import { clipsToText, paintedSizeOf } from "./boxes.ts";
 import { scaleOf } from "./geometry.ts";
 
 /** Where a text entry's runs sit: takumi reports them in local px from the content box's corner. */
@@ -42,21 +42,46 @@ const PRESERVED_NEWLINES = /^(?:pre|pre-wrap|pre-line|break-spaces)$/;
 const PRESERVED_SPACES = /^(?:pre|pre-wrap|break-spaces)$/;
 
 export function alignOf(context: ExtractContext, element: Element) {
-	const style = context.styleOf(element);
-	const rtl =
-		(style.direction ?? element.closest("[dir]")?.getAttribute("dir")) ===
-		"rtl";
+	const rtl = isRightToLeft(context, element);
 	const logical: Partial<Record<string, string>> = {
 		end: rtl ? "left" : "right",
 		start: rtl ? "right" : "left",
 	};
-	const align = style["text-align"];
+	const align = context.styleOf(element)["text-align"];
 	return TEXT_ALIGNMENTS[logical[align] ?? align] ?? "left";
 }
 
-export const ascentRatio = (fonts: FontBook, font: string) => {
+const ascentRatio = (fonts: FontBook, font: string) => {
 	const { ascent, descent } = fonts.metrics(font);
 	return ascent / (ascent + descent);
+};
+
+export const baselineOf = (
+	context: ExtractContext,
+	frame: RunFrame,
+	run: LaidOutRun,
+	font: string,
+) => {
+	const rect = runRect(frame, run);
+	return rect.y + rect.height * ascentRatio(context.fonts, font);
+};
+
+export const isLineFeed = (run: LaidOutRun) => /^\n+$/.test(run.text);
+
+export const isRightToLeft = (context: ExtractContext, element: Element) => {
+	for (
+		let current: Element | null = element;
+		current;
+		current = current.parentElement
+	) {
+		const direction =
+			context.styleOf(current).direction ?? current.getAttribute("dir");
+		if (direction) {
+			return direction === "rtl";
+		}
+	}
+
+	return false;
 };
 
 export const isInvisible = (paragraphs: Paragraph[]) =>
@@ -74,14 +99,10 @@ export const signatureOf = (paragraphs: Paragraph[]) =>
 		)
 		.join("¶");
 
-export function runFrame(
-	context: ExtractContext,
-	entry: LaidOutRuns,
-	element: Element | undefined,
-) {
+export function runFrame(context: ExtractContext, entry: TextRuns) {
 	const scale = scaleOf(entry.box);
-	const { left, top } = element
-		? context.contentInsets(element)
+	const { left, top } = entry.element
+		? context.contentInsets(entry.element)
 		: { left: 0, top: 0 };
 	return {
 		origin: { x: entry.box.x + scale * left, y: entry.box.y + scale * top },
@@ -89,7 +110,7 @@ export function runFrame(
 	};
 }
 
-export const runRect = ({ origin, scale }: RunFrame, run: LaidOutRun) => ({
+const runRect = ({ origin, scale }: RunFrame, run: LaidOutRun) => ({
 	height: run.height * scale,
 	width: run.width * scale,
 	x: origin.x + run.x * scale,
@@ -99,24 +120,24 @@ export const runRect = ({ origin, scale }: RunFrame, run: LaidOutRun) => ({
 /** Converts takumi's runs (per line, per style) into one paragraph's runs, with baselines and soft breaks for browser wraps. */
 export function runsToParagraph(
 	context: ExtractContext,
-	entry: LaidOutRuns,
-	element: Element | undefined,
+	entry: TextRuns,
+	container: Element,
 	opacityOf = context.opacityOf,
 ) {
-	const frame = runFrame(context, entry, element);
+	const frame = runFrame(context, entry);
+	const source = entry.element ?? container;
 	const runs: Run[] = [];
 	const baselines: number[] = [];
 	const spacer = context.fonts.spacer();
-	const matchSource = sourceMatcher(
-		sourceTextOf(context, element ?? context.byId.get(entry.parent)),
-	);
+	const matchSource = sourceMatcher(sourceTextOf(context, source));
+	const padsLineStarts = /^(?:justify|left)$/.test(alignOf(context, source));
 	let previous: LaidOutRun | undefined;
 	let right = -Infinity;
 	let wrapped = false;
 	let afterNewline = false;
 	for (const run of entry.runs) {
 		const owner = context.byId.get(run.owner);
-		if (!owner || /^\n+$/.test(run.text)) {
+		if (!owner || isLineFeed(run)) {
 			afterNewline ||= run.text.includes("\n");
 			continue;
 		}
@@ -129,14 +150,29 @@ export function runsToParagraph(
 		const rect = runRect(frame, run);
 		right = Math.max(right, rect.x + rect.width);
 		const newLine = startsLine(previous, run);
-		const gap =
-			previous && !newLine
-				? (run.x - (previous.x + previous.width)) * frame.scale
-				: 0;
+		const offset =
+			(previous && !newLine
+				? run.x - (previous.x + previous.width)
+				: padsLineStarts
+					? run.x
+					: 0) * frame.scale;
+		const pad: Run | undefined =
+			offset > MIN_SPACER_GAP
+				? {
+						...style,
+						bold: false,
+						font: spacer.font,
+						gradient: undefined,
+						letterSpacing: offset - spacer.advance * style.size,
+						pad: true,
+						stroke: undefined,
+						text: NO_BREAK_SPACE,
+						transparency: 100,
+					}
+				: undefined;
 		previous = run;
 		if (!style.script) {
-			const baseline =
-				rect.y + rect.height * ascentRatio(context.fonts, style.font);
+			const baseline = baselineOf(context, frame, run, style.font);
 			if (!baselines.length || newLine) {
 				baselines.push(baseline);
 			} else {
@@ -152,20 +188,6 @@ export function runsToParagraph(
 			style,
 			match?.original,
 		);
-		if (gap > MIN_SPACER_GAP && runs.length) {
-			runs.push({
-				...style,
-				bold: false,
-				font: spacer.font,
-				gradient: undefined,
-				letterSpacing: gap - spacer.advance * style.size,
-				pad: true,
-				stroke: undefined,
-				text: NO_BREAK_SPACE,
-				transparency: 100,
-			});
-		}
-
 		if (newLine) {
 			const last = runs.at(-1);
 			const { blankLines, forced, spaced } = breakBefore(
@@ -189,12 +211,17 @@ export function runsToParagraph(
 				});
 			}
 
-			runs.push({
-				...style,
-				lineBreak: forced ? "forced" : "wrap",
-				text: text.trimStart(),
-			});
+			const lineBreak = forced ? "forced" : "wrap";
+			if (pad) {
+				runs.push({ ...pad, lineBreak }, { ...style, text });
+			} else {
+				runs.push({ ...style, lineBreak, text: text.trimStart() });
+			}
 		} else {
+			if (pad) {
+				runs.push(pad);
+			}
+
 			runs.push({ ...style, text });
 		}
 
@@ -293,7 +320,6 @@ function breakBefore(
 	};
 }
 
-/** The decoration lines drawn on an element's text: its own and its ancestors', which propagate into inline content but not into inline blocks or out-of-flow elements. */
 function decorationLinesOf(context: ExtractContext, element: Element) {
 	const lines: string[] = [];
 	for (
@@ -319,7 +345,11 @@ function gradientTextOf(context: ExtractContext, element: Element) {
 	) {
 		const style = context.styleOf(current);
 		if (clipsToText(style)) {
-			const gradient = parseLinearGradient(style["background-image"], 1);
+			const gradient = parseLinearGradient(
+				style["background-image"],
+				1,
+				paintedSizeOf(context, current),
+			);
 			if (gradient) {
 				return gradient;
 			}

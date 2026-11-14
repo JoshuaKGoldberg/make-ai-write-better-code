@@ -1,15 +1,23 @@
 ---
 theme: none
 title: Fixture
-colorSchema: light
+colorSchema: auto
 aspectRatio: 4/3
 canvasWidth: 800
+exportFilename: fixture-deck
+themeConfig:
+  primary: "#5d8392"
 fonts:
   local: Nowhere Sans
 transition: fade
 ---
 
 # Fixture Cover
+
+<LightOrDark>
+  <template #dark>Dark only</template>
+  <template #light>Light only</template>
+</LightOrDark>
 
 ---
 
@@ -98,6 +106,17 @@ A second paragraph.
 
 <iframe src="https://example.com/embed"></iframe>
 <video src="/clip.mp4"></video>
+<Unregistered />
+
+```ts {monaco-diff}
+const side = "original";
+~~~
+const side = "modified";
+```
+
+```ts {monaco-run}
+console.log("ran");
+```
 
 ---
 dragPos:
@@ -233,6 +252,7 @@ const edited = 1;
 
 ```ts twoslash
 const hovered = 1;
+//    ^?
 ```
 
 ````md magic-move
@@ -261,3 +281,53 @@ const after = 1;
 # Missing Image
 
 <img src="/missing.png" alt="Missing" />
+
+---
+
+# Wrapped Code
+
+<v-click>
+
+```ts {1|2|3}
+const one = 1;
+const two = 2;
+const three = 3;
+```
+
+</v-click>
+
+<div v-click>After the code</div>
+
+<v-click>
+
+```ts {monaco}
+const wrapped = 1;
+```
+
+</v-click>
+
+---
+clicksStart: 2
+---
+
+# Started Late
+
+<p>Shown from the start</p>
+
+---
+
+# Deck Setup
+
+<RegisteredInSetup />
+
+<p class="themed">Themed</p>
+
+<span v-tooltip="'A tip'">Tipped</span>
+
+---
+
+# Late Failure
+
+<FailsOnClick :clicks="$clicks" />
+
+<div v-click>Clicked</div>

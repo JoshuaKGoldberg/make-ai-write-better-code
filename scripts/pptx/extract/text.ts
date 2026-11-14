@@ -1,61 +1,67 @@
-import type { LaidOutRun, LaidOutRuns } from "../layout.ts";
-import type { Box, Paragraph } from "../model.ts";
-import type { ExtractContext } from "./context.ts";
+import type { LaidOutRun } from "../layout.ts";
+import type { Paragraph } from "../model.ts";
+import type { ExtractContext, TextRuns } from "./context.ts";
 
 import { lineHeightOf } from "../cascade.ts";
-import { availableWidthOf, boxStyle } from "./boxes.ts";
+import { availableWidthOf, boxItems, boxStyle } from "./boxes.ts";
 import { pathOf } from "./context.ts";
-import { edgeBox, geometryOf, insetBox } from "./geometry.ts";
+import { geometryOf, insetBox, SIDES } from "./geometry.ts";
 import {
 	alignOf,
-	ascentRatio,
+	baselineOf,
 	isInvisible,
+	isLineFeed,
+	isRightToLeft,
 	runFrame,
-	runRect,
 	runsToParagraph,
 	runStyle,
 	signatureOf,
 	startsLine,
 } from "./runs.ts";
 
+/** A code block's lines, in order: highlighted lines, twoslash error lines, and twoslash query popups, which show below their token's line. */
+const CODE_LINES = ".line, .twoslash-meta-line, .twoslash-popup-container";
+
 export function codeItem(context: ExtractContext, pre: Element) {
 	const laidOut = context.boxOf(pre);
-	const entry = context.ownRunsOf(pre);
-	if (!laidOut || !entry) {
+	if (!laidOut || !context.ownRunsOf(pre)) {
 		return;
 	}
 
 	const { box, scale } = geometryOf(laidOut);
-	const frame = runFrame(context, entry, pre);
 	const lineHeight = lineHeightOf(context.styleOf(pre));
-	const lines = [...pre.querySelectorAll(".line")];
+	const lines = [...pre.querySelectorAll(CODE_LINES)];
 	const lineOf = (run: LaidOutRun, owner: Element) =>
 		lines.length
-			? lines.findIndex((line) => line.contains(owner))
+			? lines.findLastIndex((line) => line.contains(owner))
 			: Math.round(run.y / lineHeight);
-	const placed = entry.runs.flatMap((run) => {
-		const owner = context.byId.get(run.owner);
-		const index = owner ? lineOf(run, owner) : -1;
-		return owner && index >= 0 && !/^\n+$/.test(run.text)
-			? [{ index, owner, run }]
-			: [];
-	});
+	const placed = [pre, ...pre.querySelectorAll("*")]
+		.flatMap((element) => {
+			const own = context.ownRunsOf(element);
+			return [...(own ? [own] : []), ...context.looseRunsOf(element)];
+		})
+		.flatMap((laidOutRuns) => {
+			const frame = runFrame(context, laidOutRuns);
+			return laidOutRuns.runs.flatMap((run) => {
+				const owner = context.byId.get(run.owner);
+				const index = owner ? lineOf(run, owner) : -1;
+				return owner && index >= 0 && !isLineFeed(run)
+					? [{ frame, index, owner, run }]
+					: [];
+			});
+		});
 	const paragraphs: Paragraph[] = Array.from(
 		{ length: Math.max(lines.length, ...placed.map(({ index }) => index + 1)) },
 		() => ({ runs: [] }),
 	);
 	const baselines: (number | undefined)[] = [];
-	for (const { index, owner, run } of placed) {
+	for (const { frame, index, owner, run } of placed) {
 		const style = runStyle(context, owner, context.opacityOf(owner));
 		paragraphs[index].runs.push({
 			...style,
 			text: run.text.replace(/\t/g, "  "),
 		});
-		if (baselines[index] === undefined) {
-			const rect = runRect(frame, run);
-			baselines[index] =
-				rect.y + rect.height * ascentRatio(context.fonts, style.font);
-		}
+		baselines[index] ??= baselineOf(context, frame, run, style.font);
 	}
 
 	while (paragraphs.at(-1)?.runs.length === 0) {
@@ -78,6 +84,7 @@ export function codeItem(context: ExtractContext, pre: Element) {
 			availableWidth: availableWidthOf(context, pre, content.x),
 			lineHeight: lineHeight * scale,
 			nowrap: true,
+			rtl: false,
 		},
 	});
 }
@@ -86,13 +93,9 @@ export function codeItem(context: ExtractContext, pre: Element) {
 export function inlinePills(
 	context: ExtractContext,
 	element: Element,
-	entry: LaidOutRuns,
+	entry: TextRuns,
 ) {
-	const { origin, scale } = runFrame(
-		context,
-		entry,
-		entry.anonymous ? undefined : element,
-	);
+	const { origin, scale } = runFrame(context, entry);
 	for (const child of element.querySelectorAll("*")) {
 		const style =
 			context.styleOf(child).display === "inline"
@@ -130,51 +133,32 @@ export function inlinePills(
 			line.bottom = Math.max(line.bottom, run.y + run.height);
 		}
 
-		const paddingX = context.lengthOf(child, "padding-left");
-		const paddingY = context.lengthOf(child, "padding-top");
-		const { border, edges = [], fill, radius } = style;
-		const key = pathOf(child);
+		const insets = context.contentInsets(child);
 		const label = context.labelOf(child);
 		for (const [index, line] of lines.entries()) {
-			const box: Box = {
-				height: (line.bottom - line.top + paddingY * 2) * scale,
-				width: (line.right - line.left + paddingX * 2) * scale,
-				x: origin.x + (line.left - paddingX) * scale,
-				y: origin.y + (line.top - paddingY) * scale,
-			};
-			const at = String(Math.round(line.left));
-			if (fill || border) {
-				context.push(child, {
-					border: border && { ...border, width: border.width * scale },
-					box,
-					fill,
-					key: `${key}#pill:${at}`,
-					kind: "box",
+			const first = index === 0;
+			const last = index === lines.length - 1;
+			const left = line.left - (first ? insets.left : 0);
+			const right = line.right + (last ? insets.right : 0);
+			const top = line.top - insets.top;
+			context.push(
+				child,
+				...boxItems(style, {
+					box: {
+						height: (line.bottom + insets.bottom - top) * scale,
+						width: (right - left) * scale,
+						x: origin.x + left * scale,
+						y: origin.y + top * scale,
+					},
+					key: `${pathOf(child)}:${String(Math.round(line.left))}`,
 					label,
-					radius: radius * scale,
 					rotation: 0,
-				});
-			}
-
-			for (const edge of edges.filter(
-				({ side }) =>
-					(side !== "left" || index === 0) &&
-					(side !== "right" || index === lines.length - 1),
-			)) {
-				context.push(child, {
-					...edgeBox(
-						box,
-						{ side: edge.side, width: edge.width * scale },
-						radius * scale,
-						0,
+					scale,
+					sides: SIDES.filter(
+						(side) => (side !== "left" || first) && (side !== "right" || last),
 					),
-					fill: edge.fill,
-					key: `${key}#pill-border-${edge.side}:${at}`,
-					kind: "box",
-					label: `${edge.side} border of ${label}`,
-					radius: 0,
-				});
-			}
+				}),
+			);
 		}
 	}
 }
@@ -182,14 +166,17 @@ export function inlinePills(
 export function textItem(
 	context: ExtractContext,
 	element: Element,
-	entry: LaidOutRuns,
+	entry: TextRuns,
 ) {
-	const owner = entry.anonymous ? undefined : element;
 	const { box: entryBox, rotation, scale } = geometryOf(entry.box);
-	const box = owner
-		? insetBox(entryBox, context.contentInsets(owner), scale)
+	const box = entry.element
+		? insetBox(entryBox, context.contentInsets(entry.element), scale)
 		: entryBox;
-	const { baselines, runs, wrapRight } = runsToParagraph(context, entry, owner);
+	const { baselines, runs, wrapRight } = runsToParagraph(
+		context,
+		entry,
+		element,
+	);
 	const paragraphs = [{ runs }];
 	if (isInvisible(paragraphs)) {
 		return;
@@ -200,7 +187,7 @@ export function textItem(
 		baselines: rotation ? undefined : baselines,
 		box,
 		heading: /^h[1-6]$/.test(element.localName),
-		key: `${pathOf(element)}#${owner ? "text" : "loose"}:${signatureOf(paragraphs)}`,
+		key: `${pathOf(element)}#${entry.element ? "text" : "loose"}:${signatureOf(paragraphs)}`,
 		kind: "text",
 		paragraphs,
 		rotation,
@@ -210,6 +197,7 @@ export function textItem(
 			lineHeight: lineHeightOf(style) * scale,
 			nowrap:
 				/^(?:nowrap|pre)$/.test(style["white-space"]) || Boolean(rotation),
+			rtl: isRightToLeft(context, element),
 			wrapWidth: wrapRight === undefined ? undefined : wrapRight - box.x,
 		},
 	});

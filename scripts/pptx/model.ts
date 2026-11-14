@@ -185,12 +185,14 @@ export interface TextItem extends ItemBase {
 
 export interface TextStyle {
 	align: "center" | "justify" | "left" | "right";
-	/** px from the item's box.x to the content right edge of its nearest block ancestor with a visible box (fill or border), else the slide edge. */
+	/** px from the item's box.x to the content right edge of its nearest block ancestor with a visible box (fill or border), else of the slide's layout (`.slidev-layout`), else the slide edge. */
 	availableWidth: number;
 	/** px */
 	lineHeight: number;
 	/** Whether the text can't wrap, as with white-space: nowrap or pre, so PowerPoint mustn't wrap it either. */
 	nowrap: boolean;
+	/** Whether the text runs right to left (CSS direction: rtl, or a dir="rtl" ancestor). */
+	rtl: boolean;
 
 	/**
 	 * For wrapped text, how wide (px) its longest line is in the browser. PowerPoint measures

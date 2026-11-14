@@ -1,6 +1,7 @@
 import type { Token } from "markdown-exit";
 
 import JSZip from "jszip";
+import { parseHTML } from "linkedom";
 import { createMarkdownExit } from "markdown-exit";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -19,7 +20,7 @@ export interface SlidePatch {
 	decorative: string[];
 	effects: Effect[];
 	lists: {
-		/** The markers' color, when it isn't the text's. */
+		/** The markers' color as uppercase hex, when it isn't the text's. */
 		color?: string;
 		/** Each paragraph's marker, in order. */
 		markers: ListMarker[];
@@ -41,9 +42,22 @@ export interface SlidePatch {
 	transition?: string;
 }
 
-/** What new content in PowerPoint starts from: the theme, the master's styles, and the document's properties. */
+/** A solid color, as uppercase hex, and how transparent it is (0-100). */
+export interface Paint {
+	color: string;
+	transparency: number;
+}
+
+/** How new shapes look: the deck's most common box. */
+export interface ShapeLook {
+	fill: Paint;
+	/** The outline, with its width in EMU. */
+	line?: Paint & { width: number };
+}
+
+/** What new content in PowerPoint starts from: the theme, the master's styles, and the document's properties. Colors are uppercase hex. */
 export interface Theme {
-	/** Colors as hex, most used first, for up to six accents. */
+	/** Most used first, for up to six accents. */
 	accents: string[];
 	background: string;
 	/** Body text's most used line spacing, in 1000ths of a percent. */
@@ -54,25 +68,35 @@ export interface Theme {
 	fonts: string[];
 	link?: string;
 	/** The heading font. */
-	majorFont?: string;
+	majorFont: string;
 	/** The body font. */
-	minorFont?: string;
+	minorFont: string;
 	name: string;
+	shape?: ShapeLook;
 	text: string;
-	title?: TitleLook;
+	title: TitleLook;
 }
 
 /** Where a slide's title sits and how it's styled, in EMU and PowerPoint's units. */
 export interface TitleLook {
 	align: "ctr" | "just" | "l" | "r";
+	/** Whether the title is bold. */
+	bold: boolean;
+	/** Uppercase hex. */
 	color: string;
 	cx: number;
 	cy: number;
 	font: string;
+	/** Whether the title is italic. */
+	italic: boolean;
+	/** In 100ths of a point. */
+	letterSpacing: number;
 	/** In 1000ths of a percent. */
 	lineSpacing?: number;
 	/** In 100ths of a point. */
 	size: number;
+	/** Whether the title shows capitalized. */
+	upper: boolean;
 	x: number;
 	y: number;
 }
@@ -85,6 +109,14 @@ interface Effect {
 	/** Animate one paragraph (a list item) instead of the whole shape. */
 	paragraph?: number;
 	type: "entr" | "exit";
+}
+
+interface NotesFormat {
+	bold: boolean;
+	code: boolean;
+	href?: string;
+	italic: boolean;
+	strike: boolean;
 }
 
 interface PackageOptions {
@@ -127,6 +159,25 @@ const SCRIPT_REFERENCES = { cs: "cs", ea: "ea", latin: "lt" } as const;
 
 /** A portrait 7.5" by 10" page, PowerPoint's default notes size. */
 const NOTES_SIZE = '<p:notesSz cx="6858000" cy="9144000"/>';
+
+const NOTES_BREAK = '<a:br><a:rPr lang="en-US" dirty="0"/></a:br>';
+const NOTES_BLANK_PARAGRAPH =
+	'<a:p><a:endParaRPr lang="en-US" dirty="0"/></a:p>';
+
+/** The formatting that HTML tags in speaker notes turn on. */
+const NOTES_HTML_FORMATS: Partial<Record<string, "bold" | "italic">> = {
+	b: "bold",
+	em: "italic",
+	i: "italic",
+	strong: "bold",
+};
+
+const PLAIN_NOTES: NotesFormat = {
+	bold: false,
+	code: false,
+	italic: false,
+	strike: false,
+};
 
 const markdown = createMarkdownExit({ html: true });
 
@@ -172,6 +223,8 @@ export function createGradients(
 
 			return entry.sentinel;
 		},
+		/** Every placeholder color handed out. */
+		sentinels: () => [...byKey.values()].map(({ sentinel }) => sentinel),
 	};
 }
 
@@ -222,7 +275,19 @@ export function patchSlide(
 		singleParagraphProperties(xml),
 		"</p:clrMapOvr>",
 		`</p:clrMapOvr>${transitionXml(patch.transition)}${patch.effects.length ? timingXml(patch.effects, ids, shapes) : ""}`,
-	);
+	)
+		.replaceAll(
+			`lang="${UPPERCASE_LANG}" altLang="en-US"`,
+			'lang="en-US" cap="all"',
+		)
+		.replaceAll("<a:ln></a:ln>", "<a:ln><a:noFill/></a:ln>")
+		// Browsers kern text by default; PowerPoint only kerns runs that ask for it, and pptxgenjs
+		// writes kern="0" on letter-spaced runs.
+		.replace(
+			/<a:rPr lang="en-US"(?![^>]*\bkern=)/g,
+			'<a:rPr lang="en-US" kern="100"',
+		)
+		.replaceAll(' kern="0"', ' kern="100"');
 
 	for (const { adjust, name } of patch.pictureCorners) {
 		patched = replaceShape(patched, name, (picture) =>
@@ -242,14 +307,17 @@ export function patchSlide(
 
 	if (patch.title) {
 		patched = replaceShape(patched, patch.title.name, (shape) =>
-			patchOnce(
+			inheritTitleLook(
 				patchOnce(
-					shape,
-					'<p:cNvSpPr txBox="1"/>',
-					'<p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>',
+					patchOnce(
+						shape,
+						'<p:cNvSpPr txBox="1"/>',
+						'<p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>',
+					),
+					"<p:nvPr></p:nvPr>",
+					TITLE_PLACEHOLDER,
 				),
-				"<p:nvPr></p:nvPr>",
-				TITLE_PLACEHOLDER,
+				theme.title,
 			),
 		);
 	}
@@ -264,24 +332,71 @@ export function patchSlide(
 		);
 	}
 
-	patched = patched
-		.replaceAll(
-			`lang="${UPPERCASE_LANG}" altLang="en-US"`,
-			'lang="en-US" cap="all"',
-		)
-		.replaceAll("<a:ln></a:ln>", "<a:ln><a:noFill/></a:ln>")
-		// Browsers kern text by default; PowerPoint only kerns runs that ask for it. pptxgenjs
-		// also turns kerning off for letter-spaced runs, where browsers apply both.
-		.replace(
-			/<a:rPr lang="en-US"(?![^>]*\bkern=)/g,
-			'<a:rPr lang="en-US" kern="100"',
-		)
-		.replaceAll(' kern="0"', ' kern="100"');
-	return themeReferences(
+	const result = themeReferences(
 		gradients.apply(endParagraphProperties(patched)),
 		theme,
 	);
+	const leftover = [
+		`descr="${DECORATIVE}"`,
+		`lang="${UPPERCASE_LANG}"`,
+		...gradients.sentinels().map((sentinel) => `val="${sentinel}"`),
+	].find((marker) => result.includes(marker));
+	if (leftover) {
+		throw new Error(`Expected no ${leftover} left in the package's XML.`);
+	}
+
+	return result;
 }
+
+/** A title placeholder's runs without the properties they'd inherit from the master's title style, so editing the master restyles them. */
+function inheritTitleLook(shape: string, look: TitleLook) {
+	const fill = `<a:solidFill><a:srgbClr val="${look.color}"/></a:solidFill>`;
+	return shape.replace(
+		/<a:(rPr|endParaRPr)\b([^>]*?)(?:\/>|>(.*?)<\/a:\1>)/gs,
+		(_, tag: string, attributes: string, children: string | undefined) => {
+			const kept = titleRunAttributes(look).reduce(
+				(result, { name, plain, value }) => {
+					const own = new RegExp(` ${name}="([^"]*)"`).exec(result)?.[1];
+					if (own === undefined) {
+						return value === undefined
+							? result
+							: `${result} ${name}="${plain}"`;
+					}
+
+					return own === value
+						? result.replace(` ${name}="${own}"`, "")
+						: result;
+				},
+				attributes.replace(` sz="${String(look.size)}"`, ""),
+			);
+			const inner = children ?? "";
+			const outline = /^<a:ln\b.*?<\/a:ln>/s.exec(inner)?.[0] ?? "";
+			const rest = inner.slice(outline.length);
+			const content = (
+				outline + (rest.startsWith(fill) ? rest.slice(fill.length) : rest)
+			).replace(
+				/<a:(?:latin|ea|cs) typeface="([^"]*)"[^>]*\/>/g,
+				(element, typeface: string) =>
+					unescapeXml(typeface) === look.font ? "" : element,
+			);
+			return content
+				? `<a:${tag}${kept}>${content}</a:${tag}>`
+				: `<a:${tag}${kept}/>`;
+		},
+	);
+}
+
+/** The run properties besides size that the master's title style gives titles, each with what a run without it means. */
+const titleRunAttributes = (look: TitleLook) => [
+	{ name: "b", plain: "0", value: look.bold ? "1" : undefined },
+	{ name: "i", plain: "0", value: look.italic ? "1" : undefined },
+	{ name: "cap", plain: "none", value: look.upper ? "all" : undefined },
+	{
+		name: "spc",
+		plain: "0",
+		value: look.letterSpacing ? String(look.letterSpacing) : undefined,
+	},
+];
 
 /** Replaces the first match, throwing when there's none: pptxgenjs's output isn't what the patch expects. */
 function patchOnce(
@@ -326,7 +441,7 @@ function styleMarkers(
 	color: string | undefined,
 ) {
 	const bulletColor = color
-		? `<a:buClr><a:srgbClr val="${color.toUpperCase()}"/></a:buClr>`
+		? `<a:buClr><a:srgbClr val="${color}"/></a:buClr>`
 		: "";
 	const plainSize = '<a:buSzPct val="100000"/>';
 	let index = 0;
@@ -365,7 +480,7 @@ function styleMarkers(
 	return styled;
 }
 
-// pptxgenjs writes paragraph properties before every run, but a paragraph may only have one, as its first child.
+/** Keeps only each paragraph's first properties, as pptxgenjs writes them before every run. */
 function singleParagraphProperties(xml: string) {
 	return xml.replace(/<a:p>(.*?)<\/a:p>/gs, (paragraph, body: string) => {
 		let first = true;
@@ -402,10 +517,7 @@ function schemeColor(
 ) {
 	return color
 		? properties.replace(
-				new RegExp(
-					`<a:srgbClr val="${color.toUpperCase()}"(/>|>(.*?)</a:srgbClr>)`,
-					"s",
-				),
+				new RegExp(`<a:srgbClr val="${color}"(/>|>(.*?)</a:srgbClr>)`, "s"),
 				(_, end: string, children: string | undefined) =>
 					children === undefined
 						? `<a:schemeClr val="${scheme}"${end}`
@@ -467,7 +579,6 @@ export async function finishPackage(
 	await deduplicateMedia(zip);
 	await tidyContentTypes(zip);
 
-	// A fresh package has no folder entries, which break some cloud editors.
 	const output = new JSZip();
 	for (const file of zip.file(/./)) {
 		output.file(file.name, await file.async("uint8array"), {
@@ -547,65 +658,75 @@ async function writeThemes(zip: JSZip, theme: Theme) {
 		),
 	);
 
-	const [dark, light] = darkAndLight(theme);
+	zip.file(slideTheme, themeXml(original, theme));
+}
+
+/** A theme with the deck's colors, fonts, and name, and its most common box as the look of new shapes. */
+export function themeXml(original: string, theme: Theme) {
+	const dark = darkBackground(theme);
 	const colors: [string, string | undefined][] = [
-		["dk1", dark],
-		["lt1", light],
+		["dk1", dark ? theme.background : theme.text],
+		["lt1", dark ? theme.text : theme.background],
+		[
+			dark ? "lt2" : "dk2",
+			titleColorScheme(theme) === "tx2" ? theme.title.color : undefined,
+		],
 		["hlink", theme.link],
 		["folHlink", theme.link],
-		...theme.accents
-			.slice(0, 6)
-			.map((color, index): [string, string] => [
-				`accent${String(index + 1)}`,
-				color,
-			]),
+		...theme.accents.map((color, index): [string, string] => [
+			`accent${String(index + 1)}`,
+			color,
+		]),
 	];
-	let patched = original;
-	for (const [name, color] of colors) {
-		if (color) {
-			patched = patchOnce(
-				patched,
-				new RegExp(`<a:${name}>.*?</a:${name}>`),
-				`<a:${name}><a:srgbClr val="${color.toUpperCase()}"/></a:${name}>`,
-			);
-		}
-	}
-
-	for (const [scheme, font] of [
-		["majorFont", theme.majorFont],
-		["minorFont", theme.minorFont],
-	] as const) {
-		if (font) {
-			patched = patchOnce(
-				patched,
+	const withColors = colors.reduce(
+		(xml, [name, color]) =>
+			color
+				? patchOnce(
+						xml,
+						new RegExp(`<a:${name}>.*?</a:${name}>`),
+						`<a:${name}><a:srgbClr val="${color}"/></a:${name}>`,
+					)
+				: xml,
+		original,
+	);
+	const withFonts = (["majorFont", "minorFont"] as const).reduce(
+		(xml, scheme) =>
+			patchOnce(
+				xml,
 				new RegExp(
 					`<a:${scheme}><a:latin [^>]*/><a:ea typeface=""/><a:cs typeface=""/>`,
 				),
-				`<a:${scheme}>${["latin", "ea", "cs"].map((script) => `<a:${script} typeface="${escapeXml(font)}"/>`).join("")}`,
-			);
-		}
-	}
-
+				`<a:${scheme}>${["latin", "ea", "cs"].map((script) => `<a:${script} typeface="${escapeXml(theme[scheme])}"/>`).join("")}`,
+			),
+		withColors,
+	);
+	const withShapes = theme.shape
+		? patchOnce(withFonts, "<a:objectDefaults/>", shapeDefaultsXml(theme.shape))
+		: withFonts;
 	const name = escapeXml(theme.name);
-	zip.file(
-		slideTheme,
-		[
-			/(<a:theme\b[^>]*) name="Office Theme"/,
-			/(<a:clrScheme) name="Office"/,
-			/(<a:fontScheme) name="Office"/,
-			/(<thm15:themeFamily\b[^>]*) name="Office Theme"/,
-		].reduce(
-			(xml, element) =>
-				patchOnce(xml, element, (_, start) => `${start} name="${name}"`),
-			patched,
-		),
+	return [
+		/(<a:theme\b[^>]*) name="Office Theme"/,
+		/(<a:clrScheme) name="Office"/,
+		/(<a:fontScheme) name="Office"/,
+		/(<thm15:themeFamily\b[^>]*) name="Office Theme"/,
+	].reduce(
+		(xml, element) =>
+			patchOnce(xml, element, (_, start) => `${start} name="${name}"`),
+		withShapes,
 	);
 }
 
-const darkAndLight = ({ background, text }: Theme) =>
-	luminance(background) < luminance(text)
-		? [background, text]
-		: [text, background];
+const shapeDefaultsXml = ({ fill, line }: ShapeLook) =>
+	`<a:objectDefaults><a:spDef><a:spPr>${solidFillXml(fill)}${line ? `<a:ln w="${String(line.width)}">${solidFillXml(line)}</a:ln>` : "<a:ln><a:noFill/></a:ln>"}</a:spPr><a:bodyPr rtlCol="0" anchor="ctr"/><a:lstStyle/><a:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="tx1"/></a:fontRef></a:style></a:spDef></a:objectDefaults>`;
+
+const solidFillXml = ({ color, transparency }: Paint) =>
+	`<a:solidFill><a:srgbClr val="${color}"${transparency ? `>${alphaXml(transparency)}</a:srgbClr>` : "/>"}</a:solidFill>`;
+
+const alphaXml = (transparency: number) =>
+	`<a:alpha val="${String(Math.round((100 - transparency) * 1000))}"/>`;
+
+const darkBackground = ({ background, text }: Theme) =>
+	luminance(background) < luminance(text);
 
 const luminance = (color: string) =>
 	[0.299, 0.587, 0.114].reduce(
@@ -613,6 +734,10 @@ const luminance = (color: string) =>
 			sum + weight * parseInt(color.slice(index * 2, index * 2 + 2), 16),
 		0,
 	);
+
+/** The theme color titles take: the text's, or a second text color of their own. */
+const titleColorScheme = ({ text, title }: Theme) =>
+	title.color === text ? "tx1" : "tx2";
 
 /** Gives the master the deck's background, its slides' title placement and style, and its body text's defaults. */
 async function writeMaster(zip: JSZip, theme: Theme, background: Buffer) {
@@ -633,16 +758,15 @@ async function writeMaster(zip: JSZip, theme: Theme, background: Buffer) {
 			`<Relationship Id="${backgroundId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/background.png"/></Relationships>`,
 		),
 	);
+	zip.file(
+		masterFile,
+		masterXml(await read(zip, masterFile), theme, backgroundId),
+	);
+}
 
-	const master = await read(zip, masterFile);
+/** A slide master with the deck's background picture, title, and body text defaults, mapping text to the light color on a dark background. */
+export function masterXml(master: string, theme: Theme, backgroundId: string) {
 	const { title } = theme;
-	const [width, height] = slideSizeOf(await read(zip, "ppt/presentation.xml"));
-	const box = title ?? {
-		cx: Math.round(width * 0.9),
-		cy: Math.round(height * 0.15),
-		x: Math.round(width * 0.05),
-		y: Math.round(height * 0.05),
-	};
 	const withBackground = patchOnce(
 		master,
 		"<p:cSld>",
@@ -652,39 +776,39 @@ async function writeMaster(zip: JSZip, theme: Theme, background: Buffer) {
 		withBackground,
 		"</p:grpSpPr>",
 		`</p:grpSpPr>${titleShape(
-			`<p:spPr><a:xfrm><a:off x="${String(box.x)}" y="${String(box.y)}"/><a:ext cx="${String(box.cx)}" cy="${String(box.cy)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>`,
+			`<p:spPr><a:xfrm><a:off x="${String(title.x)}" y="${String(title.y)}"/><a:ext cx="${String(title.cx)}" cy="${String(title.cy)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>`,
 			'<a:bodyPr lIns="0" tIns="0" rIns="0" bIns="0" rtlCol="0" anchor="t"/>',
 		)}`,
 	);
 	const styled = bodyDefaults(
-		title ? titleStyle(withTitle, title, theme) : withTitle,
+		titleStyle(withTitle, theme),
 		"p:otherStyle",
 		theme,
 	);
-	zip.file(
-		masterFile,
-		darkAndLight(theme)[0] === theme.background
-			? patchOnce(
-					styled,
-					'bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"',
-					'bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2"',
-				)
-			: styled,
-	);
+	return darkBackground(theme)
+		? patchOnce(
+				styled,
+				'bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"',
+				'bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2"',
+			)
+		: styled;
 }
 
-/** Gives the master's title style a title's alignment, spacing, size, color, and font. */
-function titleStyle(master: string, title: TitleLook, theme: Theme) {
-	const color = title.color.toUpperCase();
+/** Gives the master's title style the deck's title alignment, spacing, size, run properties, color, and font. */
+function titleStyle(master: string, theme: Theme) {
+	const { title } = theme;
+	const attributes = titleRunAttributes(title)
+		.flatMap(({ name, value }) =>
+			value === undefined ? [] : [` ${name}="${value}"`],
+		)
+		.join("");
 	const replacements = [
 		[' algn="ctr"', ` algn="${title.align}"`],
 		["<a:spcBef>", `${lineSpacingXml(title.lineSpacing)}<a:spcBef>`],
-		[' sz="4400"', ` sz="${String(title.size)}"`],
+		[' sz="4400"', ` sz="${String(title.size)}"${attributes}`],
 		[
 			'<a:schemeClr val="tx1"/>',
-			color === theme.text.toUpperCase()
-				? '<a:schemeClr val="tx1"/>'
-				: `<a:srgbClr val="${color}"/>`,
+			`<a:schemeClr val="${titleColorScheme(theme)}"/>`,
 		],
 		[
 			'<a:latin typeface="+mj-lt"/><a:ea typeface="+mj-ea"/><a:cs typeface="+mj-cs"/>',
@@ -701,15 +825,6 @@ function titleStyle(master: string, title: TitleLook, theme: Theme) {
 		),
 	);
 }
-
-const slideSizeOf = (presentation: string) => {
-	const size = /<p:sldSz cx="(\d+)" cy="(\d+)"/.exec(presentation);
-	if (!size) {
-		throw new Error("The presentation has no slide size.");
-	}
-
-	return [Number(size[1]), Number(size[2])];
-};
 
 const titleShape = (properties: string, body: string) =>
 	`<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title Placeholder 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>${TITLE_PLACEHOLDER}</p:nvSpPr>${properties}<p:txBody>${body}<a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>`;
@@ -771,12 +886,12 @@ async function writeLayout(zip: JSZip) {
 	);
 }
 
+/** Gives new text the deck's body defaults, and notes pages PowerPoint's own size rather than pptxgenjs's sideways slide size. */
 async function writePresentation(zip: JSZip, theme: Theme) {
 	const presentationFile = "ppt/presentation.xml";
 	zip.file(
 		presentationFile,
 		bodyDefaults(
-			// pptxgenjs writes the notes size as the slide size turned sideways.
 			patchOnce(
 				await read(zip, presentationFile),
 				/<p:notesSz [^>]*\/>/,
@@ -865,14 +980,6 @@ async function deduplicateMedia(zip: JSZip) {
 }
 
 /** Writes a slide's speaker notes, formatting their Markdown. */
-interface NotesFormat {
-	bold: boolean;
-	code: boolean;
-	href?: string;
-	italic: boolean;
-	strike: boolean;
-}
-
 async function writeNotes(
 	zip: JSZip,
 	part: string,
@@ -913,8 +1020,8 @@ async function writeNotes(
 	}
 }
 
-/** Notes paragraphs from Markdown: one per paragraph, heading, list item, and code line, with a blank paragraph wherever the source has blank lines. */
-function notesParagraphs(
+/** Notes paragraphs from Markdown: one per paragraph, heading, list item, code line, and HTML block, with a blank paragraph wherever the source has blank lines. */
+export function notesParagraphs(
 	notes: string,
 	monospace: string,
 	linkId: (url: string) => string,
@@ -935,12 +1042,8 @@ function notesParagraphs(
 
 	const inlineRuns = (children: Token[], bold: boolean) => {
 		const pieces: { format: NotesFormat; text: string }[] = [];
-		const format: NotesFormat = {
-			bold,
-			code: false,
-			italic: false,
-			strike: false,
-		};
+		const initial = { ...PLAIN_NOTES, bold };
+		const format: NotesFormat = { ...initial };
 		const add = (text: string, pieceFormat: NotesFormat) => {
 			const last = pieces.at(-1);
 			if (last && JSON.stringify(last.format) === JSON.stringify(pieceFormat)) {
@@ -951,9 +1054,17 @@ function notesParagraphs(
 		};
 
 		let runs = "";
-		const flush = () => {
-			runs += pieces.map((piece) => run(piece.text, piece.format)).join("");
-			pieces.length = 0;
+		const written = () =>
+			pieces
+				.splice(0)
+				.map((piece) => run(piece.text, piece.format))
+				.join("");
+		const lineBreak = () => {
+			runs += written() + NOTES_BREAK;
+		};
+
+		const toggle = (property: "bold" | "italic", opening: boolean) => {
+			format[property] = opening || initial[property];
 		};
 
 		for (const child of children) {
@@ -963,13 +1074,25 @@ function notesParagraphs(
 					break;
 				case "em_close":
 				case "em_open":
-					format.italic = child.nesting === 1;
+					toggle("italic", child.nesting === 1);
 					break;
 				case "hardbreak":
 				case "softbreak":
-					flush();
-					runs += '<a:br><a:rPr lang="en-US" dirty="0"/></a:br>';
+					lineBreak();
 					break;
+				case "html_inline": {
+					const [, closing, name = ""] =
+						/^<(\/?)([a-z]\w*)/i.exec(child.content) ?? [];
+					const tag = name.toLowerCase();
+					const property = NOTES_HTML_FORMATS[tag];
+					if (tag === "br") {
+						lineBreak();
+					} else if (property) {
+						toggle(property, !closing);
+					}
+
+					break;
+				}
 				case "image":
 				case "text":
 					add(child.content, format);
@@ -987,13 +1110,12 @@ function notesParagraphs(
 					break;
 				case "strong_close":
 				case "strong_open":
-					format.bold = bold || child.nesting === 1;
+					toggle("bold", child.nesting === 1);
 					break;
 			}
 		}
 
-		flush();
-		return runs;
+		return runs + written();
 	};
 
 	const paragraphs: string[] = [];
@@ -1005,7 +1127,7 @@ function notesParagraphs(
 	for (const token of markdown.parse(notes, {})) {
 		if (token.level === 0 && token.nesting !== -1 && token.map) {
 			if (lastLine !== undefined && token.map[0] > lastLine) {
-				paragraphs.push('<a:p><a:endParaRPr lang="en-US" dirty="0"/></a:p>');
+				paragraphs.push(NOTES_BLANK_PARAGRAPH);
 			}
 
 			lastLine = token.map[1];
@@ -1031,13 +1153,25 @@ function notesParagraphs(
 						.split("\n")
 						.map(
 							(line) =>
-								`<a:p>${run(line, { bold: false, code: true, italic: false, strike: false })}</a:p>`,
+								`<a:p>${run(line, { ...PLAIN_NOTES, code: true })}</a:p>`,
 						),
 				);
 				break;
 			case "heading_close":
 			case "heading_open":
 				heading = token.nesting === 1;
+				break;
+			case "html_block":
+				paragraphs.push(
+					...[
+						...parseHTML(`<html><body>${token.content}</body></html>`).document
+							.body.childNodes,
+					]
+						.filter((node) => node.nodeType !== node.COMMENT_NODE)
+						.map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim())
+						.filter(Boolean)
+						.map((text) => `<a:p>${run(text, PLAIN_NOTES)}</a:p>`),
+				);
 				break;
 			case "inline": {
 				const list = lists.at(-1);
@@ -1085,7 +1219,7 @@ async function read(zip: JSZip, name: string) {
 	return file.async("string");
 }
 
-/** Drops content types for parts and extensions the package doesn't have, and fixes jpg's. */
+/** Drops content types for parts and extensions the package doesn't have, and declares JPEGs as image/jpeg rather than pptxgenjs's image/jpg. */
 async function tidyContentTypes(zip: JSZip) {
 	const extensions = new Set(
 		Object.keys(zip.files).map((file) =>
@@ -1104,7 +1238,6 @@ async function tidyContentTypes(zip: JSZip) {
 				(declaration, extension: string) =>
 					extensions.has(extension.toLowerCase()) ? declaration : "",
 			)
-			// pptxgenjs declares JPEGs as the nonstandard image/jpg.
 			.replace('ContentType="image/jpg"', 'ContentType="image/jpeg"'),
 	);
 }
@@ -1129,10 +1262,7 @@ const unescapeXml = (value: string) =>
 function gradientFillXml({ angle, stops }: Gradient) {
 	const stopXml = stops
 		.map((stop) => {
-			const alpha =
-				stop.transparency > 0
-					? `<a:alpha val="${String(Math.round((100 - stop.transparency) * 1000))}"/>`
-					: "";
+			const alpha = stop.transparency > 0 ? alphaXml(stop.transparency) : "";
 			return `<a:gs pos="${String(Math.round(stop.position * 1000))}"><a:srgbClr val="${stop.color.toUpperCase()}">${alpha}</a:srgbClr></a:gs>`;
 		})
 		.join("");

@@ -91,6 +91,35 @@ describe(createLayout, () => {
 		]);
 	});
 
+	it("lays out an element when takumi rejects its inline values", async () => {
+		const { mismatches, runs } = await layOut(
+			`<div style="display: contents"><p style="position: sticky; overflow: auto; overflow-y: scroll">kept</p></div>`,
+		);
+
+		expect({ mismatches, runs: [...runs.values()] }).toEqual({
+			mismatches: [],
+			runs: [
+				expect.objectContaining({
+					runs: [expect.objectContaining({ text: "kept" })],
+				}),
+			],
+		});
+	});
+
+	it("measures an inline-block's box when it sits alone before a block", async () => {
+		const { boxes, document, mismatches } = await layOut(
+			`<div><span style="display: inline-block; width: 10px; height: 10px"></span><p>after</p></div>`,
+		);
+
+		expect({
+			mismatches,
+			span: boxes.get(document.querySelector("span")?.getAttribute(ID) ?? ""),
+		}).toEqual({
+			mismatches: [],
+			span: expect.objectContaining({ height: 10, width: 10 }),
+		});
+	});
+
 	it("lays out a slide when an image has no source", async () => {
 		const { mismatches, runs } = await layOut(`<p>kept</p><img alt="">`);
 
@@ -119,20 +148,24 @@ describe(createLayout, () => {
 	});
 
 	it("lays out a table's rows when they aren't in a row group", async () => {
-		const { mismatches, runs } = await layOut(
+		const { looseRuns, mismatches } = await layOut(
 			`<p style="display: inline-table"><span style="display: table-row">a</span><span style="display: table-row">b</span></p>`,
 		);
 
-		expect({ mismatches, runs: [...runs.values()] }).toEqual({
-			mismatches: [],
-			runs: [
-				expect.objectContaining({
-					runs: [expect.objectContaining({ text: "a" })],
-				}),
-				expect.objectContaining({
-					runs: [expect.objectContaining({ text: "b" })],
-				}),
+		expect({ looseRuns: [...looseRuns.values()], mismatches }).toEqual({
+			looseRuns: [
+				[
+					expect.objectContaining({
+						runs: [expect.objectContaining({ text: "a" })],
+					}),
+				],
+				[
+					expect.objectContaining({
+						runs: [expect.objectContaining({ text: "b" })],
+					}),
+				],
 			],
+			mismatches: [],
 		});
 	});
 

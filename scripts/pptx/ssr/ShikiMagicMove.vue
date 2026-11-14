@@ -1,18 +1,12 @@
 <script setup lang="ts">
 import TitleIcon from "@slidev/client/internals/TitleIcon.vue";
 import { updateCodeHighlightRange } from "@slidev/client/logic/utils.ts";
-import { createRequire } from "node:module";
 
 import { useClickTarget } from "./clicks.ts";
-
-// Slidev aliases lz-string to its CommonJS file when process.argv[1] makes it think it was installed globally, which Vite can't evaluate.
-const require = createRequire(import.meta.url);
-const lzString = require("lz-string");
+import { lzString } from "./lzString.ts";
 
 const props = defineProps({
 	at: { default: "+1", type: [String, Number] },
-	duration: { default: 0, type: Number },
-	lines: { default: false, type: Boolean },
 	stepRanges: { required: true, type: Array },
 	stepsLz: { required: true, type: String },
 	title: { default: "", type: String },
@@ -40,9 +34,9 @@ const stepRanges = props.stepRanges.map((ranges) =>
 	ranges.length ? ranges : ["all"],
 );
 
-const target = useClickTarget((clicks, element) => {
+const target = useClickTarget((clicks, element, id) => {
 	const info = clicks.calculateSince(props.at, stepRanges.flat().length - 1);
-	clicks.register(element, info);
+	clicks.register(id, info);
 	const clickCount = info
 		? clicks.current - info.start
 		: Number.POSITIVE_INFINITY;

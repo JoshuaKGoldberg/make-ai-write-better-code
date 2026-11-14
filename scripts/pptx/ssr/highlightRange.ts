@@ -8,9 +8,9 @@ export function useHighlightRange(
 		return {};
 	}
 
-	return useClickTarget((clicks, element) => {
+	return useClickTarget((clicks, element, id) => {
 		const info = clicks.calculateSince(props.at, props.ranges.length - 1);
-		clicks.register(element, info);
+		clicks.register(id, info);
 		const index = info
 			? Math.max(0, clicks.current - info.start + 1)
 			: Number.POSITIVE_INFINITY;

@@ -1,7 +1,7 @@
 import type { ComputedStyle } from "../cascade.ts";
 import type { Box, Fill, Gradient } from "../model.ts";
 import type { ExtractContext, ItemInput } from "./context.ts";
-import type { Geometry, Size } from "./geometry.ts";
+import type { Geometry, Side, Size } from "./geometry.ts";
 
 import { cssUrls, imageSize } from "../assets.ts";
 import {
@@ -25,8 +25,9 @@ import {
 	SIDES,
 } from "./geometry.ts";
 
-/** Background tiles within this many px of covering their area show no repeats. */
-const TILE_TOLERANCE = 0.5;
+const TILE_COVERAGE_TOLERANCE = 0.5;
+
+type BoxStyle = NonNullable<ReturnType<typeof boxStyle>>;
 
 const gradientFill = (gradient: Gradient): Fill => ({
 	color: gradient.stops[gradient.stops.length - 1].color,
@@ -39,21 +40,95 @@ export function availableWidthOf(
 	element: Element,
 	x: number,
 ) {
+	const contentRight = (current: Element) => {
+		const laidOut = context.boxOf(current);
+		if (!laidOut) {
+			return undefined;
+		}
+
+		const { box, scale } = geometryOf(laidOut);
+		const content = insetBox(box, context.contentInsets(current), scale);
+		return content.x + content.width;
+	};
+
 	for (
 		let current: Element | null = element;
 		current;
 		current = current.parentElement
 	) {
-		const laidOut = context.boxOf(current);
-		const style = laidOut && boxStyle(context, current, 1);
-		if (laidOut && style && !context.isInline(current)) {
-			const { box, scale } = geometryOf(laidOut);
-			const content = insetBox(box, context.contentInsets(current), scale);
-			return Math.max(0, content.x + content.width - x);
+		const right =
+			!context.isInline(current) && boxStyle(context, current, 1)
+				? contentRight(current)
+				: undefined;
+		if (right !== undefined) {
+			return Math.max(0, right - x);
 		}
 	}
 
-	return Math.max(0, context.canvas.width - x);
+	const layoutRoot = element.closest(".slidev-layout");
+	const right =
+		(layoutRoot && contentRight(layoutRoot)) ?? context.canvas.width;
+	return Math.max(0, right - x);
+}
+
+export function boxItems(
+	style: BoxStyle,
+	{
+		backgrounds = [],
+		box,
+		key,
+		label,
+		rotation,
+		scale,
+		sides = SIDES,
+	}: Geometry & {
+		backgrounds?: ItemInput[];
+		key: string;
+		label: string;
+		sides?: Side[];
+	},
+) {
+	const radius = style.radius * scale;
+	const border = style.border && {
+		...style.border,
+		width: style.border.width * scale,
+	};
+	const layered = backgrounds.length > 0;
+	const shape = { box, kind: "box", label, radius, rotation } as const;
+	const items: ItemInput[] = [];
+	if (style.fill || (border && !layered)) {
+		items.push({
+			...shape,
+			border: layered ? undefined : border,
+			fill: style.fill,
+			key: `${key}#box`,
+		});
+	}
+
+	items.push(...backgrounds);
+	if (border && layered) {
+		items.push({ ...shape, border, key: `${key}#border` });
+	}
+
+	for (const edge of style.edges ?? []) {
+		if (sides.includes(edge.side)) {
+			items.push({
+				...edgeBox(
+					box,
+					{ side: edge.side, width: edge.width * scale },
+					radius,
+					rotation,
+				),
+				fill: edge.fill,
+				key: `${key}#border-${edge.side}`,
+				kind: "box",
+				label: `${edge.side} border of ${label}`,
+				radius: 0,
+			});
+		}
+	}
+
+	return items;
 }
 
 export function boxStyle(
@@ -68,7 +143,7 @@ export function boxStyle(
 	const layers = splitTopLevel(style["background-image"], ",");
 	const gradient =
 		(!color || color.alpha === 0) && layers.length === 1 && !clipsToText(style)
-			? parseLinearGradient(layers[0], opacity)
+			? parseLinearGradient(layers[0], opacity, paintedSizeOf(context, element))
 			: undefined;
 	const fill: Fill | undefined =
 		gradient && hasVisibleStop(gradient)
@@ -123,6 +198,9 @@ export const clipsToText = (style: ComputedStyle) =>
 		"text",
 	);
 
+export const paintedSizeOf = (context: ExtractContext, element: Element) =>
+	context.boxAt(element) ?? context.canvas;
+
 /**
  * An element's own paint, in paint order: its background color, background images,
  * then borders; or undefined when PowerPoint can't draw its backgrounds.
@@ -141,45 +219,14 @@ export function paintItems(
 		return undefined;
 	}
 
-	const { box, rotation, scale } = geometry;
-	const label = context.labelOf(element);
-	const key = pathOf(element);
-	const items: ItemInput[] = [];
-	if (style?.fill || style?.border) {
-		items.push({
-			border: style.border && {
-				...style.border,
-				width: style.border.width * scale,
-			},
-			box,
-			fill: style.fill,
-			key: `${key}#box`,
-			kind: "box",
-			label,
-			radius: style.radius * scale,
-			rotation,
-		});
-	}
-
-	items.push(...backgrounds);
-	const { edges = [], radius = 0 } = style ?? {};
-	for (const edge of edges) {
-		items.push({
-			...edgeBox(
-				box,
-				{ side: edge.side, width: edge.width * scale },
-				radius * scale,
-				rotation,
-			),
-			fill: edge.fill,
-			key: `${key}#border-${edge.side}`,
-			kind: "box",
-			label: `${edge.side} border of ${label}`,
-			radius: 0,
-		});
-	}
-
-	return items;
+	return style
+		? boxItems(style, {
+				...geometry,
+				backgrounds,
+				key: pathOf(element),
+				label: context.labelOf(element),
+			})
+		: backgrounds;
 }
 
 /**
@@ -199,9 +246,11 @@ function backgroundItems(
 	}
 
 	const layers = splitTopLevel(style["background-image"], ",");
+	const size = paintedSizeOf(context, element);
 	if (
 		layers.some(
-			(layer) => isGradient(layer) && !parseLinearGradient(layer, opacity),
+			(layer) =>
+				isGradient(layer) && !parseLinearGradient(layer, opacity, size),
 		)
 	) {
 		return undefined;
@@ -219,7 +268,7 @@ function backgroundItems(
 	const items: ItemInput[] = [];
 	for (const [index, layer] of [...layers.entries()].toReversed()) {
 		const at = (list: string[]) => list[index % list.length] ?? "";
-		const gradient = parseLinearGradient(layer, opacity);
+		const gradient = parseLinearGradient(layer, opacity, size);
 		if (gradient) {
 			if (hasVisibleStop(gradient)) {
 				items.push({
@@ -317,8 +366,8 @@ function showsRepeats(repeat: string, tile: Box, area: Box) {
 		areaStart: number,
 		areaSize: number,
 	) =>
-		start <= areaStart + TILE_TOLERANCE &&
-		start + size >= areaStart + areaSize - TILE_TOLERANCE;
+		start <= areaStart + TILE_COVERAGE_TOLERANCE &&
+		start + size >= areaStart + areaSize - TILE_COVERAGE_TOLERANCE;
 	return (
 		(x !== "no-repeat" && !covers(tile.x, tile.width, area.x, area.width)) ||
 		(y !== "no-repeat" && !covers(tile.y, tile.height, area.y, area.height))

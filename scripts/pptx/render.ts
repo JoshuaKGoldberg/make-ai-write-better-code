@@ -2,8 +2,9 @@ import type {
 	ClicksContext,
 	RawAtValue,
 	ResolvedSlidevOptions,
+	SlidevThemeConfig,
 } from "@slidev/types";
-import type { Component, ObjectDirective, Ref } from "vue";
+import type { App, Component, ObjectDirective, Ref } from "vue";
 
 import { createServer, resolveOptions } from "@slidev/cli";
 import { ImportType, init, parse } from "es-module-lexer";
@@ -14,15 +15,23 @@ import { fileURLToPath } from "node:url";
 import { createSSRApp, defineComponent, Fragment, h, reactive, ref } from "vue";
 import { renderToString } from "vue/server-renderer";
 
-import type * as ClicksStandIn from "./ssr/clicks.ts";
 import type { ClickTarget } from "./ssr/clicks.ts";
+import type { SlideProblem } from "./ssr/problems.ts";
 import type * as NavStandIn from "./ssr/useNav.ts";
+
+import { BuildPptxError } from "./error.ts";
+import {
+	CLICK_TARGET_ATTRIBUTE,
+	clickTargetProps,
+	injectionClickTargets,
+} from "./ssr/clicks.ts";
+import { injectionSlideProblems } from "./ssr/problems.ts";
 
 export interface RenderedSlide {
 	clicksStart: number;
 	globalBottom: string;
 	globalTop: string;
-	problems: string[];
+	problems: SlideProblem[];
 	states: string[];
 	zoom: number;
 }
@@ -61,7 +70,12 @@ type Server = Awaited<ReturnType<typeof createServer>>;
 
 const GLOBAL_LAYERS_MODULE = "/@slidev/global-layers";
 
-/** Stand-ins in ./ssr for Slidev client files that need a browser: they work in onMounted, use the router, or mount an editor. */
+const FLOATING_VUE_COMPONENTS = ["VDropdown", "VMenu", "VTooltip"];
+
+const FLOATING_VUE_DIRECTIVES = ["close-popper", "tooltip"];
+
+const UNRESOLVED_ASSET = /^Failed to resolve (component|directive): (\S+)/;
+
 const STAND_INS = {
 	"builtin/CodeBlockWrapper.vue": "CodeBlockWrapper.vue",
 	"builtin/CodeGroup.vue": "CodeGroup.vue",
@@ -79,20 +93,26 @@ const MAY_IMPORT_CSS =
 /** The compiled CSS in a CSS module as Vite's dev server serves it. */
 const VITE_CSS = /const __vite__css = ("(?:[^"\\]|\\.)*")/;
 
+const popperStandIn = defineComponent({
+	inheritAttrs: false,
+	props: { shown: Boolean },
+	setup:
+		(props, { slots }) =>
+		() =>
+			props.shown ? [slots.default?.(), slots.popper?.({})] : slots.default?.(),
+});
+
 const standIn = (file: string) =>
 	fileURLToPath(new URL(`./ssr/${file}`, import.meta.url));
 
 export const resolveDeck = (entry: string) => resolveOptions({ entry }, "dev");
 
-export async function createSlideRenderer(
-	deck: ResolvedSlidevOptions,
-	cacheDir: string,
-) {
+export async function createSlideRenderer(deck: ResolvedSlidevOptions) {
 	const missing = Object.keys(STAND_INS).filter(
 		(client) => !existsSync(path.join(deck.clientRoot, client)),
 	);
 	if (missing.length) {
-		throw new Error(
+		throw new BuildPptxError(
 			`This version of Slidev isn't supported: its client has no ${missing.join(", ")} to stand in for.`,
 		);
 	}
@@ -104,19 +124,24 @@ export async function createSlideRenderer(
 		]),
 	);
 	const server = await createServer(deck, {
-		cacheDir,
 		logLevel: "warn",
 		plugins: [
 			{
 				enforce: "pre",
 				name: "slidev-pptx-stand-ins",
-				async resolveId(source, importer, resolveOptions) {
-					const resolved = await this.resolve(source, importer, resolveOptions);
+				async resolveId(source, importer, options) {
+					const resolved = await this.resolve(source, importer, options);
 					return resolved && standIns.get(resolved.id);
 				},
 			},
+			{
+				config(config) {
+					config.optimizeDeps = { noDiscovery: true };
+				},
+				enforce: "post",
+				name: "slidev-pptx-no-dep-optimizer",
+			},
 		],
-		resolve: { dedupe: ["vue"] },
 		server: { hmr: false, middlewareMode: true, ws: false },
 		ssr: { noExternal: ["@slidev/client"] },
 	});
@@ -152,7 +177,6 @@ function* childrenFirst(element: Element): Generator<Element> {
 }
 
 function clickDirective(
-	{ clickTargetProps }: typeof ClicksStandIn,
 	constants: Constants,
 	targets: ClickTarget[],
 	kind: "after" | "click" | "hide",
@@ -214,11 +238,13 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		) => ClicksContext;
 	}>(`${deck.clientRoot}/composables/useClicks.ts`);
 	const constants = await load<Constants>(`${deck.clientRoot}/constants.ts`);
-	const clicksStandIn = await load<typeof ClicksStandIn>(standIn("clicks.ts"));
-	const { createSlideContext } = await load<typeof NavStandIn>(
-		standIn("useNav.ts"),
-	);
+	const { createSlideContext, injectionSlideNav } = await load<
+		typeof NavStandIn
+	>(standIn("useNav.ts"));
 	const layers = await load<Layers>(GLOBAL_LAYERS_MODULE);
+	const { default: setups } = await load<{
+		default: ((context: { app: App }) => unknown)[];
+	}>("/@slidev/setups/main");
 	const { config, slides } = deck.data;
 	const { client } = server.environments;
 	await init;
@@ -238,11 +264,10 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 			totalClicks ?? frontmatter.clicks,
 		);
 		const { nav, route } = createSlideContext(slideNumber, clicksContext);
-		const problems: string[] = [];
+		const problems: SlideProblem[] = [];
 		const targets: ClickTarget[] = [];
 		const click = (kind: "after" | "click" | "hide") =>
 			clickDirective(
-				clicksStandIn,
 				constants,
 				targets,
 				kind,
@@ -251,6 +276,15 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 					.filter(Boolean),
 			);
 		const app = createSSRApp({ render: () => h(component) });
+		app.config.warnHandler = (message) => {
+			const unresolved = UNRESOLVED_ASSET.exec(message);
+			if (unresolved) {
+				problems.push({
+					message: `Couldn't render the ${unresolved[1]} ${unresolved[2]}: Vue couldn't resolve it.`,
+					severity: "error",
+				});
+			}
+		};
 		app.provide(constants.injectionClicksContext, ref(clicksContext));
 		app.provide(constants.injectionCurrentPage, ref(slideNumber));
 		app.provide(constants.injectionFrontmatter, frontmatter);
@@ -261,17 +295,17 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 			reactive({ configs: config, nav, themeConfigs: config.themeConfig }),
 		);
 		app.provide(constants.injectionSlideZoom, ref(frontmatter.zoom ?? 1));
-		app.provide(clicksStandIn.injectionClickTargets, targets);
-		app.component(
-			"VMenu",
-			defineComponent({
-				inheritAttrs: false,
-				setup:
-					(_, { slots }) =>
-					() =>
-						slots.default?.(),
-			}),
-		);
+		app.provide(injectionSlideNav, nav);
+		app.provide(injectionClickTargets, targets);
+		app.provide(injectionSlideProblems, problems);
+		for (const name of FLOATING_VUE_COMPONENTS) {
+			app.component(name, popperStandIn);
+		}
+
+		for (const name of FLOATING_VUE_DIRECTIVES) {
+			app.directive(name, {});
+		}
+
 		app.directive("after", click("after"));
 		app.directive("click", click("click"));
 		app.directive("click-hide", click("hide"));
@@ -280,8 +314,11 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 				style: dragStyle(dragPosition(value, frontmatter.dragPos)),
 			}),
 		});
-		app.directive("mark", markDirective(clicksStandIn, targets, problems));
+		app.directive("mark", markDirective(targets, problems));
 		app.directive("motion", {});
+		for (const setup of setups) {
+			await setup({ app });
+		}
 
 		const html = await renderToString(app);
 		return {
@@ -302,13 +339,16 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 			`<!doctype html><html><body>${html}</body></html>`,
 		);
 		for (const element of childrenFirst(document.body)) {
-			for (const name of element.getAttributeNames()) {
-				if (name.startsWith(clicksStandIn.CLICK_TARGET_ATTRIBUTE)) {
+			const indices = element
+				.getAttributeNames()
+				.filter((name) => name.startsWith(CLICK_TARGET_ATTRIBUTE))
+				.map((name) => {
 					element.removeAttribute(name);
-					targets[
-						Number(name.slice(clicksStandIn.CLICK_TARGET_ATTRIBUTE.length))
-					](clicksContext, element);
-				}
+					return Number(name.slice(CLICK_TARGET_ATTRIBUTE.length));
+				})
+				.sort((a, b) => a - b);
+			for (const index of indices) {
+				targets[index](clicksContext, element);
 			}
 		}
 
@@ -326,20 +366,32 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 				h(Fragment, [h(layers.SlideBottom), h(content), h(layers.SlideTop)]),
 		};
 		const counted = await renderApp(slideNumber, slide, clicksStart);
-		const totalClicks =
-			clicks ?? Math.max(0, ...counted.clicksContext.maxMap.values());
+		const totalClicks = Math.max(
+			clicksStart,
+			clicks ?? Math.max(0, ...counted.clicksContext.maxMap.values()),
+		);
+		const { problems } = counted;
 		const states = [];
 		for (let click = clicksStart; click <= totalClicks; click++) {
-			states.push(
-				(await renderApp(slideNumber, slide, click, totalClicks)).html,
-			);
+			try {
+				states.push(
+					(await renderApp(slideNumber, slide, click, totalClicks)).html,
+				);
+			} catch (error) {
+				problems.push({
+					click,
+					message: `Couldn't render the click: ${error instanceof Error ? error.message : String(error)}`,
+					severity: "error",
+				});
+				states.push("");
+			}
 		}
 
 		return {
 			clicksStart,
 			globalBottom: (await renderApp(slideNumber, layers.GlobalBottom, 0)).html,
 			globalTop: (await renderApp(slideNumber, layers.GlobalTop, 0)).html,
-			problems: counted.problems,
+			problems,
 			states,
 			zoom,
 		};
@@ -381,7 +433,10 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 
 	return {
 		close: () => server.close(),
-		globalCss: () => collectCss([`${deck.clientRoot}/styles/index.ts`]),
+		globalCss: async () => [
+			...(await collectCss([`${deck.clientRoot}/styles/index.ts`])),
+			themeVariables(config.themeConfig),
+		],
 		publicDir: server.config.publicDir,
 		renderSlide,
 		root: deck.userRoot,
@@ -426,9 +481,8 @@ function dragStyle(position: number[] | undefined) {
 }
 
 function markDirective(
-	{ clickTargetProps }: typeof ClicksStandIn,
 	targets: ClickTarget[],
-	problems: string[],
+	problems: SlideProblem[],
 ): ObjectDirective<Element, RawAtValue | { at?: RawAtValue }> {
 	return {
 		getSSRProps: ({ value }) =>
@@ -441,9 +495,16 @@ function markDirective(
 							: value,
 					),
 				);
-				problems.push(
-					`Couldn't draw a v-mark: ${element.textContent.trim().slice(0, 60)}`,
-				);
+				problems.push({
+					message: `Couldn't draw a v-mark: ${element.textContent.trim().slice(0, 60)}`,
+					severity: "warning",
+				});
 			}),
 	};
+}
+
+function themeVariables(themeConfig: SlidevThemeConfig = {}) {
+	return `body{${Object.entries(themeConfig)
+		.map(([key, value]) => `--slidev-theme-${key}:${String(value)};`)
+		.join("")}}`;
 }

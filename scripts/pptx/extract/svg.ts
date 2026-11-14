@@ -8,9 +8,8 @@ import { availableWidthOf } from "./boxes.ts";
 import { MIN_OPACITY, pathOf } from "./context.ts";
 import { geometryOf } from "./geometry.ts";
 import { rasterItem } from "./images.ts";
-import { runStyle } from "./runs.ts";
+import { isRightToLeft, runStyle } from "./runs.ts";
 
-/** An SVG shape being drawn: its box in slide px, and the scale from its SVG's units to them. */
 interface DrawnShape {
 	box: Size;
 	scale: number;
@@ -198,6 +197,7 @@ export function svgItems(context: ExtractContext, svg: Element) {
 						availableWidth: availableWidthOf(context, shape, x),
 						lineHeight: size * SVG_TEXT.lineHeight,
 						nowrap: true,
+						rtl: isRightToLeft(context, shape),
 					},
 				});
 				break;

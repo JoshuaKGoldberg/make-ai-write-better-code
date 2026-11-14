@@ -4,7 +4,6 @@ import type { Node as TakumiNode } from "@takumi-rs/helpers";
 import { Renderer } from "@takumi-rs/core";
 import { image } from "@takumi-rs/helpers";
 import { fromHtml } from "@takumi-rs/helpers/html";
-import * as csstree from "css-tree";
 import { NodeFilter, parseHTML } from "linkedom";
 
 import type { Assets } from "./assets.ts";
@@ -30,11 +29,34 @@ const ATOMIC_INLINE_DISPLAYS = new Set([
 	"inline-table",
 ]);
 
+/** The elements ::before and ::after content becomes. */
+export const GENERATED_ELEMENTS = {
+	after: "pptx-after",
+	before: "pptx-before",
+} as const;
+
 /** Stops takumi from also generating the content that became real elements. */
 const PSEUDO_RESET = `[data-pptx-before]::before,[data-pptx-after]::after{content:none !important}`;
 
+const SCROLLING_OVERFLOWS = {
+	auto: "hidden",
+	overlay: "hidden",
+	scroll: "hidden",
+};
+
+/** Inline values takumi rejects, as the values a static slide shows the same way. */
+const STATIC_EQUIVALENTS: Partial<
+	Record<string, Partial<Record<string, string>>>
+> = {
+	overflow: SCROLLING_OVERFLOWS,
+	"overflow-x": SCROLLING_OVERFLOWS,
+	"overflow-y": SCROLLING_OVERFLOWS,
+	position: { sticky: "relative" },
+};
+
 /** Entities for the characters takumi's HTML parser needs escaped in attribute values: it ends a tag at the first `>`, even inside quotes. */
 const ATTRIBUTE_ENTITIES: Record<string, string> = {
+	'"': "&quot;",
 	"&": "&amp;",
 	"<": "&lt;",
 	">": "&gt;",
@@ -45,6 +67,10 @@ export const hasMarker = (style: ComputedStyle) =>
 
 export const isAtomicInline = (style: ComputedStyle) =>
 	ATOMIC_INLINE_DISPLAYS.has(style.display);
+
+/** Whether an element in a line lays out apart from its text: an atomic inline, or a block-level box (out of flow, floated, or a block inside an inline). */
+export const laysOutApart = (style: ComputedStyle) =>
+	isAtomicInline(style) || !style.display.startsWith("inline");
 
 export interface Css {
 	rules: CascadeRule[];
@@ -66,19 +92,17 @@ export interface LaidOutRun extends MeasuredTextRun {
 }
 
 export interface LaidOutRuns {
-	/** Text that isn't wrapped in its own element (beside block-level siblings). */
-	anonymous: boolean;
 	box: LaidOutBox;
-	/** The id of the element the text belongs to. */
-	parent: string;
 	runs: LaidOutRun[];
 }
 
 export interface Layout extends Prepared {
 	boxes: Map<string, LaidOutBox>;
 	byId: Map<string, Element>;
-	mismatches: { children: number; id: string; measured: number }[];
-	/** Text runs keyed by owning element id (or `anon-N` for anonymous text). */
+	/** Text not wrapped in an element of its own (beside block-level siblings), keyed by its container's id. */
+	looseRuns: Map<string, LaidOutRuns[]>;
+	mismatches: Mismatch[];
+	/** Text runs keyed by the id of the element they're laid out in. */
 	runs: Map<string, LaidOutRuns>;
 }
 
@@ -98,8 +122,14 @@ export interface Prepared extends Omit<ComputedStyles, "pseudos"> {
 	document: Document;
 	/** The font-family stacks of elements with text. */
 	fontStacks: Set<string>;
-	/** Whether generated content became elements, so takumi mustn't generate it too. */
-	pseudos: boolean;
+}
+
+/** An element whose children takumi measured a different number of. */
+interface Mismatch {
+	children: number;
+	element: Element;
+	id: string;
+	measured: number;
 }
 
 interface MultiColumn {
@@ -118,6 +148,61 @@ export function createLayout({
 	colorScheme: "dark" | "light";
 }) {
 	const renderer = new Renderer();
+	const supported = new Map<string, Promise<boolean>>();
+
+	const supports = (declaration: string) => {
+		const result =
+			supported.get(declaration) ??
+			renderer
+				.measure(
+					takumiNodeOfHtml(
+						`<div style="${escapeAttribute(declaration)}"></div>`,
+					),
+					{
+						height: 1,
+						width: 1,
+					},
+				)
+				.then(
+					() => true,
+					() => false,
+				);
+		supported.set(declaration, result);
+		return result;
+	};
+
+	/** An inline style with the values takumi rejects mapped to static equivalents, or else dropped, as browsers drop invalid ones. */
+	const supportedStyle = async (style: string) => {
+		const declarations = await Promise.all(
+			parseDeclarations(style).map(async ({ important, property, value }) => {
+				const declaration = `${property}:${STATIC_EQUIVALENTS[property]?.[value] ?? value}${important ? " !important" : ""}`;
+				return (await supports(declaration)) ? [declaration] : [];
+			}),
+		);
+		return declarations.flat().join(";");
+	};
+
+	const takumiNodeOf = async (content: Element) => {
+		const copy = content.cloneNode(true) as Element;
+		for (const image of copy.querySelectorAll("img:not([src]), img[src='']")) {
+			image.remove();
+		}
+
+		for (const element of [copy, ...copy.querySelectorAll("[style]")]) {
+			const style = element.getAttribute("style");
+			if (style) {
+				element.setAttribute("style", await supportedStyle(style));
+			}
+		}
+
+		for (const element of [copy, ...copy.querySelectorAll("*")]) {
+			for (const attribute of element.attributes) {
+				attribute.value = escapeAttribute(attribute.value);
+			}
+		}
+
+		return takumiNodeOfHtml(copy.outerHTML);
+	};
 
 	const imagesOf = async (
 		document: Document,
@@ -150,10 +235,10 @@ export function createLayout({
 	};
 
 	const renderOptions = async (
-		{ document, pseudos, styles }: Prepared,
+		{ document, styles }: Prepared,
 		sheets: string[],
 	) => ({
-		css: pseudos ? [...sheets, PSEUDO_RESET] : sheets,
+		css: [...sheets, PSEUDO_RESET],
 		images: await imagesOf(document, styles),
 	});
 
@@ -163,7 +248,7 @@ export function createLayout({
 		sheets: string[],
 		pixels: { height: number; width: number },
 	) =>
-		renderer.render(toTakumi(slideContentOf(document)), {
+		renderer.render(await takumiNodeOf(slideContentOf(document)), {
 			...(await renderOptions(prepared, sheets)),
 			...pixels,
 			devicePixelRatio: 2,
@@ -171,7 +256,7 @@ export function createLayout({
 		});
 
 	async function measureLayout(prepared: Prepared, sheets: string[]) {
-		const node = toTakumi(slideContentOf(prepared.document));
+		const node = await takumiNodeOf(slideContentOf(prepared.document));
 		const measured = await renderer.measure(node, {
 			...(await renderOptions(prepared, sheets)),
 			height: canvas.height,
@@ -200,8 +285,7 @@ export function createLayout({
 			options,
 		);
 		let computed = computeStyles(document, rules, { viewport: canvas });
-		const pseudos = computed.pseudos.size > 0;
-		if (pseudos) {
+		if (computed.pseudos.size) {
 			let next = document.querySelectorAll(`[${ID}]`).length;
 			for (const [host, { after, before }] of computed.pseudos) {
 				for (const [kind, pseudo] of [
@@ -212,7 +296,7 @@ export function createLayout({
 						continue;
 					}
 
-					const element = document.createElement(`pptx-${kind}`);
+					const element = document.createElement(GENERATED_ELEMENTS[kind]);
 					element.setAttribute(ID, String(next++));
 					element.setAttribute("style", pseudo.css);
 					element.textContent = pseudo.text;
@@ -242,7 +326,6 @@ export function createLayout({
 			document,
 			fontStacks,
 			markers: computed.markers,
-			pseudos,
 			styles: computed.styles,
 		};
 	}
@@ -270,15 +353,21 @@ export function createLayout({
 		{ sheets }: Pick<Css, "sheets">,
 	) {
 		await applyColumnShims(prepared, sheets);
+		const byId = new Map(
+			[...prepared.document.querySelectorAll(`[${ID}]`)].map((element) => [
+				element.getAttribute(ID) ?? "",
+				element,
+			]),
+		);
+		const { mismatches, ...measured } = await measureLayout(prepared, sheets);
 		return {
 			...prepared,
-			...(await measureLayout(prepared, sheets)),
-			byId: new Map(
-				[...prepared.document.querySelectorAll(`[${ID}]`)].map((element) => [
-					element.getAttribute(ID) ?? "",
-					element,
-				]),
-			),
+			...measured,
+			byId,
+			mismatches: mismatches.flatMap((mismatch): Mismatch[] => {
+				const element = byId.get(mismatch.id);
+				return element ? [{ ...mismatch, element }] : [];
+			}),
 		};
 	}
 
@@ -430,45 +519,12 @@ const slideContentOf = (document: Document) => {
 	return content;
 };
 
-const toTakumi = (content: Element) => {
-	const copy = content.cloneNode(true) as Element;
-	for (const image of copy.querySelectorAll("img:not([src]), img[src='']")) {
-		image.remove();
-	}
+const escapeAttribute = (value: string) =>
+	value.replace(/["&<>]/g, (character) => ATTRIBUTE_ENTITIES[character]);
 
-	for (const element of [copy, ...copy.querySelectorAll("[style]")]) {
-		const style = element.getAttribute("style");
-		if (style) {
-			element.setAttribute("style", withoutInvalidDeclarations(style));
-		}
-	}
-
-	for (const element of [copy, ...copy.querySelectorAll("*")]) {
-		for (const attribute of element.attributes) {
-			attribute.value = attribute.value.replace(
-				/[&<>]/g,
-				(character) => ATTRIBUTE_ENTITIES[character],
-			);
-		}
-	}
-
+const takumiNodeOfHtml = (html: string) =>
 	// eslint-disable-next-line @typescript-eslint/no-deprecated -- The only takumi API that keeps each element's attributes, which tie layout back to the DOM. Replace before takumi v3 removes it.
-	return fromHtml(copy.outerHTML).node;
-};
-
-/** An inline style without the declarations browsers would drop as invalid, which takumi rejects. */
-const withoutInvalidDeclarations = (style: string) =>
-	parseDeclarations(style)
-		.filter(
-			({ property, value }) =>
-				csstree.lexer.matchProperty(property, value).error?.name !==
-				"SyntaxMatchError",
-		)
-		.map(
-			({ important, property, value }) =>
-				`${property}:${value}${important ? " !important" : ""}`,
-		)
-		.join(";");
+	fromHtml(html).node;
 
 function buildDocument(
 	slideNumber: number,
@@ -609,7 +665,8 @@ function zipLayout(
 ) {
 	const boxes = new Map<string, LaidOutBox>();
 	const runs = new Map<string, LaidOutRuns>();
-	const mismatches: Layout["mismatches"] = [];
+	const looseRuns = new Map<string, LaidOutRuns[]>();
+	const mismatches: Omit<Mismatch, "element">[] = [];
 	const hasStyle = (
 		node: TakumiNode,
 		test: (style: ComputedStyle) => boolean,
@@ -627,8 +684,7 @@ function zipLayout(
 			: [];
 
 	const isApart = (node: TakumiNode) =>
-		node.type === "image" ||
-		hasStyle(node, (style) => isOutOfFlow(style) || isAtomicInline(style));
+		node.type === "image" || hasStyle(node, laysOutApart);
 
 	const displayOf = (node: TakumiNode) => {
 		const id = idOf(node);
@@ -636,8 +692,7 @@ function zipLayout(
 	};
 
 	const isInlineLevel = (node: TakumiNode) =>
-		displayOf(node)?.startsWith("inline") === true &&
-		!hasStyle(node, isOutOfFlow);
+		displayOf(node)?.startsWith("inline") === true;
 
 	const isTable = (node: TakumiNode) =>
 		/^(?:inline-)?table$/.test(displayOf(node) ?? "");
@@ -686,49 +741,44 @@ function zipLayout(
 		return segments;
 	};
 
-	const textSegments = (
+	const ownedTexts = (
 		node: TakumiNode,
-		owner: string,
-		segments: { owner: string; text: string }[] = [],
+		parentId: string,
+		texts: { owner: string; text: string }[] = [],
 	) => {
 		if (node.type === "text") {
-			segments.push({ owner: idOf(node) ?? owner, text: node.text });
+			texts.push({ owner: idOf(node) ?? parentId, text: node.text });
 		} else {
 			for (const child of childrenOf(node).filter((child) => !isApart(child))) {
-				textSegments(child, idOf(node) ?? owner, segments);
+				ownedTexts(child, idOf(node) ?? parentId, texts);
 			}
 		}
 
-		return segments;
+		return texts;
 	};
-
-	const hasText = (nodes: TakumiNode[]) =>
-		nodes
-			.filter((child) => !isApart(child))
-			.some((child) => textSegments(child, "").some(({ text }) => text.trim()));
 
 	const assignRuns = (
 		node: TakumiNode,
-		measured: MeasuredNode,
-		owner: string,
+		measuredRuns: MeasuredTextRun[],
+		parentId: string,
 	) => {
-		const segments = textSegments(node, owner);
+		const texts = ownedTexts(node, parentId);
 		const result: LaidOutRun[] = [];
 		let index = 0;
 		let offset = 0;
-		for (const run of measured.runs) {
-			while (
-				index < segments.length &&
-				!segments[index].text.slice(offset).trim()
-			) {
+		for (const run of measuredRuns) {
+			while (index < texts.length && !texts[index].text.slice(offset).trim()) {
 				index++;
 				offset = 0;
 			}
 
-			result.push({ ...run, owner: segments[index]?.owner ?? owner });
+			result.push({
+				...run,
+				owner: texts.at(index)?.owner ?? idOf(node) ?? parentId,
+			});
 			let remaining = run.text.replace(/\s/g, "").length;
-			while (remaining > 0 && index < segments.length) {
-				const text = segments[index].text;
+			while (remaining > 0 && index < texts.length) {
+				const text = texts[index].text;
 				while (offset < text.length && remaining > 0) {
 					if (!/\s/.test(text[offset])) {
 						remaining--;
@@ -745,21 +795,6 @@ function zipLayout(
 		}
 
 		return result;
-	};
-
-	const addRuns = (
-		node: TakumiNode,
-		measured: MeasuredNode,
-		owner: string,
-		box: LaidOutBox,
-	) => {
-		const own = idOf(node);
-		runs.set(own ?? `anon-${String(runs.size)}`, {
-			anonymous: own === undefined,
-			box,
-			parent: owner,
-			runs: assignRuns(node, measured, owner),
-		});
 	};
 
 	const mismatch = (id: string, children: number, measured: number) => {
@@ -789,45 +824,69 @@ function zipLayout(
 		return true;
 	};
 
-	const zip = (node: TakumiNode, measured: MeasuredNode, owner: string) => {
+	const zipLines = (
+		node: TakumiNode,
+		lines: Pick<MeasuredNode, "children" | "runs">,
+		parentId: string,
+		box: LaidOutBox,
+	) => {
 		const own = idOf(node);
-		const id = own ?? owner;
+		const id = own ?? parentId;
+		if (lines.runs.length) {
+			const entry = { box, runs: assignRuns(node, lines.runs, parentId) };
+			if (own === undefined) {
+				looseRuns.set(parentId, [...(looseRuns.get(parentId) ?? []), entry]);
+			} else {
+				runs.set(own, entry);
+			}
+		}
+
+		const children = childrenOf(node);
+		if (!zipInline(children, lines.children, id)) {
+			mismatch(id, children.length, lines.children.length);
+		}
+	};
+
+	const zip = (node: TakumiNode, measured: MeasuredNode, parentId: string) => {
+		const own = idOf(node);
+		const id = own ?? parentId;
 		const box = laidOutBox(measured);
 		if (own !== undefined) {
 			boxes.set(own, box);
 		}
 
-		// A list item's ::marker box is measured as its first child.
-		const measuredChildren = hasStyle(node, hasMarker)
-			? measured.children.slice(1)
-			: measured.children;
-		if (measured.runs.length) {
-			addRuns(node, measured, owner, box);
-			if (!zipInline(childrenOf(node), measuredChildren, id)) {
-				mismatch(id, childrenOf(node).length, measuredChildren.length);
-			}
-
+		// A list item's ::marker is measured as its first child, or inside its text as its first run.
+		const inside = hasStyle(
+			node,
+			(style) => style["list-style-position"] === "inside",
+		);
+		const marker = hasStyle(node, hasMarker) ? 1 : 0;
+		const lines = {
+			children: measured.children.slice(inside ? 0 : marker),
+			runs: measured.runs.slice(inside ? marker : 0),
+		};
+		if (lines.runs.length) {
+			zipLines(node, lines, parentId, box);
 			return;
 		}
 
 		if (node.type !== "container") {
 			// Bare text in a flex or grid container lays out as one anonymous item.
-			if (node.type === "text" && measuredChildren.length === 1) {
-				zip({ text: node.text, type: "text" }, measuredChildren[0], id);
+			if (node.type === "text" && lines.children.length === 1) {
+				zip({ text: node.text, type: "text" }, lines.children[0], id);
 			}
 
 			return;
 		}
 
-		const container = node;
-		const children = childrenOf(container);
+		const children = childrenOf(node);
 		if (
-			isTable(container) &&
-			measuredChildren.length === 1 &&
+			isTable(node) &&
+			lines.children.length === 1 &&
 			children.every((child) => displayOf(child) === "table-row")
 		) {
 			// takumi measures a table's rows outside a row group inside an anonymous one.
-			zip({ children, type: "container" }, measuredChildren[0], id);
+			zip({ children, type: "container" }, lines.children[0], id);
 			return;
 		}
 
@@ -836,43 +895,38 @@ function zipLayout(
 		if (
 			segments.length === 1 &&
 			Array.isArray(first) &&
-			!hasText(first) &&
-			zipInline(first, measuredChildren, id)
+			!ownedTexts({ children: first, type: "container" }, "").some(({ text }) =>
+				text.trim(),
+			) &&
+			zipInline(first, lines.children, id)
 		) {
 			return;
 		}
 
-		if (segments.length !== measuredChildren.length) {
-			mismatch(id, children.length, measuredChildren.length);
+		if (segments.length !== lines.children.length) {
+			mismatch(id, children.length, lines.children.length);
 		}
 
 		const ownsLine =
 			segments.length === 1 &&
-			!hasStyle(container, ({ display }) => /flex|grid/.test(display));
-		segments.slice(0, measuredChildren.length).forEach((segment, index) => {
-			const lines = measuredChildren[index];
+			!hasStyle(node, ({ display }) => /flex|grid/.test(display));
+		segments.slice(0, lines.children.length).forEach((segment, index) => {
+			const child = lines.children[index];
 			if (!Array.isArray(segment)) {
-				zip(segment, lines, id);
-				return;
-			}
-
-			if (lines.runs.length) {
-				addRuns(
-					ownsLine
-						? { ...container, children: segment }
-						: { children: segment, type: "container" },
-					lines,
-					ownsLine ? owner : id,
-					ownsLine ? box : laidOutBox(lines),
+				zip(segment, child, id);
+			} else if (ownsLine) {
+				zipLines(node, child, parentId, box);
+			} else {
+				zipLines(
+					{ children: segment, type: "container" },
+					child,
+					id,
+					laidOutBox(child),
 				);
-			}
-
-			if (!zipInline(segment, lines.children, id)) {
-				mismatch(id, segment.length, lines.children.length);
 			}
 		});
 	};
 
 	zip(node, measured, idOf(node) ?? "");
-	return { boxes, mismatches, runs };
+	return { boxes, looseRuns, mismatches, runs };
 }

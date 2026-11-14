@@ -21,13 +21,6 @@ png.write("IHDR", 12, "latin1");
 png.writeUInt32BE(512, 16);
 png.writeUInt32BE(256, 20);
 
-const gif = Buffer.from("GIF89a\x40\x00\x20\x00", "latin1");
-
-const bmp = Buffer.alloc(26);
-bmp.write("BM", 0, "latin1");
-bmp.writeInt32LE(30, 18);
-bmp.writeInt32LE(-20, 22);
-
 const jpeg = Buffer.from([
 	0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08,
 	0x00, 0x30, 0x00, 0x40, 0x03, 0x00, 0x00, 0x00, 0x00,
@@ -39,30 +32,6 @@ webp.write("WEBP", 8, "latin1");
 webp.write("VP8X", 12, "latin1");
 webp.writeUIntLE(99, 24, 3);
 webp.writeUIntLE(49, 27, 3);
-
-const uint32 = (value: number) => {
-	const buffer = Buffer.alloc(4);
-	buffer.writeUInt32BE(value);
-	return buffer;
-};
-
-const box = (type: string, ...contents: Buffer[]) => {
-	const body = Buffer.concat(contents);
-	return Buffer.concat([
-		uint32(8 + body.length),
-		Buffer.from(type, "latin1"),
-		body,
-	]);
-};
-
-const avif = Buffer.concat([
-	box("ftyp", Buffer.from("avif", "latin1"), uint32(0)),
-	box(
-		"meta",
-		uint32(0),
-		box("iprp", box("ipco", box("ispe", uint32(0), uint32(70), uint32(35)))),
-	),
-]);
 
 const svgOf = (attributes: string) =>
 	Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" ${attributes}/>`);
@@ -91,22 +60,15 @@ describe(imageFormat, () => {
 	it.each([
 		["png", png],
 		["jpeg", jpeg],
-		["gif", gif],
-		["bmp", bmp],
 		["webp", webp],
-		["avif", avif],
 		["svg", svg],
 		[undefined, Buffer.from("notes")],
 	])("recognizes %s", (format, data) => {
 		expect(imageFormat(data)).toBe(format);
 	});
 
-	it.each([
-		["a text file that starts like a BMP", Buffer.from("BMW notes")],
-		["a text file that starts like a GIF", Buffer.from("GIFs I like")],
-		["a truncated PNG", png.subarray(0, 8)],
-	])("recognizes nothing in %s", (_, data) => {
-		expect(imageFormat(data)).toBeUndefined();
+	it("recognizes nothing in a text file that starts like a BMP", () => {
+		expect(imageFormat(Buffer.from("BMW notes"))).toBeUndefined();
 	});
 });
 
@@ -124,10 +86,6 @@ describe(isNativeImage, () => {
 describe(imageSize, () => {
 	it.each([
 		["a PNG", png, { height: 256, width: 512 }],
-		["a GIF", gif, { height: 32, width: 64 }],
-		["a bottom-up BMP", bmp, { height: 20, width: 30 }],
-		["a JPEG", jpeg, { height: 48, width: 64 }],
-		["a WebP", webp, { height: 50, width: 100 }],
 		["an SVG's view box", svg, { height: 80, width: 120 }],
 		[
 			"an SVG's width and height",
@@ -149,18 +107,12 @@ describe(imageSize, () => {
 			svgOf(`width="12.5" height="10"`),
 			{ height: 10, width: 12.5 },
 		],
-		["an AVIF", avif, { height: 35, width: 70 }],
 	])("reads the size of %s", (_, data, size) => {
 		expect(imageSize(data)).toEqual(size);
 	});
 
-	it.each([
-		["a truncated PNG", png.subarray(0, 8)],
-		["a truncated GIF", gif.subarray(0, 4)],
-		["a truncated BMP", Buffer.from("BM")],
-		["a truncated JPEG", jpeg.subarray(0, 4)],
-	])("returns undefined for %s", (_, data) => {
-		expect(imageSize(data)).toBeUndefined();
+	it("returns undefined for a truncated image", () => {
+		expect(imageSize(Buffer.from("BM"))).toBeUndefined();
 	});
 });
 

@@ -1,3 +1,5 @@
+import type { ResolvedFontOptions } from "@slidev/types";
+
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +14,16 @@ import { createLayout } from "./layout.ts";
 const canvas = { height: 300, width: 400 };
 const fixture = path.join(import.meta.dirname, "fixture");
 const baseSheet = `p, pre, li, h1, div, td { font-family: "Fixture Sans"; margin: 0 }`;
+const fontOptions: ResolvedFontOptions = {
+	italic: false,
+	local: [],
+	mono: [],
+	provider: "none",
+	sans: [],
+	serif: [],
+	webfonts: [],
+	weights: [],
+};
 const circle = `<svg width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="red"/></svg>`;
 
 describe(extractState, () => {
@@ -50,7 +62,7 @@ describe(extractState, () => {
 			return extractState(laidOut, {
 				assets,
 				canvas,
-				fonts: createFontBook({ assets, sheets }),
+				fonts: createFontBook({ assets, fonts: fontOptions, sheets }),
 			});
 		};
 	});
@@ -77,12 +89,16 @@ describe(extractState, () => {
 
 		expect(items).toEqual([
 			expect.objectContaining({
-				key: "p0#text:Bold|000000|0|16.0 and|000000|0|16.0",
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ text: "Bold" }),
+							expect.objectContaining({ text: " and" }),
+						],
+					},
+				],
 			}),
-			expect.objectContaining({
-				key: "p0/svg1/circle0#circle",
-				kind: "ellipse",
-			}),
+			expect.objectContaining({ kind: "ellipse" }),
 		]);
 	});
 
@@ -93,8 +109,9 @@ describe(extractState, () => {
 
 		expect(items).toContainEqual(
 			expect.objectContaining({
+				box: expect.objectContaining({ height: 20, width: 20 }),
 				fill: { color: "ff0000", transparency: 0 },
-				key: "p0/span0#box",
+				kind: "box",
 			}),
 		);
 	});
@@ -196,13 +213,23 @@ describe(extractState, () => {
 		);
 
 		expect(items).toEqual([
-			expect.objectContaining({ key: "div0/p2#text:Scaled|000000|0|16.0" }),
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "Scaled" })] }],
+			}),
 			expect.objectContaining({
 				box: { height: 10, width: 10, x: 0, y: 30 },
 				kind: "box",
 			}),
 			expect.objectContaining({
-				key: "div0#loose:1|000000|0|16.0 / |000000|0|16.02|000000|0|16.0",
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ text: "1" }),
+							expect.objectContaining({ text: " / " }),
+							expect.objectContaining({ text: "2" }),
+						],
+					},
+				],
 			}),
 		]);
 	});
@@ -242,7 +269,7 @@ describe(extractState, () => {
 			expect.objectContaining({
 				box: expect.objectContaining({ height: 2 }),
 				fill: { color: "ff0000", transparency: 0 },
-				key: "p0/a0#pill-border-bottom:26",
+				kind: "box",
 			}),
 		);
 	});
@@ -448,6 +475,241 @@ describe(extractState, () => {
 		]);
 	});
 
+	it("draws a border over the background layers when a box has both", async () => {
+		const { items } = await extract(
+			`<div style="width: 100px; height: 50px; border: 4px solid red; background-color: black; background-image: linear-gradient(blue, green)"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				border: undefined,
+				fill: { color: "000000", transparency: 0 },
+			}),
+			expect.objectContaining({
+				fill: expect.objectContaining({ gradient: expect.anything() }),
+			}),
+			expect.objectContaining({
+				border: { color: "ff0000", transparency: 0, width: 4 },
+			}),
+		]);
+	});
+
+	it("angles a corner gradient by its box's shape when it isn't square", async () => {
+		const { items } = await extract(
+			`<div style="width: 200px; height: 50px; background-image: linear-gradient(to right bottom, red, blue)"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				fill: expect.objectContaining({
+					gradient: expect.objectContaining({
+						angle: expect.closeTo(165.96, 2),
+					}),
+				}),
+			}),
+		]);
+	});
+
+	it("exports an inline-block once when it sits in a list item beside a nested list", async () => {
+		const { items } = await extract(
+			`<ul><li>two <span style="display: inline-block">badge</span><ul><li>three</li></ul></li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					expect.objectContaining({
+						runs: [expect.objectContaining({ text: "two" })],
+					}),
+					expect.objectContaining({
+						runs: [expect.objectContaining({ text: "three" })],
+					}),
+				],
+			}),
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "badge" })] }],
+			}),
+		]);
+	});
+
+	it("exports a block's text apart when it sits inside an inline element", async () => {
+		const { items } = await extract(
+			`<p>lead <a href="https://example.com"><span>pre</span><div>card</div></a> tail</p>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ text: "lead " }),
+							expect.objectContaining({ text: "pre " }),
+							expect.objectContaining({ lineBreak: "wrap", text: "tail" }),
+						],
+					},
+				],
+			}),
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "card" })] }],
+			}),
+		]);
+	});
+
+	it("exports a float's text apart when it sits in text", async () => {
+		const { items } = await extract(
+			`<p><span style="float: right">F</span>text here</p>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{ runs: [expect.objectContaining({ text: "text here" })] },
+				],
+			}),
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "F" })] }],
+			}),
+		]);
+	});
+
+	it("leaves out a list item's marker when it sits inside the text", async () => {
+		const { items } = await extract(
+			`<ul><li style="list-style-position: inside">a <b>b</b></li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					expect.objectContaining({
+						runs: [
+							expect.objectContaining({ pad: true }),
+							expect.objectContaining({ bold: false, text: "a " }),
+							expect.objectContaining({ bold: true, text: "b" }),
+						],
+					}),
+				],
+			}),
+		]);
+	});
+
+	it("pads a line's text past an icon when the icon starts the line", async () => {
+		const { items } = await extract(`<p>${circle} Done</p>`);
+
+		expect(items).toContainEqual(
+			expect.objectContaining({
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ pad: true, transparency: 100 }),
+							expect.objectContaining({ text: " Done" }),
+						],
+					},
+				],
+			}),
+		);
+	});
+
+	it("sizes a pill by its padding and border on every side", async () => {
+		const { items } = await extract(
+			`<p><span style="padding: 2px 4px 6px 8px; border: 1px solid red">x</span></p>`,
+		);
+
+		expect(items).toContainEqual(
+			expect.objectContaining({
+				border: expect.objectContaining({ color: "ff0000" }),
+				box: {
+					height: expect.closeTo(24.72, 2),
+					width: expect.closeTo(22.07, 2),
+					x: 0,
+					y: expect.closeTo(-3.2, 2),
+				},
+			}),
+		);
+	});
+
+	it("shows an element when it's visible inside a hidden one", async () => {
+		const { items } = await extract(
+			`<div style="visibility: hidden"><p>hidden</p><p style="visibility: visible">shown</p></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [{ runs: [expect.objectContaining({ text: "shown" })] }],
+			}),
+		]);
+	});
+
+	it("marks text right to left when an ancestor's direction is", async () => {
+		const { items } = await extract(
+			`<div style="direction: rtl"><p>text</p></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				style: expect.objectContaining({ align: "right", rtl: true }),
+			}),
+		]);
+	});
+
+	it("exports a twoslash error when it sits between code lines", async () => {
+		const { items } = await extract(
+			`<pre><code><span class="line">one</span>\n<div class="twoslash-meta-line twoslash-error-line">error</div><span class="line">two</span></code></pre>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{ runs: [expect.objectContaining({ text: "one" })] },
+					{ runs: [expect.objectContaining({ text: "error" })] },
+					{ runs: [expect.objectContaining({ text: "two" })] },
+				],
+			}),
+		]);
+	});
+
+	it("exports a twoslash query's type below its line when the query shows", async () => {
+		const { items } = await extract(
+			`<pre><code><span class="line"><span>let </span><span><span>name</span><span class="twoslash-popup-container"><div class="twoslash-popup-arrow"></div><code class="twoslash-popup-code"><span>let name: string</span></code></span></span><span> = ""</span></span></code></pre>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ text: "let " }),
+							expect.objectContaining({ text: "name" }),
+							expect.objectContaining({ text: ' = ""' }),
+						],
+					},
+					{ runs: [expect.objectContaining({ text: "let name: string" })] },
+				],
+			}),
+		]);
+	});
+
+	it("names math by its visible text when it has MathML", async () => {
+		const { items } = await extract(
+			`<p><span class="katex"><span class="katex-mathml" style="position: absolute; clip: rect(1px, 1px, 1px, 1px); width: 1px; height: 1px; overflow: hidden"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html" style="display: inline-block">x2</span></span></p>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ alt: "x^2", kind: "raster", label: "x2" }),
+		]);
+	});
+
+	it("measures the width available to text up to the slide layout's content edge when no box encloses it", async () => {
+		const { items } = await extract(
+			`<div class="slidev-layout" style="padding: 0 40px"><p style="width: 50px">text</p></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				style: expect.objectContaining({ availableWidth: 320 }),
+			}),
+		]);
+	});
+
 	it("keys an element the same when generated content before it comes and goes", async () => {
 		const sheet = `.on::before { content: "*" }`;
 		const without = await extract(`<div><p>a</p><p>b</p></div>`, sheet);
@@ -458,7 +720,7 @@ describe(extractState, () => {
 
 		expect(with_.items.map(({ key }) => key)).toEqual([
 			...without.items.map(({ key }) => key),
-			"div0#loose:*|000000|0|16.0",
+			expect.any(String),
 		]);
 	});
 });
