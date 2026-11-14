@@ -239,6 +239,23 @@
 	opacity: 1;
 }
 
+.slidev-layout .recap {
+	align-items: baseline;
+	column-gap: 2.5rem;
+	display: grid;
+	font-size: var(--jg-size-medium);
+	grid-template-columns: auto 1fr;
+	row-gap: 1rem;
+}
+
+.slidev-layout .recap strong {
+	color: var(--jg-squiggle);
+}
+
+.slidev-layout.default .eyebrow + h2 {
+	margin-top: 0.5rem;
+}
+
 .funnel-caption {
 	font-size: 1rem;
 	margin-top: 0.5rem;

@@ -203,15 +203,26 @@ Think of all the possible strategies you can take to reduce bugs in your end pro
 
 Each stage catches some of the bugs the stages before it missed. And it's not drawn to scale.
 
+A coworker put it nicely: nobody sets out to write a bug. Bugs are just out there, waiting to slip through. Every decision you make, and every check you automate, filters more of them out before they reach users.
+
 It is incredibly rare for a software application to completely catch and fix all its bugs, so this funnel assumes some are left over even with all the steps.
 -->
 
 ---
 layout: center
-clicks: 4
+clicks: 5
 ---
 
 <BugFunnel development />
+
+<p class="order-caption" v-click="5">The earlier a stage catches a bug, the cheaper it usually is to fix.</p>
+
+<style>
+.order-caption {
+  font-size: var(--jg-size-medium);
+  margin-top: 0.5rem;
+}
+</style>
 
 <!--
 Today we're going to talk about the four parts of the funnel that happen while code is being written. These are the same four parts whether a human or an agent is writing it.
@@ -223,6 +234,10 @@ Today we're going to talk about the four parts of the funnel that happen while c
 [click] Dynamic analysis: does it match the spec?
 
 [click] Peer review: is the spec correct?
+
+[click] Why this order? It's the order they happen in as you write code, and the earlier a stage catches a bug, the cheaper it usually is to fix. Design thought catches a bad idea while it's still a plan. Static analysis catches mistakes seconds after a change. Tests take minutes. Review takes hours or days. And anything that gets past all four, your users find for you.
+
+That's doubly true with agents: the earlier a check runs, the sooner the agent can fix its own mistake, before you ever see it.
 
 Are we ready?
 -->
@@ -419,7 +434,7 @@ That's most of a spec, in six lines. When it comes to LLMs, you get out what you
 layout: default
 ---
 
-## Protip: Keep Your Skills Fresh
+## Protip: Keep Coding by Hand
 
 <p class="big" v-click>At least once a week, take on a real code task <strong>without AI</strong>.</p>
 
@@ -429,7 +444,7 @@ layout: default
     <p>You stay current on how your codebase actually works.</p>
   </div>
   <div>
-    <h3>Skills</h3>
+    <h3>Judgment</h3>
     <p>You can only review well what you can still write.</p>
   </div>
 </div>
@@ -453,7 +468,7 @@ None of that works if you've stopped knowing your codebase.
 
 [click] So at least once a week, take on a real code task without AI. Not a toy. A real ticket.
 
-[click] Two reasons. Context: you stay current on how the code actually works, which is what lets you write those precise prompts. And skills: you can only review well what you can still write yourself.
+[click] Two reasons. Context: you stay current on how the code actually works, which is what lets you write those precise prompts. And judgment: you can only review well what you can still write yourself.
 
 Sometimes it's also just faster to do the task yourself.
 -->
@@ -530,6 +545,10 @@ A skill is a folder with a SKILL.md file in it.
 [click] And a skill can bundle extra files, like scripts and reference docs, that are only read when needed.
 
 It's an open format now, so the same skill works across most agents.
+
+Links:
+
+- https://agentskills.io/specification
 -->
 
 ---
@@ -580,6 +599,10 @@ So where does context go?
 [click] And anything that has to happen every time goes in CI checks: linting, type checking, tests, and more. The agent can ignore an instruction. It can't ignore a failing build.
 
 Facts go in AGENTS.md. Procedures go in skills. Rules go in CI.
+
+Links:
+
+- https://agents.md
 -->
 
 ---
@@ -609,6 +632,8 @@ This is the one I use the most.
 Ask for an adversarial review of the changes, fix what it finds, and repeat until a review comes back clean.
 
 The "repeat" part matters. One round isn't enough, because fixes cause new bugs. Keep going until a review comes back clean.
+
+Fair warning: it burns through tokens like nothing else. The results are usually worth it.
 -->
 
 ---
@@ -641,6 +666,10 @@ Screenshots in a PR are QA evidence.
 For frontend changes, here's one for browser QA, from Sentry's shared skills repo.
 
 Screenshots in a PR are QA evidence. So the rules are about keeping them honest. Find every place the change shows up. Screenshot the real build, never a mock page. Never inject CSS to fake the change. And frame before and after identically, so they can be compared.
+
+Links:
+
+- https://github.com/getsentry/skills/tree/main/skills/pr-screenshots
 -->
 
 ---
@@ -674,6 +703,105 @@ And upload them with the GitHub CLI's --attach flag. I wrote this skill recently
 Plus my favorite rule: before rewriting a PR description, fetch it again, in case a human edited it.
 
 I put screenshots in the description of every frontend PR, and writing that description doubles as my own QA pass.
+
+Links:
+
+- https://github.com/getsentry/skills/tree/main/skills/pr-screenshots
+- https://cli.github.com/manual/gh_pr_edit
+-->
+
+---
+layout: default
+---
+
+## Where to Find Skills
+
+<div class="cards skill-sources">
+  <div v-click>
+    <h3>Your team's</h3>
+    <p>Sentry shares ours, like <code>pr-screenshots</code>.</p>
+    <p class="muted">github.com/getsentry/skills</p>
+  </div>
+  <div v-click>
+    <h3>Other people's</h3>
+    <p>Anthropic's examples are a good place to start.</p>
+    <p class="muted">github.com/anthropics/skills</p>
+  </div>
+  <div v-click>
+    <h3>Your own</h3>
+    <p>Like <code>adversarial-review</code>, or distilled from your past work.</p>
+    <p class="muted">More on that in part four</p>
+  </div>
+</div>
+
+<p class="big" v-click>Read a skill before you install it. Your agent may follow anything in it.</p>
+
+<style>
+.skill-sources {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(3, 1fr);
+  margin-bottom: 1.5rem;
+}
+
+.skill-sources h3 {
+  color: var(--jg-squiggle);
+  margin-bottom: 0.5rem;
+}
+
+.skill-sources p {
+  font-size: var(--jg-size-small);
+  margin: 0 0 0.4rem;
+}
+
+.skill-sources code {
+  white-space: nowrap;
+}
+</style>
+
+<!--
+You might be wondering: which skills do I actually use, and where do they come from?
+
+[click] Your team's. Sentry keeps a shared skills repo, with skills like pr-screenshots, which we just saw, find-bugs, and iterate-pr.
+
+[click] Other people's. Anthropic's skills repo is a good set of examples to learn from and adapt.
+
+[click] And your own. That adversarial-review skill from a few slides back is about a dozen lines: copy it. We'll talk about distilling your own past work into skills in part four.
+
+[click] One warning: read a skill before you install it. Your agent may follow any instruction in it, and run any script it bundles. Treat it like any other dependency. Sentry even has a skill-scanner skill for checking skills for prompt injection and other risks.
+
+All of these are linked at the end.
+
+Links:
+
+- https://github.com/getsentry/skills
+- https://github.com/anthropics/skills
+- https://agentskills.io
+-->
+
+---
+layout: default
+---
+
+<div class="eyebrow">1/4 Design Thought</div>
+
+## Recap: What Should It Be?
+
+<div class="recap">
+  <span class="muted">You</span>
+  <span class="muted">So your agent…</span>
+  <strong>Prompt precisely</strong>
+  <span>builds what you meant, not the most common guess</span>
+  <strong>Keep coding by hand</strong>
+  <span>gets reviewed by someone who knows the code</span>
+  <strong>Procedures in skills</strong>
+  <span>follows your playbook for recurring tasks</span>
+</div>
+
+<!--
+Quick recap of part one. On the left, what you do. On the right, how that makes your agent write better code.
+
+(Pause a beat for people to read, then move on.)
 -->
 
 ---
@@ -769,7 +897,7 @@ console.log(`I have ${count * 2} items.`);
 <p v-click="2">Without it, this compiles, then prints “I have NaN items.” whenever the request fails.</p>
 
 <!--
-Type checkers flag code that blatantly doesn't make sense. The two compiler options that do the most here are strictNullChecks and noImplicitAny.
+First up: strictNullChecks.
 
 strictNullChecks means null and undefined have to be handled. Here, count only gets a value if the request succeeds.
 
@@ -800,9 +928,24 @@ function formatTalk(talk) {
 
 <p v-click="2">Without it, <code>talk</code> is <code>any</code>, so the <code>speakr</code> typo isn't caught.</p>
 
-<div v-click="3">
+<!--
+noImplicitAny means every value needs a type TypeScript knows. [click] Here, talk has no type annotation, so TypeScript reports an error.
 
-<p class="muted">Both are on with:</p>
+[click] Without noImplicitAny, talk is silently any. Anything goes, including the typo in "speakr". It'll print "undefined" at runtime and nothing will tell you.
+
+Links:
+
+- https://www.typescriptlang.org/tsconfig/#strictNullChecks
+- https://www.typescriptlang.org/tsconfig/#noImplicitAny
+-->
+
+---
+layout: default
+---
+
+## Protip: Keep TypeScript Strict
+
+<p class="big"><code>strictNullChecks</code> and <code>noImplicitAny</code> are both on with:</p>
 
 ```json
 "strict": true
@@ -810,14 +953,18 @@ function formatTalk(talk) {
 
 <p class="muted">(the default as of TypeScript 6.0)</p>
 
-</div>
+<p class="big" v-click>Don't let an agent loosen it, or reach for <code>any</code>, to make an error go away.</p>
 
 <!--
-noImplicitAny means every value needs a type TypeScript knows. [click] Here, talk has no type annotation, so TypeScript reports an error.
+Both of those come with "strict": true in your tsconfig. Strict mode, best mode. As of TypeScript 6.0 it's on by default, but plenty of existing projects, and plenty of agent-scaffolded ones, still turn it off. Make sure yours has it. The stricter your types, the more mistakes get caught before anyone reads the code.
 
-[click] Without noImplicitAny, talk is silently any. Anything goes, including the typo in "speakr". It'll print "undefined" at runtime and nothing will tell you.
+[click] And watch for agents loosening it. When a type error is in the way, it's tempting for an agent to turn off a compiler option, or slap an "as any" on the problem. That's the same as disabling a lint rule, which we'll get to in a minute: the error found something real. typescript-eslint's no-explicit-any and no-unsafe rules catch a lot of the "any" part for you.
 
-[click] Both of these come with "strict": true in your tsconfig. Strict mode, best mode. As of TypeScript 6.0 it's on by default, but plenty of existing projects, and plenty of agent-scaffolded ones, still turn it off. Make sure yours has it. The stricter your types, the more mistakes get caught before anyone reads the code.
+Links:
+
+- https://www.typescriptlang.org/tsconfig/#strict
+- https://devblogs.microsoft.com/typescript/announcing-typescript-6-0/
+- https://typescript-eslint.io/rules/no-explicit-any
 -->
 
 ---
@@ -851,7 +998,15 @@ A linter is a tool that runs a set of checks on your source code.
 
 [click] Each of those checks is called a "rule". Each rule may report on code it doesn't like, and each complaint may come with an optional autofix. That's free fixes for agents and humans alike.
 
+ESLint is the linter most of you probably use today. Oxlint is a much faster, Rust-based linter that's catching up quickly, and it can run ESLint-style JavaScript plugins, though that support is still in alpha. Sentry's custom lint rules run on Oxlint now.
+
 Lint rules exist for most of that incomplete list from earlier, too: eslint-plugin-jsx-a11y for many of those blatant accessibility issues, for example. Automated checks only find some accessibility issues, though. People find the rest.
+
+Links:
+
+- https://eslint.org
+- https://oxc.rs/docs/guide/usage/linter.html
+- https://oxc.rs/docs/guide/usage/linter/js-plugins.html
 -->
 
 ---
@@ -900,6 +1055,13 @@ Here's an example of code that type checks, but is probably wrong. It works. It'
 [click] The React Compiler's rules are now in eslint-plugin-react-hooks's recommended config. `set-state-in-effect` flags exactly this: calling setState synchronously within an effect can trigger cascading renders.
 
 [click] And the fix is less code. So smart, look at you.
+
+(If anyone asks: if talk.id can change for the same card, render it with key={talk.id} so the state resets. And with server rendering, reading localStorage during render needs more care, such as useSyncExternalStore.)
+
+Links:
+
+- https://react.dev/reference/eslint-plugin-react-hooks/lints/set-state-in-effect
+- https://react.dev/learn/you-might-not-need-an-effect
 -->
 
 ---
@@ -962,6 +1124,10 @@ ESLint on its own sees the raw syntax of your code.
 [click] Next level power.
 
 Goku: https://giphy.com/gifs/super-saiyan-UBB6f0hKhlShy
+
+Links:
+
+- https://typescript-eslint.io/getting-started/typed-linting
 -->
 
 ---
@@ -1106,13 +1272,15 @@ function MyButton({ onClick }: { onClick: () => void }) {
 </style>
 
 <!--
-Let's play one of my favorite programming games: is this safe? (Pause for the room.)
+Let's play one of my favorite programming games: what does this code actually do? Specifically: what does `await onClick()` wait for? (Pause for the room.)
 
 I've been giving this example for years, and it's even more relevant now.
 
 This button component receives an onClick prop. It sets up a running state. When clicked, it sets running to true, awaits the onClick, then sets running to false. The button is disabled while running.
 
 [click] Generated code loves this pattern. But typed linting knows onClick is typed as returning void. So `await onClick()` is awaiting something that isn't a Promise.
+
+(If anyone shouts "but it could be a Promise!": yes, TypeScript lets you pass an async function where a () => void is expected. That's part of what no-misused-promises flags. If waiting really is intended, type the prop as () => Promise<void>, keep the await inside a try/finally, and handle the wrapper's promise at the button, like onClick={() => void onClickAndDisable()}.)
 
 [click] And passing an async function to onClick means a Promise nobody handles.
 
@@ -1131,6 +1299,13 @@ This button component receives an onClick prop. It sets up a running state. When
 [click] Remove that too. And look at what's left.
 
 So smart, look at you. Lint rules flagged four of those steps, and each fix exposed the next simplification.
+
+Links:
+
+- https://typescript-eslint.io/rules/await-thenable
+- https://typescript-eslint.io/rules/no-misused-promises
+- https://typescript-eslint.io/rules/require-await
+- https://typescript-eslint.io/rules/no-unused-vars
 -->
 
 ---
@@ -1267,16 +1442,16 @@ export default defineConfig(
 );
 ```
 
-```shell
-eslint . --max-warnings 0
-```
-
 <!--
 So make disables explain themselves. Report unused disable directives. Require a description on every disable comment, so a human can review why. Ban ts-ignore and require a description on ts-expect-error.
 
-And treat warnings as errors. Warnings get ignored forever, by humans and by agents.
+This deck's own repo has most of these, by the way. I made it with create-typescript-app.
 
-This deck's own repo has these, by the way. I made it with create-typescript-app.
+Links:
+
+- https://eslint.org/docs/latest/use/configure/rules#report-unused-eslint-disable-comments
+- https://eslint-community.github.io/eslint-plugin-eslint-comments/rules/require-description.html
+- https://typescript-eslint.io/rules/ban-ts-comment
 -->
 
 ---
@@ -1285,22 +1460,31 @@ layout: default
 
 ## Protip: Tell Your LLMs to Respect the Linter
 
-<p>Most agents skip static analysis by default. Mention it in <code>AGENTS.md</code>:</p>
+<p>Most agents skip static analysis by default. Sentry's <code>AGENTS.md</code> spells it out:</p>
 
 ```md
-// AGENTS.md
-Before committing, run linting and type-checking in parallel:
-
-* `npm run lint`
-* `npm run typecheck`
-
-For any report, read it, understand why it happened, and fix the code to respect it.
+prek is the single entrypoint for all lint, format, and type-checking
+tools. Before considering a task complete, run `.venv/bin/prek run -q`
+(detects changed files automatically).
+…
+If a hook fails, fix the issues, stage changes, then re-run until it passes.
 ```
+
+<p class="source">github.com/getsentry/sentry: AGENTS.md, backend section</p>
+
+<p class="big" v-click>For every report: understand why, then fix the code. Don't silence it.</p>
 
 <!--
 Most agents skip static analysis by default. They'll write the code, maybe run the tests, and call it done.
 
-So tell them. Mention linting, type checking, and testing in your AGENTS.md. Including the part where they read each report, understand why it happened, and fix the code to respect it, instead of silencing it.
+So tell them. Here's the real thing, from Sentry's AGENTS.md. prek is a pre-commit hook runner: it runs our linters and formatters on changed files, frontend included. Before considering a task complete, run it. If a hook fails, fix the issues and re-run until it passes. The frontend section of the same file also tells agents to run "pnpm run typecheck" for TypeScript.
+
+[click] And the part I'd add to any project's instructions: for every report, read it, understand why it happened, and fix the code to respect it. Not "oh, it's complaining, I'll add a disable comment."
+
+Links:
+
+- https://github.com/getsentry/sentry/blob/master/AGENTS.md
+- https://github.com/j178/prek
 -->
 
 ---
@@ -1321,6 +1505,7 @@ export default defineConfig(
 	tseslint.configs.strictTypeChecked,
 	tseslint.configs.stylisticTypeChecked,
 	react.configs.flat.recommended,
+	react.configs.flat["jsx-runtime"],
 	reactHooks.configs.flat.recommended,
 	jsxA11y.flatConfigs.strict,
 );
@@ -1355,9 +1540,15 @@ But every part of your stack probably has a plugin: typescript-eslint for TypeSc
 
 [click] Every rule you turn on is one more check that runs on every change, for humans and agents alike.
 
-[click] Much of my career, this has been my reaction to lint rules.
+[click] Is that a lot of lint rules? For most of my career, this has been my answer.
 
 “More Cowbell”: Saturday Night Live
+
+Links:
+
+- https://typescript-eslint.io/users/configs
+- https://github.com/jsx-eslint/eslint-plugin-react
+- https://github.com/jsx-eslint/eslint-plugin-jsx-a11y
 -->
 
 ---
@@ -1368,24 +1559,57 @@ layout: default
 
 <p class="big">Left the same review comment twice? Make it a lint rule.</p>
 
-<p v-click>Agents are great at writing them. Ask:</p>
+<div class="cards comment-vs-rule" v-click>
+  <div>
+    <h3>A review comment</h3>
+    <p>Reaches one PR, after a human notices.</p>
+  </div>
+  <div>
+    <h3>A lint rule</h3>
+    <p>Runs on every change, in the agent's loop.</p>
+  </div>
+</div>
 
 <div v-click>
 
+<p>Agents are great at writing them. Ask:</p>
+
 ```md
 Write an ESLint rule that reports raw <table> elements in JSX,
-with a message pointing to our design system's <Table> component.
+with a message pointing to our design system's <SimpleTable>.
 Include RuleTester tests with valid and invalid cases.
 ```
 
 </div>
 
+<style>
+.comment-vs-rule {
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: 1fr 1fr;
+  margin: 1.5rem 0 1rem;
+}
+
+.comment-vs-rule h3 {
+  color: var(--jg-squiggle);
+  margin-bottom: 0.4rem;
+}
+
+.comment-vs-rule p {
+  margin: 0;
+}
+</style>
+
 <!--
 Left the same review comment twice? Make it a lint rule. Shoutout to Tucker Chapin, whose lightning talk this afternoon made the same point.
 
-[click] And you don't have to write it yourself. Agents are great at writing lint rules. A rule is small, well-specified, there are thousands of examples out there, and every rule comes with tests that check it.
+[click] Here's why. A review comment reaches one PR, and only after a human notices the problem. A lint rule runs on every change, for every human and every agent. And it runs inside the agent's loop: the agent reads the lint message and fixes the code before you ever review it. Every lint rule is a review comment you never have to leave again.
 
-[click] So ask. Say what to report, what the message should point to, and ask for tests with valid and invalid cases.
+[click] And you don't have to write the rule yourself. Agents are great at writing lint rules. A rule is small and well-specified, there are thousands of examples out there, and every rule comes with tests that check it. So ask: say what to report, what the message should point to, and ask for tests with valid and invalid cases. Then review it like any other PR, and turn it on.
+
+Links:
+
+- https://eslint.org/docs/latest/extend/custom-rules
 -->
 
 ---
@@ -1394,27 +1618,129 @@ layout: default
 
 ## Example: A Custom Lint Rule
 
-```ts
+```js
 export default {
 	meta: {
-		messages: { preferTable: "Use the design system's <Table> instead." },
+		messages: {
+			tableElement: "Use SimpleTable instead of a raw <table>.",
+		},
 	},
 	create(context) {
 		return {
 			"JSXOpeningElement[name.name='table']"(node) {
-				context.report({ messageId: "preferTable", node });
+				context.report({ messageId: "tableElement", node });
 			},
 		};
 	},
 };
 ```
 
+<p class="source">Simplified from Sentry's no-manual-table rule</p>
+
 <!--
-Here's roughly what you get back. Any raw table element in JSX gets flagged, with a message pointing to the right component.
+Here's roughly what you get back, simplified from a real rule we have at Sentry. Any raw table element in JSX gets flagged, with a message pointing to the right component.
 
 A good lint message is knowledge sharing: it teaches whoever reads it, human or agent, what to do instead.
 
 Remember "copies of the design system"? This is how you stop them for good. If you have existing violations, ESLint's bulk suppressions let you turn the rule on right away and fix those over time.
+
+Links:
+
+- https://github.com/getsentry/sentry/blob/master/static/oxlint/eslintPluginScraps/src/rules/noManualTable.ts
+- https://eslint.org/docs/latest/use/suppressions
+-->
+
+---
+layout: default
+---
+
+## Real Examples: Sentry's Custom Lint Rules
+
+<div class="cards sentry-rules">
+  <div>
+    <h3>no-manual-table</h3>
+    <p>Use SimpleTable from '…/simpleTable' instead of a raw &lt;table&gt;.</p>
+  </div>
+  <div>
+    <h3>prefer-stack-for-column-flex</h3>
+    <p>Prefer &lt;Stack&gt; over &lt;Flex direction="column"&gt;. …</p>
+  </div>
+  <div>
+    <h3>no-calling-components-as-functions</h3>
+    <p>"TalkCard" appears to be a React component. Use &lt;TalkCard /&gt; instead of calling it as a function.</p>
+  </div>
+  <div>
+    <h3>no-unnecessary-use-callback</h3>
+    <p>Unnecessary useCallback. <code>onSelect</code> is only used in contexts where memoization provides no benefit. …</p>
+  </div>
+</div>
+
+<p class="source">github.com/getsentry/sentry: static/oxlint</p>
+
+<style>
+.sentry-rules {
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 1rem;
+}
+
+.sentry-rules h3 {
+  color: var(--jg-squiggle);
+  font-family: var(--jg-font-mono);
+  font-size: 1.05rem;
+  margin-bottom: 0.4rem;
+}
+
+.sentry-rules p {
+  font-size: var(--jg-size-small);
+  margin: 0;
+}
+</style>
+
+<!--
+These aren't hypothetical. Here are a few of Sentry's real custom lint rules, and their real messages, with our example names filled in and trimmed to fit.
+
+no-manual-table is the one from the last slide.
+
+prefer-stack-for-column-flex: we have a Stack component for column layouts, so use it.
+
+no-calling-components-as-functions: render components with JSX, don't call them like plain functions.
+
+And no-unnecessary-use-callback: don't memoize a callback when nothing benefits from the memoization.
+
+Each one is a review comment nobody has to leave anymore. Each message tells the reader, human or agent, exactly what to do instead. Two of these even autofix. Sentry has dozens of these across two internal plugins, and the source is public, so go take a look.
+
+Links:
+
+- https://github.com/getsentry/sentry/tree/master/static/oxlint
+-->
+
+---
+layout: default
+---
+
+<div class="eyebrow">2/4 Static Analysis</div>
+
+## Recap: Is It Written Right?
+
+<div class="recap">
+  <span class="muted">You</span>
+  <span class="muted">So your agent…</span>
+  <strong>Keep TypeScript strict</strong>
+  <span>hears about missing null checks and untyped values in seconds</span>
+  <strong>Make disables explain themselves</strong>
+  <span>has to justify silencing a report</span>
+  <strong>Enable all the lint rules relevant to you</strong>
+  <span>gets told when code that type checks is probably wrong</span>
+  <strong>Turn review comments into lint rules</strong>
+  <span>gets your feedback before you review</span>
+</div>
+
+<!--
+Part two, recapped. The theme: the agent hears about its mistakes in seconds, from a tool, instead of days later, from you.
+
+(Pause a beat, then move on.)
 -->
 
 ---
@@ -1587,22 +1913,67 @@ layout: default
 
 ## Protip: Name Tests "X when Y"
 
-```ts
-describe("TalkSearch", () => {
-	it("shows matching talks when the user types");
-	it("shows 'No results' when nothing matches");
-	it("ignores a response when a newer search replaced it");
-});
-```
+<div class="test-titles">
+  <p class="vague"><code>it("works")</code></p>
+  <p class="vague"><code>it("handles empty results")</code></p>
+  <div v-click="1">
+    <p><code>it("<span class="x">shows matching talks</span> <span class="y">when the user types</span>")</code></p>
+    <p><code>it("<span class="x">shows 'No results'</span> <span class="y">when nothing matches</span>")</code></p>
+    <p><code>it("<span class="x">ignores a response</span> <span class="y">when a newer search replaced it</span>")</code></p>
+  </div>
+</div>
 
-<p class="big" v-click>Every test says what happens, and under what condition.</p>
+<p class="legend" v-click="2"><span class="x">X</span> what happens <span class="y">Y</span> under what condition</p>
+
+<style>
+.test-titles p {
+  font-size: var(--jg-size-medium);
+  margin: 0 0 0.75rem;
+}
+
+.test-titles .vague {
+  opacity: 0.55;
+  text-decoration: line-through;
+  text-decoration-color: var(--jg-fg-muted);
+}
+
+.test-titles .x,
+.legend .x {
+  border-bottom: 3px solid var(--jg-squiggle);
+  color: var(--jg-squiggle);
+}
+
+.test-titles .y,
+.legend .y {
+  border-bottom: 3px dashed var(--jg-link);
+  color: var(--jg-link);
+}
+
+.legend {
+  font-size: var(--jg-size-medium);
+  margin-top: 1.5rem;
+}
+
+.legend .x,
+.legend .y {
+  font-weight: var(--jg-weight-bold);
+  margin-left: 1.5rem;
+  margin-right: 0.5rem;
+}
+
+.legend .x {
+  margin-left: 0;
+}
+</style>
 
 <!--
 A small protip that makes a big difference: name tests "X when Y".
 
-Each title says what happens, X, and under what condition, Y. Read the titles in a describe block and you have the spec, including the edge cases.
+Titles like "works" or "handles empty results" don't tell you much. Handles them how?
 
-[click] It also makes gaps obvious. If there's a "when" you can think of that isn't there, that's a test to write. Agents follow this pattern well once you tell them to.
+[click] Instead, be specific. Read these titles in a describe block and you have the spec, including the edge cases.
+
+[click] X is what happens. Y is under what condition. It also makes gaps obvious. If there's a "when" you can think of that isn't there, that's a test to write. Agents follow this pattern well once you tell them to.
 -->
 
 ---
@@ -1700,14 +2071,14 @@ layout: section
 
 <div class="eyebrow">3/4 Dynamic Analysis</div>
 
-# Integration/End-To-End Testing
+# Beyond Unit Tests
 
 <p class="muted">Look at the actual page</p>
 
 <div class="eyebrow">2/2</div>
 
 <!--
-Next, integration and end-to-end testing.
+Next, beyond unit tests: integration and end-to-end tests, and agents driving a browser themselves.
 -->
 
 ---
@@ -1760,7 +2131,7 @@ test("favorites survive a reload", async ({ page }) => {
 	await page.reload();
 
 	await expect(
-		page.getByRole("button", { name: "Unfavorite" }).first(),
+		page.getByRole("button", { name: "Favorite", pressed: true }),
 	).toBeVisible();
 });
 ```
@@ -1770,11 +2141,15 @@ test("favorites survive a reload", async ({ page }) => {
 <!--
 Here's what one looks like, in Playwright. Go to the talks page, favorite a talk, reload, and expect it to still be a favorite.
 
-Notice it finds things the way a user does: by role and by name. That doubles as an accessibility check.
+Notice it finds things the way a user does: by role and by name. And "pressed" checks the toggle's aria-pressed state, which is what a screen reader announces. So it doubles as an accessibility check.
 
 [click] And it fails when the page is broken, even if every function in it works on its own. That's the gap between unit tests and what users see.
 
 Agents are good at writing these, and good at running them. Put them in CI, and tell your agent to run them before it says it's done.
+
+Links:
+
+- https://playwright.dev/docs/locators
 -->
 
 ---
@@ -1821,6 +2196,10 @@ Setting it up is a few lines of MCP config. This is straight from the Chrome Dev
 Then you can ask for runtime checks in plain language: open the page, favorite a talk, reload, screenshot it, and check the console.
 
 That's how you find out whether "favorites survive a reload" is actually true.
+
+Links:
+
+- https://github.com/ChromeDevTools/chrome-devtools-mcp
 -->
 
 ---
@@ -1926,6 +2305,37 @@ So watch what users actually hit, with an observability or monitoring tool. You 
 [click] And agents can read these too. Sentry has an MCP server, and so do other observability tools. Point an agent at a real production issue and it starts from evidence instead of a guess.
 
 Full disclosure: I work at Sentry, and this is the thing we build. Whatever you use, use something.
+
+Links:
+
+- https://mcp.sentry.dev
+-->
+
+---
+layout: default
+---
+
+<div class="eyebrow">3/4 Dynamic Analysis</div>
+
+## Recap: Does It Match the Spec?
+
+<div class="recap">
+  <span class="muted">You</span>
+  <span class="muted">So your agent…</span>
+  <strong>Respect, add to, and use the spec</strong>
+  <span>hits a failing test when it changes behavior you care about</span>
+  <strong>Test in a real browser</strong>
+  <span>checks the page, not just the code</span>
+  <strong>Actually verify outputs</strong>
+  <span>shows you screenshots, not just "All checks pass."</span>
+  <strong>Watch what users actually hit</strong>
+  <span>starts from real errors instead of guesses</span>
+</div>
+
+<!--
+Part three, recapped. The theme: don't take the agent's word for it. Run the code, and look at the result.
+
+(Pause a beat, then move on.)
 -->
 
 ---
@@ -1984,6 +2394,36 @@ But the last question is different. Tools check the code against the spec. Only 
 -->
 
 ---
+layout: default
+---
+
+## Example: A Spec Change in Disguise
+
+<p class="muted">"Fixed the failing test. All checks pass."</p>
+
+```diff
+ it("shows 'No results' when nothing matches", async () => {
+ 	render(<TalkSearch talks={talks} />);
+ 	const input = screen.getByRole("searchbox");
+
+ 	await userEvent.type(input, "zzz");
+
+-	expect(screen.getByText("No results")).toBeVisible();
++	expect(screen.queryByText("No results")).toBeNull();
+ });
+```
+
+<p class="big" v-click>The tests pass because the spec changed. Only a person can say whether it should have.</p>
+
+<!--
+Here's what that looks like. Watch out for this one.
+
+The agent says: "Fixed the failing test. All checks pass." And they do pass! Because it changed what the test expects. The title still says it shows "No results". The assertion now says it doesn't.
+
+[click] None of your CI checks will fail on this, because the tests are the thing that changed. An AI reviewer might notice, if you're lucky. But the tests verify the code, and only a human can verify the tests. So when you review an agent's PR, read the test changes first.
+-->
+
+---
 layout: section
 ---
 
@@ -2038,15 +2478,44 @@ layout: default
 
 ## Example: lint-rule-review-skill
 
-<ul>
-  <li v-click>Gathered 3,092 review comments on ESLint, typescript-eslint, and Flint rule PRs</li>
-  <li v-click>Distilled them into 178 patterns</li>
-  <li v-click>Rolled it out at Sentry: it found hundreds of improvements</li>
-</ul>
+<p class="muted">I've reviewed a lot of lint rules. So I distilled those reviews into a skill.</p>
+
+<div class="distill-stats">
+  <div>
+    <strong>3,092</strong>
+    <span>of my review comments on lint rule PRs</span>
+  </div>
+  <div>
+    <strong>178</strong>
+    <span>patterns, each citing the comments behind it</span>
+  </div>
+  <div>
+    <strong>Hundreds</strong>
+    <span>of improvements found at Sentry</span>
+  </div>
+</div>
 
 <div class="cards protip" v-click><div>Writing custom lint rules? Review them with github.com/JoshuaKGoldberg/lint-rule-review-skill</div></div>
 
 <style>
+.distill-stats {
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 1.5rem;
+}
+
+.distill-stats strong {
+  color: var(--jg-squiggle);
+  display: block;
+  font-size: var(--jg-size-title);
+  line-height: 1.1;
+}
+
+.distill-stats span {
+  font-size: var(--jg-size-small);
+}
+
 .protip {
   margin: 2rem 0 0.5rem;
 }
@@ -2058,15 +2527,19 @@ layout: default
 </style>
 
 <!--
-Here's an example. I review a lot of lint rules.
+Here's what that looks like for me. I've reviewed a lot of lint rules over the years: ESLint, typescript-eslint, and Flint. So I followed those same three steps.
 
-[click] Gather: I had an agent collect about 3,000 review comments on lint rule pull requests.
+Gather: I had an agent collect my past review comments on lint rule pull requests. Thousands of them. I was not about to read those myself.
 
-[click] Distill: it found 178 recurring patterns and wrote them into a skill.
+Distill: from 3,092 of those comments, it found 178 recurring patterns, like "match by declaration, not by name," and wrote them up as a skill. Every pattern cites the real comments it came from.
 
-[click] Then we rolled it out at Sentry, and it found hundreds of improvements. Not a replacement for a human, but a good first pass.
+Test: I held back some real reviews, and scored the skill against those. Then we rolled it out at Sentry, and it found hundreds of improvements in our custom lint rules. Not a replacement for a human reviewer, but a very good first pass.
 
-[click] And a protip: if you're writing custom lint rules, like we talked about earlier, run them through this skill.
+[click] So if you're writing custom lint rules, like we talked about earlier, run them through this skill.
+
+Links:
+
+- https://github.com/JoshuaKGoldberg/lint-rule-review-skill
 -->
 
 ---
@@ -2276,15 +2749,26 @@ Never trust an AI.
 -->
 
 ---
-layout: section
+layout: default
 ---
 
-# Closing Thoughts
+<div class="eyebrow">4/4 Peer Review</div>
 
-<p class="muted">Let's recap!</p>
+## Recap: Is the Spec Correct?
+
+<div class="recap">
+  <span class="muted">You</span>
+  <span class="muted">So your agent…</span>
+  <strong>Have a human review what ships</strong>
+  <span>has its spec checked against what users need</span>
+  <strong>Distill repeated work into skills</strong>
+  <span>gets a first-pass review that knows your patterns</span>
+  <strong>Rules in CI</strong>
+  <span>gets stopped by CI, not just asked nicely</span>
+</div>
 
 <!--
-Let's close out.
+Part four, recapped. The theme: tools check the code, and people check the spec. Let's close out.
 
 Start minute target: ~18.5
 -->
@@ -2313,17 +2797,20 @@ layout: default
 
 <div class="protips">
   <p>Prompt precisely: plan, context, review.</p>
-  <p>Keep your skills fresh.</p>
+  <p>Keep coding by hand.</p>
   <p>Facts in <code>AGENTS.md</code>, procedures in skills, rules in CI.</p>
+  <p>Keep TypeScript strict.</p>
   <p>Make disables explain themselves.</p>
   <p>Tell your LLMs to respect the linter.</p>
   <p>Enable all the lint rules relevant to you.</p>
   <p>Turn review comments into lint rules.</p>
   <p>Respect, add to, and use the spec.</p>
+  <p>Test in a real browser.</p>
   <p>Actually verify outputs.</p>
   <p>Watch what users actually hit.</p>
   <p>Distill repeated work into skills.</p>
   <p>Have a human review what ships.</p>
+  <p>Needs more lint rules.</p>
   <p>Never trust an AI.</p>
 </div>
 
@@ -2344,7 +2831,7 @@ layout: default
 <!--
 These are photo-capable slides, if you want.
 
-All the protips from today, in one place.
+The main protips from today, in one place. Including a classic: needs more lint rules.
 -->
 
 ---
@@ -2358,18 +2845,23 @@ layout: default
     <h3>Skills</h3>
     <p><a href="https://agentskills.io">agentskills.io</a></p>
     <p><a href="https://github.com/getsentry/skills">github.com/<wbr />getsentry/<wbr />skills</a></p>
+    <p><a href="https://github.com/anthropics/skills">github.com/<wbr />anthropics/<wbr />skills</a></p>
     <p><a href="https://github.com/JoshuaKGoldberg/lint-rule-review-skill">github.com/<wbr />JoshuaKGoldberg/<wbr /><span class="nowrap">lint-rule-review-skill</span></a></p>
   </div>
   <div>
     <h3>Static Analysis</h3>
     <p><a href="https://typescriptlang.org">typescriptlang.org</a></p>
+    <p><a href="https://typescript-eslint.io">typescript-eslint.io</a></p>
     <p><a href="https://eslint.org">eslint.org</a></p>
+    <p><a href="https://oxc.rs">oxc.rs</a> <span class="muted">(Oxlint)</span></p>
+    <p><a href="https://github.com/getsentry/sentry/tree/master/static/oxlint">github.com/<wbr />getsentry/<wbr />sentry/<wbr />tree/<wbr />master/<wbr />static/<wbr />oxlint</a></p>
   </div>
   <div>
     <h3>Dynamic Analysis</h3>
     <p><a href="https://vitest.dev">vitest.dev</a></p>
     <p><a href="https://playwright.dev">playwright.dev</a></p>
     <p><a href="https://github.com/ChromeDevTools/chrome-devtools-mcp">github.com/<wbr />ChromeDevTools/<wbr /><span class="nowrap">chrome-devtools-mcp</span></a></p>
+    <p><a href="https://mcp.sentry.dev">mcp.sentry.dev</a></p>
   </div>
 </div>
 
@@ -2398,7 +2890,7 @@ layout: default
 </style>
 
 <!--
-All the tools I talked about have great websites.
+The main tools and skills I talked about, in one place. Many slides' notes also link to the docs behind them, so grab the slides afterward if you want to dig in.
 -->
 
 ---

@@ -75,6 +75,7 @@
 	],
 	"words": [
 		"agentskills",
+		"anthropics",
 		"Chapin",
 		"emdashes",
 		"fontkit",
@@ -86,6 +87,7 @@
 		"linkedom",
 		"octoguide",
 		"pptxgenjs",
+		"prek",
 		"protip",
 		"protips",
 		"rupaul",
@@ -99,6 +101,7 @@
 		"takumi",
 		"twoslash",
 		"typescriptlang",
-		"vclick"
+		"vclick",
+		"venv"
 	]
 }
