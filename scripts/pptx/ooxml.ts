@@ -498,7 +498,11 @@ function styleMarkers(
 				case "string":
 					return patchOnce(properties, plainSize, bulletColor + plainSize);
 				default:
-					return properties;
+					return patchOnce(
+						properties.replace(/ indent="-\d+"/, ' indent="0"'),
+						`${plainSize}<a:buChar char="&#x00A0;"/>`,
+						"<a:buNone/>",
+					);
 			}
 		},
 	);

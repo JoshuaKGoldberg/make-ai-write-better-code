@@ -315,6 +315,13 @@ export function parseColor(value: string | undefined, current?: string) {
 	} satisfies Color;
 }
 
+/** How different two hex colors look: their distance in Oklab. */
+export function colorDistance(first: string, second: string) {
+	const [firstL, firstA, firstB] = toOklab(parseHex(first));
+	const [secondL, secondA, secondB] = toOklab(parseHex(second));
+	return Math.hypot(firstL - secondL, firstA - secondA, firstB - secondB);
+}
+
 /** A model transparency (0-100) for an alpha, faded by an opacity. */
 export const transparencyOf = (alpha: number, opacity = 1) =>
 	(1 - alpha * opacity) * 100;
@@ -382,7 +389,7 @@ export function parseLinearGradient(
 		: undefined;
 }
 
-/** Parses the layers of a `text-shadow` or `box-shadow` that show outside their box, top first, resolving their lengths with `toPixels`; a spread is left out. */
+/** Parses the layers of a `text-shadow` or `box-shadow` that show outside their box, top first, each with its spread, resolving their lengths with `toPixels`. */
 export function parseShadows(
 	value: string,
 	toPixels: (length: string) => number,
@@ -405,16 +412,19 @@ export function parseShadows(
 			return [];
 		}
 
-		const [offsetX, offsetY, blur = 0] = lengths.map(toPixels);
-		return blur || offsetX || offsetY
+		const [offsetX, offsetY, blur = 0, spread = 0] = lengths.map(toPixels);
+		return blur || offsetX || offsetY || spread > 0
 			? [
 					{
-						blur,
-						color: color.hex,
-						offsetX,
-						offsetY,
-						transparency: transparencyOf(color.alpha),
-					} satisfies Shadow,
+						shadow: {
+							blur,
+							color: color.hex,
+							offsetX,
+							offsetY,
+							transparency: transparencyOf(color.alpha),
+						} satisfies Shadow,
+						spread,
+					},
 				]
 			: [];
 	});
@@ -652,11 +662,6 @@ function spreadPositions(positions: (number | undefined)[]) {
 	});
 }
 
-/**
- * Gives each fully transparent stop its visible neighbors' colors (a stop between two becomes
- * one of each): CSS fades through transparency toward them, but PowerPoint interpolates color
- * and alpha apart, which would fade through the transparent stop's own color, like black.
- */
 function withoutInterpolation(part: string) {
 	const words = splitTopLevel(part, " ");
 	const start = words.indexOf("in");
@@ -665,6 +670,11 @@ function withoutInterpolation(part: string) {
 		: words.toSpliced(start, words[start + 3] === "hue" ? 4 : 2).join(" ");
 }
 
+/**
+ * Gives each fully transparent stop its visible neighbors' colors (a stop between two becomes
+ * one of each): CSS fades through transparency toward them, but PowerPoint interpolates color
+ * and alpha apart, which would fade through the transparent stop's own color, like black.
+ */
 function withVisibleColors(stops: { color: Color; position: number }[]) {
 	const visible = (stop: { color: Color }) => stop.color.alpha > 0;
 	return stops.flatMap((stop, index) => {

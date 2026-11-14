@@ -111,7 +111,6 @@ async function build(
 			}
 		};
 
-		renderer.problems.forEach(report);
 		const canvas: Canvas = {
 			height: Math.ceil(config.canvasWidth / config.aspectRatio),
 			width: config.canvasWidth,
@@ -135,6 +134,7 @@ async function build(
 			},
 		);
 
+		renderer.problems.forEach(report);
 		const globalCss = await renderer.globalCss();
 		const styled = await eachSlide(rendered, report, async ({ number }) => ({
 			css: cssOf(
@@ -175,8 +175,16 @@ async function build(
 			),
 		);
 
+		const first = styled.at(0);
+		const background = await writeBackground(
+			layout,
+			first?.css ?? cssOf(globalCss, colorScheme, canvas),
+			{ globalBottom: first?.rendered.globalBottom ?? "", staticLayers },
+			work,
+		);
 		const extract = createStateExtractor({
 			assets,
+			backdrop: background.color,
 			canvas,
 			fonts,
 			layout,
@@ -197,16 +205,10 @@ async function build(
 			extracted.set(slide.number, states);
 		}
 
-		const first = styled.at(0);
 		const deckModel: Deck = {
 			aspectRatio: config.aspectRatio,
 			author: config.author,
-			background: await writeBackground(
-				layout,
-				first?.css ?? cssOf(globalCss, colorScheme, canvas),
-				{ globalBottom: first?.rendered.globalBottom ?? "", staticLayers },
-				work,
-			),
+			background,
 			canvas,
 			slides: numbers.map((number) => ({
 				notes: (deckSlides[number - 1].note ?? "").trim(),
@@ -268,6 +270,7 @@ function colorSchemeOf(
 
 function createStateExtractor({
 	assets,
+	backdrop,
 	canvas,
 	fonts,
 	layout,
@@ -275,6 +278,7 @@ function createStateExtractor({
 	work,
 }: {
 	assets: Assets;
+	backdrop: string;
 	canvas: Canvas;
 	fonts: FontBook;
 	layout: Layout;
@@ -310,7 +314,12 @@ function createStateExtractor({
 			});
 		}
 
-		const extracted = extractState(laidOut, { assets, canvas, fonts });
+		const extracted = extractState(laidOut, {
+			assets,
+			backdrop,
+			canvas,
+			fonts,
+		});
 		for (const message of extracted.problems) {
 			report({ message, severity: "error", slide: slide.number });
 		}

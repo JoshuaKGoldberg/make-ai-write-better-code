@@ -5,6 +5,7 @@ const { currentLayout, currentPage, total } = useNav();
 
 <template>
 	<div class="pager">{{ currentPage }} / {{ total }} · {{ currentLayout }}</div>
+	<UnregisteredInGlobalTop />
 </template>
 
 <style scoped>

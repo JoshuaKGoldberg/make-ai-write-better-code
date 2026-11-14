@@ -12,6 +12,7 @@ import {
 	isInvisible,
 	isLineFeed,
 	isRightToLeft,
+	padRun,
 	runFrame,
 	runRect,
 	runsToParagraph,
@@ -61,13 +62,22 @@ export function codeItem(context: ExtractContext, pre: Element) {
 		{ length: Math.max(lines.length, ...placed.map(({ index }) => index + 1)) },
 		() => ({ runs: [] }),
 	);
+	const content = insetBox(box, context.contentInsets(pre), scale);
 	const baselines: (number | undefined)[] = [];
-	for (const { frame, index, owner, run } of placed) {
+	const ends: number[] = [];
+	for (const { frame, index, owner, rect, run } of placed
+		.map((entry) => ({ ...entry, rect: runRect(entry.frame, entry.run) }))
+		.toSorted(
+			(first, second) =>
+				first.index - second.index || first.rect.x - second.rect.x,
+		)) {
 		const style = runStyle(context, owner, context.opacityOf(owner));
-		paragraphs[index].runs.push({
+		const pad = padRun(context, style, rect.x - (ends[index] ?? content.x));
+		paragraphs[index].runs.push(...(pad ? [pad] : []), {
 			...style,
 			text: run.text.replace(/\t/g, "  "),
 		});
+		ends[index] = rect.x + rect.width;
 		baselines[index] ??= baselineOf(context, frame, run, style.font);
 	}
 
@@ -79,7 +89,6 @@ export function codeItem(context: ExtractContext, pre: Element) {
 		return;
 	}
 
-	const content = insetBox(box, context.contentInsets(pre), scale);
 	const measured = baselines.filter((baseline) => baseline !== undefined);
 	const leadingBlankLines = baselines.findIndex(
 		(baseline) => baseline !== undefined,

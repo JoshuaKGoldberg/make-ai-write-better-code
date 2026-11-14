@@ -580,6 +580,7 @@ export function computeStyles(
 	const styles = new Map<Element, ComputedStyle>();
 	const markers = new Map<Element, ComputedStyle>();
 	const pseudos: ComputedStyles["pseudos"] = new Map();
+	const counters = new Map<string, number>();
 	const supported = rules.filter((rule) =>
 		isSupported(document, rule.selector),
 	);
@@ -736,7 +737,7 @@ export function computeStyles(
 		return { declared, style: computed };
 	};
 
-	const walk = (element: Element, parent: StyleMap) => {
+	const walk = (element: Element, parent: StyleMap, shown = true) => {
 		const inlineStyle = element.getAttribute("style");
 		const { style } = resolve(
 			parent,
@@ -755,34 +756,65 @@ export function computeStyles(
 			);
 		}
 
-		if (
-			style.display !== "none" &&
-			!REPLACED_ELEMENTS.has(element.localName) &&
-			element.namespaceURI !== SVG_NAMESPACE
-		) {
-			for (const kind of ["before", "after"] as const) {
-				const applying = matching(element, pseudoRules[kind]);
-				if (!applying.length) {
-					continue;
-				}
+		const displayed = shown && style.display !== "none";
+		if (displayed) {
+			count(style);
+		}
 
-				const { declared, style: pseudoStyle } = resolve(style, applying);
-				const text = contentText(pseudoStyle.content, element);
-				if (text !== undefined && pseudoStyle.display !== "none") {
-					const css = declared
-						.filter(({ property }) => property !== "content")
-						.map(({ property, value }) => `${property}:${value}`)
-						.join(";");
-					pseudos.set(element, {
-						...pseudos.get(element),
-						[kind]: { css, style: pseudoStyle, text },
-					});
-				}
-			}
+		const generates =
+			displayed &&
+			!REPLACED_ELEMENTS.has(element.localName) &&
+			element.namespaceURI !== SVG_NAMESPACE;
+		if (generates) {
+			generate(element, style, "before");
 		}
 
 		for (const child of element.children) {
-			walk(child, style);
+			walk(child, style, displayed);
+		}
+
+		if (generates) {
+			generate(element, style, "after");
+		}
+	};
+
+	/** Applies a style's counter-reset, then its counter-increment, to the counters in document order (each counter has one scope). */
+	const count = (style: StyleMap) => {
+		for (const [name, value] of counterChanges(style["counter-reset"], 0)) {
+			counters.set(name, value);
+		}
+
+		for (const [name, value] of counterChanges(style["counter-increment"], 1)) {
+			counters.set(name, (counters.get(name) ?? 0) + value);
+		}
+	};
+
+	const generate = (
+		element: Element,
+		style: ComputedStyle,
+		kind: "after" | "before",
+	) => {
+		const applying = matching(element, pseudoRules[kind]);
+		if (!applying.length) {
+			return;
+		}
+
+		const { declared, style: pseudoStyle } = resolve(style, applying);
+		if (pseudoStyle.display === "none") {
+			return;
+		}
+
+		count(pseudoStyle);
+		const text = contentText(pseudoStyle.content, element, counters);
+		if (text !== undefined) {
+			const css = declared
+				.filter(({ property }) => !/^(?:content|counter-)/.test(property))
+				.map(({ property, value }) => `${property}:${value}`)
+				.join(";");
+			pseudos.set(element, {
+				...pseudos.get(element),
+				[kind]: { css, style: pseudoStyle, text },
+			});
 		}
 	};
 
@@ -868,13 +900,23 @@ function conditionMatches(
 			: results.every(Boolean);
 }
 
-function contentPart(node: csstree.CssNode, element: Element) {
+function contentPart(
+	node: csstree.CssNode,
+	element: Element,
+	counters: Map<string, number>,
+) {
 	switch (node.type) {
 		case "Function": {
 			const name = node.children.first;
-			return node.name === "attr" && name?.type === "Identifier"
+			if (name?.type !== "Identifier") {
+				return "";
+			}
+
+			return node.name === "attr"
 				? (element.getAttribute(name.name) ?? "")
-				: "";
+				: /^counters?$/.test(node.name)
+					? String(counters.get(name.name) ?? 0)
+					: "";
 		}
 		case "Identifier":
 			return QUOTES[node.name] ?? "";
@@ -885,7 +927,11 @@ function contentPart(node: csstree.CssNode, element: Element) {
 	}
 }
 
-function contentText(value: string | undefined, element: Element) {
+function contentText(
+	value: string | undefined,
+	element: Element,
+	counters: Map<string, number>,
+) {
 	if (!value || value === "none" || value === "normal") {
 		return undefined;
 	}
@@ -895,12 +941,28 @@ function contentText(value: string | undefined, element: Element) {
 	const altTextStart = nodes.findIndex(
 		(node) => node.type === "Operator" && node.value === "/",
 	);
-	const shown = nodes.slice(0, altTextStart < 0 ? undefined : altTextStart);
-	return shown.some(
-		(node) => node.type === "Function" && /^counters?$/.test(node.name),
-	)
-		? undefined
-		: shown.map((node) => contentPart(node, element)).join("");
+	return nodes
+		.slice(0, altTextStart < 0 ? undefined : altTextStart)
+		.map((node) => contentPart(node, element, counters))
+		.join("");
+}
+
+/** A counter-reset or counter-increment's counters and the values they set or add, `fallback` where it gives none. */
+function counterChanges(value: string | undefined, fallback: number) {
+	const changes: [string, number][] = [];
+	for (const part of splitTopLevel(value ?? "none", " ")) {
+		const amount = /^(?:[-+\d.]|calc\()/.test(part)
+			? evaluateArithmetic(part)
+			: undefined;
+		const last = changes.at(-1);
+		if (amount !== undefined && last) {
+			last[1] = amount;
+		} else if (part !== "none") {
+			changes.push([part, fallback]);
+		}
+	}
+
+	return changes;
 }
 
 function evaluateArithmetic(expression: string) {

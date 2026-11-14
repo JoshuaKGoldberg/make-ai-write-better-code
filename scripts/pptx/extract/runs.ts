@@ -35,7 +35,7 @@ const COLLAPSIBLE_SPACE = /[ \t\n\r\f]+/g;
 /** Gaps between runs narrower than this, in px, are kerning rather than spacing. */
 const MIN_SPACER_GAP = 0.75;
 
-const NO_BREAK_SPACE = "\u00A0";
+export const NO_BREAK_SPACE = "\u00A0";
 
 const PRESERVED_NEWLINES = /^(?:pre|pre-wrap|pre-line|break-spaces)$/;
 
@@ -126,7 +126,6 @@ export function runsToParagraph(
 		: context.clipOf(source, true);
 	const runs: Run[] = [];
 	const baselines: number[] = [];
-	const spacer = context.fonts.spacer();
 	const matchSource = sourceMatcher(sourceTextOf(context, source));
 	const padsLineStarts = /^(?:justify|left)$/.test(alignOf(context, source));
 	let previous: LaidOutRun | undefined;
@@ -158,20 +157,7 @@ export function runsToParagraph(
 				: padsLineStarts
 					? run.x
 					: 0) * frame.scale;
-		const pad: Run | undefined =
-			offset > MIN_SPACER_GAP
-				? {
-						...style,
-						bold: false,
-						font: spacer.font,
-						gradient: undefined,
-						letterSpacing: offset - spacer.advance * style.size,
-						pad: true,
-						stroke: undefined,
-						text: NO_BREAK_SPACE,
-						transparency: 100,
-					}
-				: undefined;
+		const pad = padRun(context, style, offset);
 		previous = run;
 		if (!style.script) {
 			const baseline = baselineOf(context, frame, run, style.font);
@@ -239,6 +225,28 @@ export function runsToParagraph(
 	};
 }
 
+/** A spacer run as wide as a gap between runs, in a run's style; undefined when the gap is only kerning. */
+export function padRun(
+	context: ExtractContext,
+	style: Omit<Run, "text">,
+	offset: number,
+): Run | undefined {
+	const spacer = context.fonts.spacer();
+	return offset > MIN_SPACER_GAP
+		? {
+				...style,
+				bold: false,
+				font: spacer.font,
+				gradient: undefined,
+				letterSpacing: offset - spacer.advance * style.size,
+				pad: true,
+				stroke: undefined,
+				text: NO_BREAK_SPACE,
+				transparency: 100,
+			}
+		: undefined;
+}
+
 export function runStyle(
 	context: ExtractContext,
 	element: Element,
@@ -261,7 +269,7 @@ export function runStyle(
 		style["text-shadow"],
 		(length) => context.resolve(element, length),
 		style.color,
-	).at(0);
+	).at(0)?.shadow;
 	const decorating = decoratingStylesOf(context, element);
 	return {
 		bold,

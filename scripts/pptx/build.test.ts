@@ -73,8 +73,13 @@ describe(buildPptx, () => {
 		});
 	});
 
-	it("lists problems by slide, then click", () => {
+	it("lists problems by slide, then click, and a global layer's once", () => {
 		expect(result.problems).toEqual([
+			{
+				message:
+					"Couldn't render the component UnregisteredInGlobalTop: Vue couldn't resolve it.",
+				severity: "error",
+			},
 			{
 				message:
 					"Couldn't find the font Nowhere Sans, so its text uses a fallback font.",
@@ -283,6 +288,11 @@ Error on slide 21, click 1: Couldn't render the click: It failed on a click.
 		).toEqual({
 			output: clicks,
 			problems: [
+				{
+					message:
+						"Couldn't render the component UnregisteredInGlobalTop: Vue couldn't resolve it.",
+					severity: "error",
+				},
 				{
 					message:
 						"Couldn't find the font Nowhere Sans, so its text uses a fallback font.",

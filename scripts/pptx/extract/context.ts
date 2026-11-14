@@ -1,7 +1,7 @@
 import type { Assets } from "../assets.ts";
 import type { FontBook } from "../fonts.ts";
 import type { LaidOutRuns, Layout } from "../layout.ts";
-import type { Canvas, ExtractedItem } from "../model.ts";
+import type { Canvas, ExtractedItem, Shadow } from "../model.ts";
 import type { Clip, Insets, Side } from "./geometry.ts";
 
 import {
@@ -28,6 +28,8 @@ export type ExtractContext = ReturnType<typeof createExtractContext>;
 export interface ExtractOptions {
 	/** Loaded images, by the URLs pages use. */
 	assets: Assets;
+	/** The slide background's average color, which shadows show against. */
+	backdrop: string;
 	canvas: Canvas;
 	fonts: FontBook;
 }
@@ -45,9 +47,22 @@ type WithoutDerived<Item> = Item extends unknown
 
 export const MIN_OPACITY = 0.05;
 
+/** px an item may fall short of its frame's (clip's) edges and still fill it, for layout rounding, and below it for the line box an inline image leaves. */
+const FRAME_TOLERANCE = 0.5;
+const FRAME_BOTTOM_GAP = 8;
+
 const GENERATED_CONTENT = new Set<string>(Object.values(GENERATED_ELEMENTS));
 
 const SEPARATE_ITEM_ELEMENTS = new Set(["img", "svg"]);
+
+/** Properties that, set, make an element the containing block of its absolutely and fixed positioned descendants. */
+const CONTAINING_PROPERTIES = [
+	"filter",
+	"rotate",
+	"scale",
+	"transform",
+	"translate",
+];
 
 const insetsOf = (widthOf: (side: Side) => number): Insets => ({
 	bottom: widthOf("bottom"),
@@ -77,12 +92,11 @@ function clipItem(item: ItemInput, clip: Clip): ItemInput | undefined {
 		return item;
 	}
 
-	const fills = sameBox(box, {
-		height: clip.bottom - clip.top,
-		width: clip.right - clip.left,
-		x: clip.left,
-		y: clip.top,
-	});
+	const fills =
+		box.x - clip.left < FRAME_TOLERANCE &&
+		box.y - clip.top < FRAME_TOLERANCE &&
+		clip.right - (box.x + box.width) < FRAME_TOLERANCE &&
+		clip.bottom - (box.y + box.height) < FRAME_BOTTOM_GAP;
 	switch (item.kind) {
 		case "box":
 			return {
@@ -104,6 +118,7 @@ function clipItem(item: ItemInput, clip: Clip): ItemInput | undefined {
 				box,
 				crop: sameBox(box, drawn) ? undefined : drawn,
 				radius: fills ? Math.max(item.radius, clip.radius) : item.radius,
+				shadow: fills ? (item.shadow ?? clip.shadow) : item.shadow,
 			};
 		}
 		case "raster":
@@ -117,10 +132,11 @@ export const isMath = (element: Element) => element.classList.contains("katex");
 
 export function createExtractContext(
 	layout: Layout,
-	{ assets, canvas, fonts }: ExtractOptions,
+	{ assets, backdrop, canvas, fonts }: ExtractOptions,
 ) {
 	const { boxes, byId, document, looseRuns, markers, runs, styles } = layout;
 	const items: ExtractedItem[] = [];
+	const framedShadows = new Map<Element, Shadow>();
 	const problems: string[] = [];
 	const styleOf = (element: Element) => styles.get(element) ?? INITIAL_STYLE;
 	const idOf = (element: Element) => element.getAttribute(ID) ?? "";
@@ -226,20 +242,25 @@ export function createExtractContext(
 	/** The area overflow clips an element to: its ancestors' (from its containing block up, when it's out of flow), and its own too for its content. */
 	const clipOf = (element: Element, ownContent: boolean) => {
 		let clip: Clip | undefined;
-		let escaping = false;
+		let escaping: string | undefined;
 		for (
 			let current: Element | null = element;
 			current && current.id !== "slide-content";
 			current = current.parentElement
 		) {
 			const style = styleOf(current);
-			const containing = !escaping || (style.position ?? "static") !== "static";
+			const containing =
+				escaping === undefined ||
+				CONTAINING_PROPERTIES.some(
+					(property) => (style[property] ?? "none") !== "none",
+				) ||
+				(escaping === "absolute" && (style.position ?? "static") !== "static");
 			if (containing && (current !== element || ownContent)) {
 				clip = clipWithin(current, clip);
 			}
 
 			if (containing) {
-				escaping = isOutOfFlow(style);
+				escaping = isOutOfFlow(style) ? style.position : undefined;
 			}
 		}
 
@@ -252,8 +273,10 @@ export function createExtractContext(
 			style.overflow ?? "visible",
 			" ",
 		);
-		const clipsX = (style["overflow-x"] ?? overflowX) !== "visible";
-		const clipsY = (style["overflow-y"] ?? overflowY) !== "visible";
+		const x = style["overflow-x"] ?? overflowX;
+		const y = style["overflow-y"] ?? overflowY;
+		const clipsX = x !== "visible" || (y !== "visible" && y !== "clip");
+		const clipsY = y !== "visible" || (x !== "visible" && x !== "clip");
 		const laidOut = boxOf(element);
 		if (!laidOut || (!clipsX && !clipsY)) {
 			return clip;
@@ -281,6 +304,7 @@ export function createExtractContext(
 			right: clipsX
 				? Math.min(bounds.right, padding.x + padding.width)
 				: bounds.right,
+			shadow: clip ? clip.shadow : framedShadows.get(element),
 			top: clipsY ? Math.max(bounds.top, padding.y) : bounds.top,
 		};
 	};
@@ -328,6 +352,7 @@ export function createExtractContext(
 
 	return {
 		assets,
+		backdrop,
 		borderInsets,
 		boxAt,
 		boxOf,
@@ -337,6 +362,8 @@ export function createExtractContext(
 		contentInsets,
 		drawsApart,
 		fonts,
+		/** Shadows of elements whose own boxes can't show them, for an image they frame (clip) to take. */
+		framedShadows,
 		idOf,
 		isInline,
 		items,

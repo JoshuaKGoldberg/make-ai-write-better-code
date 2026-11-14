@@ -188,13 +188,13 @@ describe(createSlideRenderer, () => {
 		);
 	});
 
-	it("renders Toc and Link entries as links without problems when a slide has them", async () => {
+	it("renders Toc, Link, and RouterLink entries as slide links without problems when a slide has them", async () => {
 		expect(await renderSlideTitled("Navigation")).toEqual(
 			expect.objectContaining({
 				problems: [],
 				states: [
 					expect.stringMatching(
-						/<a href="#\/22"><!--\[--><div><p>Navigation<\/p><\/div><!--\]--><\/a>.*<a href="#2"><!--\[-->Go to Lists<!--\]--><\/a>/s,
+						/<a href="#\/22"><!--\[--><div><p>Navigation<\/p><\/div><!--\]--><\/a>.*<a href="#2"><!--\[-->Go to Lists<!--\]--><\/a>.*<a href="#\/3">Go to Colors<\/a>/s,
 					),
 				],
 			}),
@@ -227,9 +227,9 @@ describe(createSlideRenderer, () => {
 		);
 	});
 
-	it("renders components and directives the deck's setup and floating-vue register", async () => {
+	it("renders what the deck's setup and floating-vue register, at the slide's route, when the setup awaits the router", async () => {
 		expect((await renderSlideTitled("Deck Setup")).states[0]).toContain(
-			'<p>Registered in setup</p><p class="themed">Themed</p><p><span>Tipped</span></p>',
+			'<p>Registered in setup at /20</p><p class="themed">Themed</p><p><span>Tipped</span></p>',
 		);
 	});
 

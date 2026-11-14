@@ -26,6 +26,9 @@ const STATIC_LAYER = "data-pptx-static";
 
 const RASTER_SCALE = 2;
 
+/** px balanced columns get beyond their items' measured heights, which run a little under what the final layout gives them. */
+const COLUMN_HEIGHT_SLACK = 1;
+
 const MAX_PNG_SIDE = 4096;
 
 export const ZERO_WIDTH_SPACE = "\u200B";
@@ -635,7 +638,7 @@ function shimColumnsBalanced(
 
 		appendStyle(
 			element,
-			`flex-wrap:wrap;column-gap:${gap};height:${String(Math.ceil(high * 100) / 100)}px;align-content:flex-start`,
+			`flex-wrap:wrap;column-gap:${gap};height:${String(Math.ceil((high + COLUMN_HEIGHT_SLACK) * 100) / 100)}px;align-content:flex-start`,
 		);
 	}
 }

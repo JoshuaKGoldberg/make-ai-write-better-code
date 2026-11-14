@@ -1,14 +1,15 @@
 import type { LaidOutBox } from "../layout.ts";
-import type { Box, Canvas } from "../model.ts";
+import type { Box, Canvas, Shadow } from "../model.ts";
 
 import { splitTopLevel } from "../css.ts";
 
-/** The area overflow clips content to, in slide px (infinite along an axis that doesn't clip), and the clipping box's corner radius. */
+/** The area overflow clips content to, in slide px (infinite along an axis that doesn't clip), and the clipping box's corner radius and the shadow it can't show itself. */
 export interface Clip {
 	bottom: number;
 	left: number;
 	radius: number;
 	right: number;
+	shadow?: Shadow;
 	top: number;
 }
 

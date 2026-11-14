@@ -9,7 +9,7 @@ import {
 } from "./extract/context.ts";
 import { geometryOf } from "./extract/geometry.ts";
 import { imageItem, rasterItem } from "./extract/images.ts";
-import { isListAside, isListElement, listItem } from "./extract/lists.ts";
+import { isListAside, isTextList, listItem } from "./extract/lists.ts";
 import { svgItems } from "./extract/svg.ts";
 import { codeItem, inlinePills, textItem } from "./extract/text.ts";
 import { isBackgroundOnly } from "./layout.ts";
@@ -125,7 +125,7 @@ export function extractState(layout: Layout, options: ExtractOptions) {
 			[...element.children].filter(isDense).length !== 1
 		) {
 			rasterItem(context, element);
-		} else if (isListElement(element)) {
+		} else if (isTextList(context, element)) {
 			listItem(context, element, opacity);
 			walkApart(
 				element,

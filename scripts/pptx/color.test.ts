@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	colorDistance,
 	isGradient,
 	parseColor,
 	parseLinearGradient,
@@ -327,35 +328,128 @@ describe(parseShadows, () => {
 	it.each([
 		[
 			"0 0 8px #fff",
-			[{ blur: 8, color: "FFFFFF", offsetX: 0, offsetY: 0, transparency: 0 }],
+			[
+				{
+					shadow: {
+						blur: 8,
+						color: "FFFFFF",
+						offsetX: 0,
+						offsetY: 0,
+						transparency: 0,
+					},
+					spread: 0,
+				},
+			],
 		],
 		[
 			"red 1px 2px",
-			[{ blur: 0, color: "FF0000", offsetX: 1, offsetY: 2, transparency: 0 }],
+			[
+				{
+					shadow: {
+						blur: 0,
+						color: "FF0000",
+						offsetX: 1,
+						offsetY: 2,
+						transparency: 0,
+					},
+					spread: 0,
+				},
+			],
 		],
 		[
 			"1px 1px 2px rgb(0 0 0 / 50%), 4px 4px blue",
 			[
-				{ blur: 2, color: "000000", offsetX: 1, offsetY: 1, transparency: 50 },
-				{ blur: 0, color: "0000FF", offsetX: 4, offsetY: 4, transparency: 0 },
+				{
+					shadow: {
+						blur: 2,
+						color: "000000",
+						offsetX: 1,
+						offsetY: 1,
+						transparency: 50,
+					},
+					spread: 0,
+				},
+				{
+					shadow: {
+						blur: 0,
+						color: "0000FF",
+						offsetX: 4,
+						offsetY: 4,
+						transparency: 0,
+					},
+					spread: 0,
+				},
 			],
 		],
 		[
 			"2px 3px",
-			[{ blur: 0, color: "123456", offsetX: 2, offsetY: 3, transparency: 0 }],
+			[
+				{
+					shadow: {
+						blur: 0,
+						color: "123456",
+						offsetX: 2,
+						offsetY: 3,
+						transparency: 0,
+					},
+					spread: 0,
+				},
+			],
 		],
 		[
 			"0 0 #0000, 0 1px 3px 0 rgb(0 0 0 / 0.1), inset 0 2px 4px red",
-			[{ blur: 3, color: "000000", offsetX: 0, offsetY: 1, transparency: 90 }],
+			[
+				{
+					shadow: {
+						blur: 3,
+						color: "000000",
+						offsetX: 0,
+						offsetY: 1,
+						transparency: 90,
+					},
+					spread: 0,
+				},
+			],
+		],
+		[
+			"0 0 0 2px red",
+			[
+				{
+					shadow: {
+						blur: 0,
+						color: "FF0000",
+						offsetX: 0,
+						offsetY: 0,
+						transparency: 0,
+					},
+					spread: 2,
+				},
+			],
 		],
 	])("parses %j", (value, expected) => {
 		expect(parseShadows(value, toPixels, "#123456")).toEqual(expected);
 	});
 
-	it.each(["none", "0 0 4px transparent", "1px red", "0 0 0 2px red"])(
+	it.each(["none", "0 0 4px transparent", "1px red", "0 0 0 0 red"])(
 		"parses no layers from %j",
 		(value) => {
 			expect(parseShadows(value, toPixels, "#123456")).toEqual([]);
 		},
 	);
+});
+
+describe(colorDistance, () => {
+	it("measures 0 when two colors are the same", () => {
+		expect(colorDistance("00A3FF", "00A3FF")).toBe(0);
+	});
+
+	it("measures 1 when the colors are black and white", () => {
+		expect(colorDistance("000000", "FFFFFF")).toBeCloseTo(1);
+	});
+
+	it("measures a dark background closer to black than to a bright blue", () => {
+		expect(colorDistance("070B11", "000000")).toBeLessThan(
+			colorDistance("070B11", "00A3FF"),
+		);
+	});
 });

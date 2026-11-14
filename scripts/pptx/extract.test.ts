@@ -61,6 +61,7 @@ describe(extractState, () => {
 			);
 			return extractState(laidOut, {
 				assets,
+				backdrop: "FFFFFF",
 				canvas,
 				fonts: createFontBook({ assets, fonts: fontOptions, sheets }),
 			});
@@ -753,9 +754,9 @@ describe(extractState, () => {
 		]);
 	});
 
-	it("exports a twoslash query's type below its line when the query shows", async () => {
+	it("exports a twoslash query's type below its line, under its token, when the query shows", async () => {
 		const { items } = await extract(
-			`<pre><code><span class="line"><span>let </span><span><span>name</span><span class="twoslash-popup-container"><div class="twoslash-popup-arrow"></div><code class="twoslash-popup-code"><span>let name: string</span></code></span></span><span> = ""</span></span></code></pre>`,
+			`<pre><code><span class="line"><span>let </span><span><span>name</span><span class="twoslash-popup-container" style="position: absolute"><div class="twoslash-popup-arrow"></div><code class="twoslash-popup-code"><span>let name: string</span></code></span></span><span> = ""</span></span></code></pre>`,
 		);
 
 		expect(items).toEqual([
@@ -768,7 +769,12 @@ describe(extractState, () => {
 							expect.objectContaining({ text: ' = ""' }),
 						],
 					},
-					{ runs: [expect.objectContaining({ text: "let name: string" })] },
+					{
+						runs: [
+							expect.objectContaining({ pad: true }),
+							expect.objectContaining({ text: "let name: string" }),
+						],
+					},
 				],
 			}),
 		]);
@@ -1011,6 +1017,310 @@ describe(extractState, () => {
 				paragraphs: [
 					expect.objectContaining({ number: 3 }),
 					expect.objectContaining({ number: 4 }),
+				],
+			}),
+		]);
+	});
+
+	it("colors a list's markers when an item starts with a spacer", async () => {
+		const { items } = await extract(
+			`<ul><li><code style="padding: 0 4px; background: #eee">x</code> text</li></ul>`,
+		);
+
+		expect(items).toContainEqual(
+			expect.objectContaining({ bulletColor: "000000", kind: "list" }),
+		);
+	});
+
+	it("leaves a list's markers uncolored when they match the text", async () => {
+		const { items } = await extract(`<ul><li>text</li></ul>`);
+
+		expect(items).toEqual([
+			expect.objectContaining({ bulletColor: undefined, kind: "list" }),
+		]);
+	});
+
+	it("gives an item a spacer paragraph to mark when it starts with a block", async () => {
+		const { items } = await extract(
+			`<ol><li>one</li><li><div style="height: 20px; background: red"></div></li><li>three</li></ol>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "list",
+				paragraphs: [
+					expect.objectContaining({
+						bullet: true,
+						number: 1,
+						runs: [expect.objectContaining({ text: "one" })],
+					}),
+					expect.objectContaining({
+						bullet: true,
+						number: 2,
+						runs: [
+							expect.objectContaining({
+								pad: true,
+								text: "\u00A0",
+								transparency: 100,
+							}),
+						],
+					}),
+					expect.objectContaining({
+						bullet: true,
+						number: 3,
+						runs: [expect.objectContaining({ text: "three" })],
+					}),
+				],
+			}),
+			expect.objectContaining({ fill: { color: "FF0000", transparency: 0 } }),
+		]);
+	});
+
+	it("keeps a list as one list when click animations offset its hidden items", async () => {
+		const { items } = await extract(
+			`<ul><li>one</li><li style="translate: 20px 0; opacity: 0">two</li><li style="scale: 0.9; opacity: 0">three</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				key: "ul0#list",
+				paragraphs: [
+					expect.objectContaining({ visible: true }),
+					expect.objectContaining({ visible: false }),
+					expect.objectContaining({ visible: false }),
+				],
+			}),
+		]);
+	});
+
+	it("leaves out a list item and its number when it isn't displayed", async () => {
+		const { items } = await extract(
+			`<ol><li style="display: none">zero</li><li>one</li><li style="display: none">mid</li><li>two</li></ol>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					expect.objectContaining({
+						number: 1,
+						runs: [expect.objectContaining({ text: "one" })],
+					}),
+					expect.objectContaining({
+						number: 2,
+						runs: [expect.objectContaining({ text: "two" })],
+					}),
+				],
+			}),
+		]);
+	});
+
+	it.each([
+		[2, [5, 5]],
+		[3, [4, 4, 2]],
+	])(
+		"balances ten items into %i columns when their line height is fractional",
+		async (count, lengths) => {
+			const { items } = await extract(
+				`<div style="column-count: ${String(count)}"><ol style="line-height: 1.8em"><li>1</li><li>2</li><li>3</li><li>4</li><li>5</li><li>6</li><li>7</li><li>8</li><li>9</li><li>10</li></ol></div>`,
+			);
+
+			expect(
+				items.map((item) => "paragraphs" in item && item.paragraphs.length),
+			).toEqual(lengths);
+		},
+	);
+
+	it("exports a list's items as cards when its grid lays them side by side", async () => {
+		const { items } = await extract(
+			`<ul style="display: grid; grid-template-columns: 1fr 1fr; list-style: none"><li style="background: #eee">A</li><li style="background: #eee">B</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ key: "ul0/li0#box", kind: "box" }),
+			expect.objectContaining({
+				kind: "text",
+				paragraphs: [{ runs: [expect.objectContaining({ text: "A" })] }],
+			}),
+			expect.objectContaining({ key: "ul0/li1#box", kind: "box" }),
+			expect.objectContaining({
+				kind: "text",
+				paragraphs: [{ runs: [expect.objectContaining({ text: "B" })] }],
+			}),
+		]);
+	});
+
+	it("exports a list's items as a list when its grid stacks them", async () => {
+		const { items } = await extract(
+			`<ul style="display: grid; gap: 4px"><li>A</li><li>B</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ key: "ul0#list", kind: "list" }),
+		]);
+	});
+
+	it("paints an item's highlight beneath its list when the item has a background", async () => {
+		const { items } = await extract(
+			`<ul><li style="background: yellow">a</li><li>b</li></ul>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				fill: { color: "FFFF00", transparency: 0 },
+				key: "ul0/li0#box",
+			}),
+			expect.objectContaining({ key: "ul0#list" }),
+		]);
+	});
+
+	it("leaves out a list's paragraph when its ancestor's overflow clips all of it", async () => {
+		const { items } = await extract(
+			`<div style="height: 15px; overflow: hidden"><ul style="margin: 0; line-height: 15px"><li>one</li><li>two</li></ul></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					expect.objectContaining({
+						runs: [expect.objectContaining({ text: "one" })],
+					}),
+				],
+			}),
+		]);
+	});
+
+	it("clips text vertically when only overflow-x hides", async () => {
+		const { items } = await extract(
+			`<div style="height: 30px; overflow-x: hidden"><p style="line-height: 15px">one<br>two<br>three</p></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ text: "one" }),
+							expect.objectContaining({ text: "two" }),
+						],
+					},
+				],
+			}),
+		]);
+	});
+
+	it("doesn't clip a fixed box when a positioned ancestor's overflow clips", async () => {
+		const { items } = await extract(
+			`<div style="position: relative; width: 50px; height: 20px; overflow: hidden"><div style="position: fixed; width: 100px; height: 100px; background: red"></div></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ box: { height: 100, width: 100, x: 0, y: 0 } }),
+		]);
+	});
+
+	it("clips an absolutely positioned box when a transformed ancestor's overflow clips", async () => {
+		const { items } = await extract(
+			`<div style="width: 50px; height: 20px; overflow: hidden; transform: translateX(0)"><div style="position: absolute; width: 100px; height: 100px; background: red"></div></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ box: { height: 20, width: 50, x: 0, y: 0 } }),
+		]);
+	});
+
+	it("gives an image its frame's shadow and corners when a frame with no fill clips it", async () => {
+		const { items } = await extract(
+			`<div style="width: 40px; overflow: hidden; border-radius: 6px; box-shadow: 0 2px 4px blue"><img src="/photo.png" style="width: 40px"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "image",
+				radius: 6,
+				shadow: {
+					blur: 4,
+					color: "0000FF",
+					offsetX: 0,
+					offsetY: 2,
+					transparency: 0,
+				},
+			}),
+		]);
+	});
+
+	it("gives a box no shadow when its fill is mostly transparent", async () => {
+		const { items } = await extract(
+			`<div style="width: 10px; height: 10px; background: rgb(0 0 0 / 10%); box-shadow: 0 2px 4px blue"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({ kind: "box", shadow: undefined }),
+		]);
+	});
+
+	it("gives a box the shadow layer that stands out most from the slide's background", async () => {
+		const { items } = await extract(
+			`<div style="width: 10px; height: 10px; background: red; box-shadow: 0 0 40px rgb(0 163 255 / 9%), 0 4px 8px rgb(0 0 0 / 30%)"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				shadow: {
+					blur: 8,
+					color: "000000",
+					offsetX: 0,
+					offsetY: 4,
+					transparency: 70,
+				},
+			}),
+		]);
+	});
+
+	it("outlines a box with its rings when its box-shadow layers only spread", async () => {
+		const { items } = await extract(
+			`<div style="width: 20px; height: 20px; border-radius: 4px; box-shadow: 0 0 0 2px white, 0 0 0 4px red"></div>`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				border: { color: "FF0000", transparency: 0, width: 4 },
+				box: { height: 24, width: 24, x: -2, y: -2 },
+				kind: "box",
+				radius: 6,
+			}),
+			expect.objectContaining({
+				border: { color: "FFFFFF", transparency: 0, width: 2 },
+				box: { height: 22, width: 22, x: -1, y: -1 },
+				kind: "box",
+				radius: 5,
+			}),
+		]);
+	});
+
+	it("exports a code line's number before its text when lines are numbered", async () => {
+		const { items } = await extract(
+			`<pre><code><span class="line"><span>first</span></span>\n<span class="line"><span>second</span></span></code></pre>`,
+			`code { counter-reset: step } .line::before { content: counter(step); counter-increment: step; display: inline-block; width: 20px; margin-right: 10px }`,
+		);
+
+		expect(items).toEqual([
+			expect.objectContaining({
+				kind: "code",
+				paragraphs: [
+					{
+						runs: [
+							expect.objectContaining({ text: "1" }),
+							expect.objectContaining({ pad: true }),
+							expect.objectContaining({ text: "first" }),
+						],
+					},
+					{
+						runs: [
+							expect.objectContaining({ text: "2" }),
+							expect.objectContaining({ pad: true }),
+							expect.objectContaining({ text: "second" }),
+						],
+					},
 				],
 			}),
 		]);

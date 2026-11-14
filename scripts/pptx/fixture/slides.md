@@ -346,3 +346,5 @@ clicksStart: 2
 <Toc mode="onlyCurrentTree" />
 
 <Link to="2">Go to Lists</Link>
+
+<RouterLink to="/3">Go to Colors</RouterLink>

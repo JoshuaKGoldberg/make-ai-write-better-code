@@ -115,7 +115,7 @@ const SCRIPT_SCALE = 1.12;
 /** PowerPoint's single line spacing, as a multiple of the font size. */
 const SINGLE_LINE_PITCH = 1.2;
 
-/** pptxgenjs swaps a zero shadow blur or offset for its defaults, so zero is written as this. */
+/** pptxgenjs swaps a zero shadow blur or offset, or a zero bullet indent, for its defaults, so zero is written as this. */
 const NEAR_ZERO = 0.01;
 
 /** pptxgenjs swaps a 0° shadow angle for its default and only writes whole degrees up to 359, so 0° is written as this. */
@@ -186,7 +186,7 @@ const UNDERLINE_STYLES = {
 } as const satisfies Record<Underline["style"], string>;
 
 /** Run properties neighboring runs may differ in and still join into one. */
-const JOINED_PROPERTIES = ["lineBreak", "text"];
+const JOINED_PROPERTIES = ["lineBreak", "text"] satisfies (keyof Run)[];
 
 /** Run properties whitespace doesn't show, so runs that differ only in them still join where one is whitespace. */
 const UNSEEN_ON_WHITESPACE = [
@@ -197,7 +197,7 @@ const UNSEEN_ON_WHITESPACE = [
 	"stroke",
 	"transparency",
 	"upper",
-];
+] satisfies (keyof Run)[];
 
 /** How many roman numerals each decimal digit takes, as in IV or VIII. */
 const ROMAN_LENGTHS = [0, 1, 2, 3, 2, 1, 2, 3, 4, 2];
@@ -797,7 +797,7 @@ function listParagraphs(
 		const marker =
 			paragraph.bullet && visible ? markerFor(paragraph.marker) : undefined;
 		const indent = Math.max(
-			1,
+			NEAR_ZERO,
 			points((markerGap + paragraph.indent) / (level + 1)),
 		);
 		const start = numbering(
@@ -933,11 +933,17 @@ export function markerFor(listStyle: string): Marker | undefined {
 	return { kind: "number", style: NUMBER_STYLES[listStyle] ?? "arabicPeriod" };
 }
 
-/** Room for a list's outermost markers in their hanging indent: for its widest number and period, or for a bullet. */
+/** Room for a list's outermost markers in their hanging indent: for its widest number and period, for a bullet, or none when they show none. */
 function markerGapOf(list: ListItem, size: number) {
 	const outermost = list.paragraphs.filter(({ level }) => level === 0);
-	const first = outermost.at(0);
-	return first && markerFor(first.marker)?.kind === "number"
+	const first = outermost.find(
+		({ bullet, marker }) => bullet && markerFor(marker),
+	);
+	if (!first) {
+		return 0;
+	}
+
+	return markerFor(first.marker)?.kind === "number"
 		? (Math.max(
 				...outermost.map(({ marker, number }) => numberLength(number, marker)),
 			) *

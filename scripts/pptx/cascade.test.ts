@@ -688,7 +688,7 @@ describe(computeStyles, () => {
 		expect(pseudosOf("p")?.after?.text).toBe(text);
 	});
 
-	it.each(["none", "normal", `counter(item) "."`])(
+	it.each(["none", "normal"])(
 		"generates nothing when content is %s",
 		(content) => {
 			const { pseudosOf } = stylesOf(
@@ -698,6 +698,30 @@ describe(computeStyles, () => {
 			expect(pseudosOf("p")).toBeUndefined();
 		},
 	);
+
+	it("counts content when counters reset and increment it", () => {
+		const { computed, element } = stylesOf(
+			`<code style="--start: 10"><span class="line">a</span><span class="line">b</span></code>`,
+			`code { counter-reset: step; counter-increment: step calc(var(--start, 1) - 1) } .line::before { content: counter(step) "."; counter-increment: step }`,
+		);
+		expect(
+			[...element("code").children].map(
+				(line) => computed.pseudos.get(line)?.before?.text,
+			),
+		).toEqual(["10.", "11."]);
+	});
+
+	it("counts no content when an element isn't displayed", () => {
+		const { computed, element } = stylesOf(
+			`<p>a</p><p style="display: none">b</p><p>c</p>`,
+			`p::before { content: counter(item); counter-increment: item }`,
+		);
+		expect(
+			[...element("body").children].map(
+				(paragraph) => computed.pseudos.get(paragraph)?.before?.text,
+			),
+		).toEqual(["1", undefined, "2"]);
+	});
 
 	it("generates no content when the element isn't displayed", () => {
 		const { pseudosOf } = stylesOf(

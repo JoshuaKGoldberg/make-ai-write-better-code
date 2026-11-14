@@ -5,6 +5,7 @@ import type { Geometry, Side } from "./geometry.ts";
 
 import { cssUrls, imageSize } from "../assets.ts";
 import {
+	colorDistance,
 	hasVisibleStop,
 	isGradient,
 	MIN_VISIBLE_ALPHA,
@@ -27,6 +28,9 @@ import {
 } from "./geometry.ts";
 
 const TILE_COVERAGE_TOLERANCE = 0.5;
+
+/** PowerPoint fades a shape's shadow by its fill's opacity, so a shadow beneath a fill more transparent than this (0-100) would barely show. */
+const MAX_SHADOWED_FILL_TRANSPARENCY = 50;
 
 type BoxStyle = NonNullable<ReturnType<typeof boxStyle>>;
 
@@ -96,7 +100,10 @@ export function boxItems(
 			border: layered ? undefined : border,
 			fill: style.fill,
 			key: `${key}#box`,
-			shadow: style.fill && style.shadow && scaledShadow(style.shadow, scale),
+			shadow:
+				style.shadow && showsShadow(style.fill)
+					? scaledShadow(style.shadow, scale)
+					: undefined,
 		});
 	}
 
@@ -194,28 +201,27 @@ export function boxStyle(
 	};
 }
 
-/** An element's most visible outer box-shadow layer, the one with the farthest reach, faded by an opacity. */
+/** An element's most visible outer box-shadow layer, faded by an opacity: the one whose color stands out most from the slide's background for its alpha, then the one reaching farthest. */
 export function boxShadowOf(
 	context: ExtractContext,
 	element: Element,
 	opacity: number,
 ) {
-	const style = context.styleOf(element);
+	const visibilityOf = ({ color, transparency }: Shadow) =>
+		(1 - transparency / 100) * colorDistance(color, context.backdrop);
 	const reachOf = ({ blur, offsetX, offsetY }: Shadow) =>
 		blur + Math.hypot(offsetX, offsetY);
-	const shadow = parseShadows(
-		style["box-shadow"] ?? "none",
-		(length) => context.resolve(element, length),
-		style.color,
-	)
-		.toSorted((first, second) => reachOf(second) - reachOf(first))
+	const shadow = shadowLayersOf(context, element)
+		.flatMap(({ shadow }) =>
+			shadow.blur || shadow.offsetX || shadow.offsetY ? [shadow] : [],
+		)
+		.toSorted(
+			(first, second) =>
+				visibilityOf(second) - visibilityOf(first) ||
+				reachOf(second) - reachOf(first),
+		)
 		.at(0);
-	return (
-		shadow && {
-			...shadow,
-			transparency: transparencyOf(1 - shadow.transparency / 100, opacity),
-		}
-	);
+	return shadow && fadedShadow(shadow, opacity);
 }
 
 export const scaledShadow = (shadow: Shadow, scale: number) => ({
@@ -224,6 +230,37 @@ export const scaledShadow = (shadow: Shadow, scale: number) => ({
 	offsetX: shadow.offsetX * scale,
 	offsetY: shadow.offsetY * scale,
 });
+
+const fadedShadow = (shadow: Shadow, opacity: number) => ({
+	...shadow,
+	transparency: transparencyOf(1 - shadow.transparency / 100, opacity),
+});
+
+const shadowLayersOf = (context: ExtractContext, element: Element) => {
+	const style = context.styleOf(element);
+	return parseShadows(
+		style["box-shadow"] ?? "none",
+		(length) => context.resolve(element, length),
+		style.color,
+	);
+};
+
+/** Whether PowerPoint shows a shadow beneath a fill: one that's mostly opaque. */
+function showsShadow(fill: Fill | undefined) {
+	if (!fill) {
+		return false;
+	}
+
+	const transparencies =
+		"gradient" in fill
+			? fill.gradient.stops.map(({ transparency }) => transparency)
+			: [fill.transparency];
+	return (
+		transparencies.reduce((sum, transparency) => sum + transparency, 0) /
+			transparencies.length <=
+		MAX_SHADOWED_FILL_TRANSPARENCY
+	);
+}
 
 export const clipsToText = (style: ComputedStyle) =>
 	(style["-webkit-background-clip"] ?? style["background-clip"]).includes(
@@ -252,14 +289,58 @@ export function paintItems(
 		return undefined;
 	}
 
-	return style
-		? boxItems(style, {
-				...geometry,
-				backgrounds,
-				key: pathOf(element),
-				label: context.labelOf(element),
-			})
-		: backgrounds;
+	const shadow = showsShadow(style?.fill)
+		? undefined
+		: boxShadowOf(context, element, opacity);
+	if (shadow) {
+		context.framedShadows.set(element, scaledShadow(shadow, geometry.scale));
+	}
+
+	return [
+		...ringItems(context, element, opacity, geometry),
+		...(style
+			? boxItems(style, {
+					...geometry,
+					backgrounds,
+					key: pathOf(element),
+					label: context.labelOf(element),
+				})
+			: backgrounds),
+	];
+}
+
+/** An element's spread-only box-shadow layers, as Tailwind's ring utilities draw, as outlines around its border box, bottom first. */
+function ringItems(
+	context: ExtractContext,
+	element: Element,
+	opacity: number,
+	{ box, rotation, scale }: Geometry,
+) {
+	const radius = context.radiusOf(element) * scale;
+	return shadowLayersOf(context, element)
+		.filter(
+			({ shadow, spread }) =>
+				spread > 0 && !shadow.blur && !shadow.offsetX && !shadow.offsetY,
+		)
+		.toReversed()
+		.map(({ shadow, spread }, index): ItemInput => {
+			const width = spread * scale;
+			const { color, transparency } = fadedShadow(shadow, opacity);
+			return {
+				border: { color, transparency, width },
+				box: {
+					height: box.height + width,
+					width: box.width + width,
+					x: box.x - width / 2,
+					y: box.y - width / 2,
+				},
+				key: `${pathOf(element)}#ring-${String(index)}`,
+				kind: "box",
+				label: `ring of ${context.labelOf(element)}`,
+				radius: radius && radius + width / 2,
+				rotation,
+			};
+		});
 }
 
 /**

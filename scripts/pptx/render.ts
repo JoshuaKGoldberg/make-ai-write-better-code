@@ -81,7 +81,7 @@ interface VueRouter {
 	createMemoryHistory: () => unknown;
 	createRouter: (options: {
 		history: unknown;
-		routes: [];
+		routes: { component: Component; path: string }[];
 	}) => AppContext["router"];
 }
 
@@ -127,7 +127,7 @@ const popperStandIn = defineComponent({
 const routerLinkStandIn: FunctionalComponent<{ to: string }> = (
 	props,
 	{ slots },
-) => h("a", { href: props.to }, slots.default?.());
+) => h("a", { href: `#${props.to}` }, slots.default?.());
 
 const standIn = (file: string) =>
 	fileURLToPath(new URL(`./ssr/${file}`, import.meta.url));
@@ -290,6 +290,16 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 	await init;
 	const slideModule = (slideNumber: number) =>
 		`${deck.entry}__slidev_${String(slideNumber)}.md`;
+	const deckProblems: BuildPptxProblem[] =
+		process.env.NODE_ENV === "production"
+			? [
+					{
+						message:
+							"Couldn't check for components Vue can't resolve, because NODE_ENV is production.",
+						severity: "warning",
+					},
+				]
+			: [];
 
 	async function renderApp(
 		{ frontmatter, number: slideNumber, zoom }: RenderingSlide,
@@ -355,7 +365,11 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		});
 		app.directive("mark", markDirective(targets, problems));
 		app.directive("motion", {});
-		const router = createRouter({ history: createMemoryHistory(), routes: [] });
+		const router = createRouter({
+			history: createMemoryHistory(),
+			routes: [{ component: { render: () => null }, path: "/:path(.*)*" }],
+		});
+		await router.push(`/${String(slideNumber)}`);
 		for (const setup of setups) {
 			await app.runWithContext(() => setup({ app, router }));
 		}
@@ -406,7 +420,14 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 
 		const globalBottom = await renderApp(rendering, layers.GlobalBottom, 0);
 		const globalTop = await renderApp(rendering, layers.GlobalTop, 0);
-		problems.push(...globalBottom.problems, ...globalTop.problems);
+		deckProblems.push(
+			...[...globalBottom.problems, ...globalTop.problems]
+				.filter(
+					({ message }) =>
+						!deckProblems.some((problem) => problem.message === message),
+				)
+				.map(({ message, severity }) => ({ message, severity })),
+		);
 		return {
 			clicksStart,
 			globalBottom: globalBottom.html,
@@ -451,23 +472,13 @@ async function createRenderer(server: Server, deck: ResolvedSlidevOptions) {
 		return sheets;
 	}
 
-	const problems: BuildPptxProblem[] =
-		process.env.NODE_ENV === "production"
-			? [
-					{
-						message:
-							"Couldn't check for components Vue can't resolve, because NODE_ENV is production.",
-						severity: "warning",
-					},
-				]
-			: [];
 	return {
 		close: () => server.close(),
 		globalCss: async () => [
 			...(await collectCss([`${deck.clientRoot}/styles/index.ts`])),
 			themeVariables(config.themeConfig),
 		],
-		problems,
+		problems: deckProblems,
 		publicDir: server.config.publicDir,
 		renderSlide,
 		root: deck.userRoot,

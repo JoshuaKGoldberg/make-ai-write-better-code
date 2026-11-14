@@ -3,14 +3,16 @@ import type { ExtractContext, TextRuns } from "./context.ts";
 
 import { hasMarker, lineHeightOf } from "../cascade.ts";
 import { parseColor } from "../color.ts";
-import { availableSpanOf } from "./boxes.ts";
+import { availableSpanOf, paintItems } from "./boxes.ts";
 import { MIN_OPACITY, pathOf } from "./context.ts";
 import { geometryOf, insetBox } from "./geometry.ts";
 import {
 	alignOf,
 	isInvisible,
 	isRightToLeft,
+	NO_BREAK_SPACE,
 	runsToParagraph,
+	runStyle,
 } from "./runs.ts";
 import { inlinePills } from "./text.ts";
 
@@ -19,13 +21,30 @@ type ItemBlock =
 	| { entry: TextRuns; kind: "text"; y: number }
 	| { kind: "list"; list: Element; y: number };
 
-export const isListElement = (element: Element) =>
-	element.localName === "ul" || element.localName === "ol";
+/** Whether an element is a list that exports as list paragraphs: a ul or ol whose grid or flex layout, if any, doesn't put items side by side, as cards do. */
+export function isTextList(context: ExtractContext, element: Element) {
+	if (element.localName !== "ul" && element.localName !== "ol") {
+		return false;
+	}
+
+	if (!/\b(?:flex|grid)\b/.test(context.styleOf(element).display)) {
+		return true;
+	}
+
+	const boxes = itemsOf(element).flatMap((item) => {
+		const laidOut = context.boxOf(item);
+		return laidOut ? [geometryOf(laidOut).box] : [];
+	});
+	return boxes.every(
+		(box, index) =>
+			index === 0 || box.y >= boxes[index - 1].y + boxes[index - 1].height - 1,
+	);
+}
 
 /** Whether a list item's child draws apart from its list's text: a block with no text of its own, like a code block, an image's paragraph, or a component. */
 export const isListAside = (context: ExtractContext, child: Element) =>
 	child.parentElement?.localName === "li" &&
-	!isListElement(child) &&
+	!isTextList(context, child) &&
 	!context.isInline(child) &&
 	context.ownRunsOf(child) === undefined;
 
@@ -37,6 +56,17 @@ export function listItem(
 	const laidOut = context.boxOf(list);
 	if (!laidOut) {
 		return;
+	}
+
+	for (const item of itemsWithin(context, list)) {
+		const itemBox = context.boxOf(item);
+		const itemOpacity = context.opacityOf(item);
+		if (itemBox && itemOpacity >= MIN_OPACITY) {
+			context.push(
+				item,
+				...(paintItems(context, item, itemOpacity, geometryOf(itemBox)) ?? []),
+			);
+		}
 	}
 
 	const { box: listBox, scale } = geometryOf(laidOut);
@@ -59,8 +89,12 @@ export function listItem(
 		context.push(list, {
 			box,
 			bulletColor: paragraphs.some(({ bullet, runs }) => {
-				const color = runs.find((run) => !run.pad)?.color;
-				return bullet && color !== undefined && color !== markerColor;
+				const first = runs.at(0);
+				return (
+					bullet &&
+					first !== undefined &&
+					(first.pad || first.color !== markerColor)
+				);
 			})
 				? markerColor
 				: undefined,
@@ -96,18 +130,31 @@ export function ordinalsOf(list: Element, items: Element[]) {
 	});
 }
 
-/** A list's items in the columns they lay out in (CSS columns), each column's items with its left and right edges. */
+/** A list's items in the columns they lay out in (CSS columns, which the layout balances), each column's items with its left and right edges. */
 function columnsOf(context: ExtractContext, list: Element) {
+	const balanced = [list, list.parentElement].some(
+		(element) =>
+			element && Number(context.styleOf(element)["column-count"]) > 1,
+	);
 	const columns: { items: Element[]; left: number; right: number }[] = [];
+	let previousTop = -Infinity;
 	for (const item of itemsOf(list)) {
 		const laidOut = context.boxOf(item);
-		const box = laidOut && geometryOf(laidOut).box;
+		if (!laidOut) {
+			continue;
+		}
+
+		const { box } = geometryOf(laidOut);
 		const column = columns.at(-1);
-		if (column && (!box || Math.abs(box.x - column.left) < 1)) {
+		if (column && !(balanced && box.y < previousTop - 1)) {
 			column.items.push(item);
-		} else if (box) {
+			column.left = Math.min(column.left, box.x);
+			column.right = Math.max(column.right, box.x + box.width);
+		} else {
 			columns.push({ items: [item], left: box.x, right: box.x + box.width });
 		}
+
+		previousTop = box.y;
 	}
 
 	return columns;
@@ -115,6 +162,15 @@ function columnsOf(context: ExtractContext, list: Element) {
 
 const itemsOf = (list: Element) =>
 	[...list.children].filter((child) => child.localName === "li");
+
+/** A list's items and its nested lists' items, in document order. */
+const itemsWithin = (context: ExtractContext, list: Element): Element[] =>
+	itemsOf(list).flatMap((item) => [
+		item,
+		...[...item.children]
+			.filter((child) => isTextList(context, child))
+			.flatMap((child) => itemsWithin(context, child)),
+	]);
 
 function itemBlocks(context: ExtractContext, item: Element): ItemBlock[] {
 	const own = context.ownRunsOf(item);
@@ -129,7 +185,7 @@ function itemBlocks(context: ExtractContext, item: Element): ItemBlock[] {
 		...[...item.children].flatMap((child): ItemBlock[] => {
 			const box = context.boxOf(child);
 			const entry = context.ownRunsOf(child);
-			return isListElement(child) && box
+			return isTextList(context, child) && box
 				? [{ kind: "list", list: child, y: box.y }]
 				: entry && !context.drawsApart(child)
 					? [{ entry, kind: "text", y: entry.box.y }]
@@ -146,7 +202,7 @@ function listParagraphs(
 	opacity: number,
 	shown = itemsOf(list),
 ): { paragraph: ListParagraph; right: number; wrapped: boolean }[] {
-	const items = itemsOf(list);
+	const items = itemsOf(list).filter((item) => context.boxOf(item));
 	const numbers = ordinalsOf(list, items);
 	return items.flatMap((item, index) => {
 		if (!shown.includes(item)) {
@@ -180,6 +236,10 @@ function listParagraphs(
 				item,
 				shared.visible ? context.opacityOf : () => opacity,
 			);
+			if (!runs.length) {
+				return [];
+			}
+
 			return [
 				{
 					paragraph: {
@@ -210,7 +270,14 @@ function listParagraphs(
 					baselines: Number.isFinite(baseline) ? [baseline] : [],
 					bullet: hasMarker(style),
 					indent: 0,
-					runs: [],
+					runs: [
+						{
+							...runStyle(context, item, opacity),
+							pad: true,
+							text: NO_BREAK_SPACE,
+							transparency: 100,
+						},
+					],
 				},
 				right: -Infinity,
 				wrapped: false,

@@ -408,9 +408,9 @@ describe(writePptx, () => {
 		);
 	});
 
-	it("hides a marker when a list's marker is an empty string", async () => {
+	it("writes no marker or gutter when a list's marker is an empty string", async () => {
 		expect(await slideXml([numberedList([1], '""')])).toContain(
-			'<a:buSzPct val="100000"/><a:buChar char="&#x00A0;"/>',
+			'<a:pPr algn="l" marL="127" indent="0"><a:lnSpc><a:spcPct val="125000"/></a:lnSpc><a:buNone/></a:pPr>',
 		);
 	});
 
@@ -452,7 +452,7 @@ describe(writePptx, () => {
 
 		expect(xml?.match(/<a:bu\w.*?(?=<\/a:pPr>)/g)).toEqual([
 			'<a:buClr><a:srgbClr val="FF0000"/></a:buClr><a:buSzPct val="60000"/><a:buFont typeface="Arial"/><a:buChar char="&#x25CF;"/>',
-			'<a:buSzPct val="100000"/><a:buChar char="&#x00A0;"/>',
+			"<a:buNone/>",
 		]);
 	});
 
@@ -527,7 +527,7 @@ describe(writePptx, () => {
 				]),
 			]),
 		).toContain(
-			'<a:pPr algn="l" marL="228600" indent="-228600"><a:lnSpc><a:spcPct val="125000"/></a:lnSpc><a:buSzPct val="100000"/><a:buChar char="&#x00A0;"/></a:pPr><a:r><a:rPr lang="en-US" kern="100" sz="2400" dirty="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:rPr><a:t>More</a:t>',
+			'<a:pPr algn="l" marL="228600" indent="0"><a:lnSpc><a:spcPct val="125000"/></a:lnSpc><a:buNone/></a:pPr><a:r><a:rPr lang="en-US" kern="100" sz="2400" dirty="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:rPr><a:t>More</a:t>',
 		);
 	});
 
@@ -540,7 +540,7 @@ describe(writePptx, () => {
 				]),
 			]),
 		).toContain(
-			'<a:buChar char="&#x00A0;"/></a:pPr><a:r><a:rPr lang="en-US" kern="100" sz="2400" dirty="0"><a:solidFill><a:schemeClr val="tx1"><a:alpha val="0"/></a:schemeClr></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:rPr><a:t>Hidden</a:t>',
+			'<a:buNone/></a:pPr><a:r><a:rPr lang="en-US" kern="100" sz="2400" dirty="0"><a:solidFill><a:schemeClr val="tx1"><a:alpha val="0"/></a:schemeClr></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:rPr><a:t>Hidden</a:t>',
 		);
 	});
 
