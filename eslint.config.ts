@@ -50,6 +50,8 @@ export default defineConfig(
 			},
 		},
 		rules: {
+			"@eslint-community/eslint-comments/require-description": "error",
+
 			// Stylistic concerns that don't interfere with Prettier
 			"logical-assignment-operators": [
 				"error",
